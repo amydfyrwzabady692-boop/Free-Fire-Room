@@ -1,0 +1,46 @@
+# Secrets
+.env
+.env.local
+.env.production
+*.pem
+*.key
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+.next/
+frontend/.next/
+frontend/out/
+frontend/coverage/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Logs / data
+*.log
+logs/
+backups/
+media/uploads/
+tmp/
+
+# Docker volumes (local)
+pgdata/
+redisdata/
