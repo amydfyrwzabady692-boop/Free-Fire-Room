@@ -102,7 +102,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     env_file: .env
-    command: ["celery", "-A", "app.workers.celery_app:celery_app", "beat", "-l", "info"]
+    command: ["celery", "-A", "app.workers.celery_app:celery_app", "beat", "-l", "info", "--schedule=/tmp/celerybeat-schedule"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -133,7 +133,6 @@ services:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
       - "80:80"
-      - "8080:80"
     depends_on:
       - api
       - frontend
