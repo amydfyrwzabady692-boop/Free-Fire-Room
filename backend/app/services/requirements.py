@@ -10,8 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app.core.enums import BanScope, RequirementStatus, RequirementType
-from app.models.channel import Channel, EventRequiredChannel, GlobalRequiredChannel
-from app.models.event import Event, EventRequirement
+from app.models.channel import Channel, GlobalRequiredChannel
+from app.models.event import Event, EventRequiredChannel, EventRequirement
 from app.models.referral import Referral
 from app.models.registration import Registration
 from app.models.user import User, UserProfile

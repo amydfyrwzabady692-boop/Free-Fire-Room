@@ -13,8 +13,8 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.enums import DeliveryStatus, EventStatus, JobStatus, RegistrationStatus
 from app.core.logging import get_logger
 from app.core.security import decrypt_secret, generate_unguessable_token
-from app.models.channel import Channel, EventRequiredChannel, GlobalRequiredChannel
-from app.models.event import Event, RoomCredential
+from app.models.channel import Channel, GlobalRequiredChannel
+from app.models.event import Event, EventRequiredChannel, RoomCredential
 from app.models.jobs import Delivery, ScheduledJob
 from app.models.registration import Registration
 from app.models.user import User

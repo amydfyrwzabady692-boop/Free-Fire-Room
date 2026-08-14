@@ -11,8 +11,8 @@ from app.core.enums import EventStatus, EventVisibility, GameMode, JobType, Requ
 from app.core.errors import ForbiddenError, NotFoundError, ValidationAppError
 from app.core.security import encrypt_secret, generate_unguessable_token
 from app.core.time import as_utc
-from app.models.channel import Channel, EventRequiredChannel
-from app.models.event import Event, EventPrize, EventRequirement, RoomCredential
+from app.models.channel import Channel
+from app.models.event import Event, EventPrize, EventRequiredChannel, EventRequirement, RoomCredential
 from app.models.jobs import ScheduledJob
 from app.models.organizer import Organizer
 from app.services.audit import write_audit
