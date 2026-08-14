@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 from aiogram import F, Router
 from aiogram.filters import CommandObject, CommandStart
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,23 +15,44 @@ from app.bot.keyboards.common import (
     checklist_kb,
     event_detail_kb,
     event_list_kb,
-    membership_kb,
-    tos_kb,
+    help_back_kb,
+    help_kb,
+    report_reasons_kb,
+    review_comment_kb,
+    review_prize_kb,
+    review_stars_kb,
 )
+from app.bot.onboarding import ensure_onboarding
+from app.bot.states.groups import ReportSG, ReviewSG
 from app.core.config import get_settings
-from app.core.enums import EventStatus, EventVisibility, RegistrationStatus
+from app.core.enums import EventStatus, EventVisibility, RegistrationStatus, RequirementType
+from app.core.errors import AppError
 from app.core.rate_limit import hit_rate_limit
 from app.core.time import format_local
 from app.locales import fa as T
-from app.models.channel import Channel
 from app.models.event import Event
+from app.models.organizer import Organizer
 from app.models.registration import Registration
 from app.models.user import User
-from app.services.channels import active_global_channels
-from app.services.referrals import apply_start_referral, get_or_create_link, validate_pending_referrals
+from app.services.referrals import apply_start_referral, get_or_create_link
 from app.services.registration import register_user
+from app.services.reports import (
+    create_player_report,
+    event_missed_credentials,
+    format_prize_vote_alert,
+    format_report_alert,
+    notify_active_admins,
+)
 from app.services.requirements import evaluate_requirements
-from app.services.telegram_ops import get_membership
+from app.services.reviews import (
+    can_review,
+    create_review,
+    format_rating_line,
+    format_review_item,
+    list_event_reviews,
+    review_summary_for_event,
+    review_summary_for_organizer,
+)
 
 router = Router(name="player")
 
@@ -48,38 +70,7 @@ def _parse_start(payload: str | None) -> tuple[str, str | None]:
 
 
 async def _ensure_onboarding(message: Message, user: User, db: AsyncSession) -> bool:
-    if not user.tos_accepted_at:
-        await message.answer(T.TOS, reply_markup=tos_kb())
-        return False
-    missing = await _missing_global_memberships(db, message.bot, user)
-    if missing:
-        buttons = []
-        for ch, _ in missing:
-            url = f"https://t.me/{ch.username}" if ch.username else ch.invite_link
-            buttons.append((f"عضویت در {ch.title}", url or "https://t.me"))
-        await message.answer(
-            "برای استفاده از ربات باید در کانال‌های زیر عضو شوید، سپس «بررسی مجدد عضویت» را بزنید.",
-            reply_markup=membership_kb(buttons),
-        )
-        return False
-    if not user.onboarding_completed_at:
-        user.onboarding_completed_at = datetime.now(UTC)
-        await validate_pending_referrals(db, user)
-        await db.flush()
-    return True
-
-
-async def _missing_global_memberships(db: AsyncSession, bot, user: User):
-    rows = await active_global_channels(db, scope="player")
-    missing = []
-    for row in rows:
-        ch = await db.get(Channel, row.channel_id)
-        if not ch or not ch.bot_is_admin:
-            continue
-        result = await get_membership(bot, ch.telegram_chat_id, user.telegram_id)
-        if not result.ok:
-            missing.append((ch, result))
-    return missing
+    return await ensure_onboarding(message, user, db)
 
 
 @router.message(CommandStart())
@@ -96,8 +87,16 @@ async def cmd_start(message: Message, command: CommandObject, db: AsyncSession, 
         return
     extra = ""
     if kind == "event" and token:
-        extra = "\nاز لینک اختصاصی یک کاستوم وارد شدید."
-    await message.answer("منوی اصلی آماده است." + extra, reply_markup=await menu_for(db, db_user))
+        extra = "\nاز لینک یک کاستوم وارد شدید. کانال‌های جوین اجباری همان کاستوم را عضو شوید تا سر ساعت رمز برایتان بیاید."
+    await message.answer(
+        "منوی اصلی آماده است.\n"
+        "• برای ورود باید کانال‌های مالک ربات را جوین باشید\n"
+        "• «کاستوم‌های جایزه‌دار» را ببینید یا خودتان با «ثبت کاستوم» بگذارید\n"
+        "• پنل برگزارکننده برای کسی است که کاستوم می‌گذارد؛ پنل مالک ربات فقط برای صاحب ربات است\n"
+        "• جزئیات کامل در «راهنما و قوانین»"
+        + extra,
+        reply_markup=await menu_for(db, db_user),
+    )
     if kind == "event" and token:
         await _show_event(message, db, db_user, token)
 
@@ -127,71 +126,146 @@ async def membership_recheck(cb: CallbackQuery, db: AsyncSession, db_user: User)
     await cb.answer()
 
 
-async def _list_events(db: AsyncSession, *, today: bool) -> list[Event]:
+async def _list_events(db: AsyncSession, *, mode: str = "upcoming") -> list[Event]:
     now = datetime.now(UTC)
+    hours = get_settings().past_events_hours
     stmt = (
         select(Event)
         .where(
             Event.deleted_at.is_(None),
             Event.visibility == EventVisibility.PUBLIC,
-            Event.status.in_([EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED]),
+            Event.status.in_(
+                [EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED, EventStatus.FINISHED]
+            ),
             Event.deep_link_active.is_(True),
         )
         .options(selectinload(Event.organizer), selectinload(Event.channel))
-        .order_by(Event.starts_at.asc())
         .limit(20)
     )
-    if today:
+    if mode == "past":
+        stmt = stmt.where(Event.starts_at < now, Event.starts_at >= now - timedelta(hours=hours)).order_by(
+            Event.starts_at.desc()
+        )
+    elif mode == "today":
         end = now.replace(hour=23, minute=59, second=59)
-        stmt = stmt.where(Event.starts_at >= now.replace(hour=0, minute=0, second=0), Event.starts_at <= end)
+        stmt = stmt.where(
+            Event.starts_at >= now.replace(hour=0, minute=0, second=0), Event.starts_at <= end
+        ).order_by(Event.starts_at.asc())
     else:
-        stmt = stmt.where(Event.starts_at >= now)
+        stmt = stmt.where(Event.starts_at >= now).order_by(Event.starts_at.asc())
     return list((await db.scalars(stmt)).all())
 
 
-def _event_card(e: Event) -> str:
+def _join_urls(items) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for item in items or []:
+        url = getattr(item, "url", None)
+        if not url:
+            continue
+        label = (item.label or "کانال").replace("عضویت در ", "")
+        out.append((label, url))
+    return out
+
+
+def _list_title(e: Event) -> str:
+    stamp = format_local(e.starts_at, e.timezone)
+    if e.starts_at < datetime.now(UTC):
+        return f"گذشته | {stamp} | {e.title}"
+    return f"{stamp} | {e.title}"
+
+
+async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> str:
     org = e.organizer.display_name if e.organizer else "برگزارکننده"
-    verified = " ✅" if e.organizer and e.organizer.verified_badge else ""
     ch = e.channel.title if e.channel else "-"
-    left = max(0, int((e.starts_at - datetime.now(UTC)).total_seconds() // 60))
+    now = datetime.now(UTC)
+    left = max(0, int((e.starts_at - now).total_seconds() // 60))
+    grace = get_settings().credentials_grace_minutes
+    extra = (
+        "سر همین ساعت برگزارکننده حداکثر ۵ دقیقه فرصت دارد آیدی و رمز را داخل ربات بفرستد؛ "
+        "فقط اگر کانال‌های همین کاستوم را جوین کرده باشید برایتان ارسال می‌شود."
+    )
+    if missed:
+        extra = (
+            "⚠️ برگزارکننده در مهلت ۵ دقیقه‌ای آیدی و رمز را نفرستاد.\n"
+            "اگر ثبت‌نام کرده بودید، گزارش بدهید و نظر/امتیاز ثبت کنید."
+        )
+    elif e.starts_at <= now:
+        extra = (
+            f"ساعت کاستوم رسیده. برگزارکننده تا {grace} دقیقه بعد از ساعت شروع فرصت ارسال رمز را دارد."
+        )
+    org_line = format_rating_line(await review_summary_for_organizer(db, e.organizer_id), prefix="سابقه برگزارکننده")
+    ev_line = format_rating_line(await review_summary_for_event(db, e.id), prefix="امتیاز این کاستوم")
     return (
         f"<b>{e.title}</b>\n"
-        f"برگزارکننده: {org}{verified}\n"
+        f"برگزارکننده: {org}\n"
+        f"{org_line}\n"
+        f"{ev_line}\n"
         f"کانال: {ch}\n"
-        f"زمان: {format_local(e.starts_at, e.timezone)}\n"
-        f"مانده تا شروع: {left} دقیقه\n"
-        f"حالت: {e.game_mode} | سرور: {e.region}\n"
-        f"ظرفیت: {e.confirmed_count}/{e.capacity}\n"
-        f"جایزه: {e.prize_summary or '—'}\n"
-        f"وضعیت: {e.status}"
+        f"ساعت کاستوم: {format_local(e.starts_at, e.timezone)}\n"
+        f"مانده: {left} دقیقه\n\n"
+        f"{extra}"
     )
 
 
-@router.message(F.text == "کاستوم‌های آینده")
+@router.message(F.text.in_({"کاستوم‌های آینده", "کاستوم‌های جایزه‌دار", "اطلاع‌رسانی"}))
 @router.callback_query(F.data == "list:upcoming")
 async def upcoming(event: Message | CallbackQuery, db: AsyncSession, db_user: User):
     msg = event.message if isinstance(event, CallbackQuery) else event
     if not await _ensure_onboarding(msg, db_user, db):
         return
-    rows = await _list_events(db, today=False)
+    rows = await _list_events(db, mode="upcoming")
+    hours = get_settings().past_events_hours
     if not rows:
-        await msg.answer("کاستوم آینده‌ای یافت نشد.")
+        await msg.answer(
+            "الان کاستوم پیش‌رویی نیست. می‌توانید خودتان با «ثبت کاستوم» بگذارید، "
+            f"یا کاستوم‌های {hours} ساعت گذشته را ببینید.",
+            reply_markup=event_list_kb([], mode="upcoming"),
+        )
+        if isinstance(event, CallbackQuery):
+            await event.answer()
         return
-    kb = event_list_kb([(e.public_token, e.title) for e in rows])
-    await msg.answer("کاستوم‌های آینده:", reply_markup=kb)
+    kb = event_list_kb([(e.public_token, _list_title(e)) for e in rows], mode="upcoming")
+    await msg.answer(
+        "کاستوم‌های جایزه‌دار پیش‌رو:\n"
+        "وارد مورد شوید، کانال‌ها را جوین کنید و «عضو شدم» را بزنید.\n"
+        f"کاستوم‌های {hours} ساعت گذشته را هم از دکمه پایین ببینید (نظرات و امتیاز برگزارکننده).",
+        reply_markup=kb,
+    )
     if isinstance(event, CallbackQuery):
         await event.answer()
+
+
+@router.callback_query(F.data == "list:past")
+async def past_customs(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    hours = get_settings().past_events_hours
+    rows = await _list_events(db, mode="past")
+    if not rows:
+        await cb.message.answer(
+            f"در {hours} ساعت گذشته کاستومی نبود.",
+            reply_markup=event_list_kb([], mode="past"),
+        )
+        await cb.answer()
+        return
+    await cb.message.answer(
+        f"کاستوم‌های {hours} ساعت گذشته:\n"
+        "ببینید چه کسی گذاشته و نظرات/امتیاز بازیکن‌ها چیست.",
+        reply_markup=event_list_kb([(e.public_token, _list_title(e)) for e in rows], mode="past"),
+    )
+    await cb.answer()
 
 
 @router.message(F.text == "کاستوم‌های امروز")
 async def today(message: Message, db: AsyncSession, db_user: User):
     if not await _ensure_onboarding(message, db_user, db):
         return
-    rows = await _list_events(db, today=True)
+    rows = await _list_events(db, mode="today")
     if not rows:
         await message.answer("برای امروز کاستومی نیست.")
         return
-    await message.answer("کاستوم‌های امروز:", reply_markup=event_list_kb([(e.public_token, e.title) for e in rows]))
+    await message.answer(
+        "کاستوم‌های امروز:",
+        reply_markup=event_list_kb([(e.public_token, _list_title(e)) for e in rows]),
+    )
 
 
 @router.callback_query(F.data.startswith("ev:"))
@@ -210,7 +284,39 @@ async def _show_event(message: Message, db: AsyncSession, user: User, token: str
     if not e or not e.deep_link_active:
         await message.answer("این کاستوم در دسترس نیست یا لغو شده است.")
         return
-    await message.answer(_event_card(e) + "\n\n" + T.DISCLAIMER, reply_markup=event_detail_kb(token))
+    reg = await db.scalar(select(Registration).where(Registration.event_id == e.id, Registration.user_id == user.id))
+    checklist = await evaluate_requirements(db, user=user, event=e, bot=message.bot, registration=reg)
+    channel_items = [
+        item
+        for item in checklist.items
+        if item.requirement_type
+        in {RequirementType.CHANNEL_MEMBERSHIP, RequirementType.GLOBAL_CHANNEL_MEMBERSHIP}
+    ]
+    missed = await event_missed_credentials(db, e)
+    started = datetime.now(UTC) >= e.starts_at
+    allowed, _ = await can_review(db, user, e)
+    summary = await review_summary_for_event(db, e.id)
+    text = await _event_card(db, e, missed=missed)
+    text += "\n\nکانال‌های جوین اجباری:\n"
+    for item in channel_items:
+        mark = "✅" if item.status == "done" else "❌"
+        text += f"{mark} {item.label}\n"
+    if missed:
+        text += "\nرمز ارسال نشد. گزارش بدهید و اگر ثبت‌نام کرده بودید نظر/امتیاز بگذارید."
+    elif not started:
+        text += "\nبعد از جوین، «عضو شدم» را بزنید. سر ساعت برگزارکننده رمز را در ربات می‌فرستد و فقط به عضو‌ها می‌رسد."
+    else:
+        text += "\nاگر رمز نیامد یا جایزه نداد: با «گزارش به مالک ربات» فقط به مالک خبر بدهید. نظر و امتیاز جداست و عمومی است."
+    await message.answer(
+        text,
+        reply_markup=event_detail_kb(
+            token,
+            join_urls=_join_urls(channel_items),
+            can_join=not started and not missed,
+            can_review=allowed,
+            show_reviews=summary["count"] > 0 or started,
+        ),
+    )
 
 
 @router.callback_query(F.data.startswith("join:"))
@@ -221,23 +327,35 @@ async def join_event(cb: CallbackQuery, db: AsyncSession, db_user: User):
     if not e:
         await cb.answer("یافت نشد", show_alert=True)
         return
-    result = await register_user(db, user=db_user, event=e, bot=cb.bot, source="bot")
+    try:
+        result = await register_user(db, user=db_user, event=e, bot=cb.bot, source="bot", accept_rules=True)
+    except AppError as exc:
+        if exc.code == "already_registered":
+            await cb.message.answer(
+                "قبلاً ثبت‌نام شده‌اید. سر ساعت اگر هنوز در کانال‌های این کاستوم عضو باشید، رمز برایتان می‌آید."
+            )
+        else:
+            await cb.message.answer(exc.message)
+        await cb.answer()
+        return
     if result.registration.status == RegistrationStatus.CONFIRMED:
         await cb.message.answer(
-            f"ثبت‌نام شما قطعی شد.\nزمان ارسال مشخصات اتاق: {format_local(e.credentials_send_at, e.timezone)}\n"
-            "اگر قبل از ارسال از کانال‌های اجباری خارج شوید، واجد شرایط نخواهید بود."
+            f"ثبت‌نام شد. سر ساعت {format_local(e.credentials_send_at, e.timezone)} "
+            "برگزارکننده آیدی و رمز را در ربات می‌فرستد و اگر هنوز عضو کانال‌ها باشید برایتان می‌آید."
         )
     elif result.waitlisted:
         await cb.message.answer("ظرفیت پر است. شما در لیست انتظار قرار گرفتید.")
     else:
-        text = "شرایط هنوز کامل نیست:\n"
+        text = "هنوز در این کانال‌ها عضو نیستید:\n"
         for item in result.checklist or []:
+            if item.requirement_type not in {
+                RequirementType.CHANNEL_MEMBERSHIP,
+                RequirementType.GLOBAL_CHANNEL_MEMBERSHIP,
+            }:
+                continue
             mark = "✅" if item.status == "done" else "❌"
-            text += f"{mark} {item.label}"
-            if item.detail:
-                text += f" — {item.detail}"
-            text += "\n"
-        await cb.message.answer(text, reply_markup=checklist_kb(token))
+            text += f"{mark} {item.label}\n"
+        await cb.message.answer(text, reply_markup=checklist_kb(token, join_urls=_join_urls(result.checklist)))
     await cb.answer()
 
 
@@ -253,13 +371,21 @@ async def recheck_req(cb: CallbackQuery, db: AsyncSession, db_user: User):
         select(Registration).where(Registration.event_id == e.id, Registration.user_id == db_user.id)
     )
     checklist = await evaluate_requirements(db, user=db_user, event=e, bot=cb.bot, registration=reg)
-    text = "وضعیت شرایط:\n"
+    text = "وضعیت عضویت:\n"
     for item in checklist.items:
-        mark = "✅" if item.status == "done" else "⏳" if item.status == "pending_review" else "❌"
+        if item.requirement_type not in {
+            RequirementType.CHANNEL_MEMBERSHIP,
+            RequirementType.GLOBAL_CHANNEL_MEMBERSHIP,
+        }:
+            continue
+        mark = "✅" if item.status == "done" else "❌"
         text += f"{mark} {item.label}\n"
-    await cb.message.answer(text, reply_markup=checklist_kb(token))
+    await cb.message.answer(text, reply_markup=checklist_kb(token, join_urls=_join_urls(checklist.items)))
     if checklist.all_ok:
-        await register_user(db, user=db_user, event=e, bot=cb.bot, source="recheck")
+        try:
+            await register_user(db, user=db_user, event=e, bot=cb.bot, source="recheck", accept_rules=True)
+        except AppError:
+            pass
     await cb.answer()
 
 
@@ -318,10 +444,14 @@ async def my_regs(message: Message, db: AsyncSession, db_user: User):
     if not rows:
         await message.answer("ثبت‌نامی ندارید.")
         return
-    text = "ثبت‌نام‌های شما:\n"
+    items = []
+    text = "ثبت‌نام‌های شما — برای گزارش، کاستوم را باز کنید:\n"
     for r in rows:
+        if not r.event:
+            continue
         text += f"• {r.event.title} — {r.status}\n"
-    await message.answer(text)
+        items.append((r.event.public_token, _list_title(r.event)))
+    await message.answer(text, reply_markup=event_list_kb(items) if items else None)
 
 
 @router.message(F.text == "نتایج و تاریخچه")
@@ -340,9 +470,30 @@ async def history(message: Message, db: AsyncSession, db_user: User):
     await message.answer("\n".join(f"• {e.title} ({e.status})" for e in rows))
 
 
-@router.message(F.text == "راهنما و قوانین")
+@router.message(F.text.in_({"راهنما و قوانین", "راهنما"}))
 async def help_msg(message: Message):
-    await message.answer(T.HELP + "\n\n" + T.DISCLAIMER)
+    await message.answer(T.HELP + "\n\n" + T.DISCLAIMER, reply_markup=help_kb())
+
+
+@router.callback_query(F.data.startswith("help:"))
+async def help_section(cb: CallbackQuery):
+    key = cb.data.split(":", 1)[1]
+    texts = {
+        "home": T.HELP,
+        "about": T.HELP_ABOUT,
+        "play": T.HELP_PLAY,
+        "host": T.HELP_HOST,
+        "rules": T.HELP_RULES,
+        "panels": T.HELP_PANELS,
+        "faq": T.HELP_FAQ,
+    }
+    body = texts.get(key)
+    if not body:
+        await cb.answer()
+        return
+    kb = help_kb() if key == "home" else help_back_kb()
+    await cb.message.answer(body + "\n\n" + T.DISCLAIMER, reply_markup=kb)
+    await cb.answer()
 
 
 @router.message(F.text == "پشتیبانی")
@@ -399,24 +550,246 @@ async def reveal(cb: CallbackQuery):
     )
 
 
-@router.callback_query(F.data.startswith("rep:"))
+@router.callback_query(F.data.startswith("rep:") & ~F.data.startswith("repr:"))
 async def report_event(cb: CallbackQuery, db: AsyncSession, db_user: User):
-    from app.models.report import Report
-
     token = cb.data.split(":", 1)[1]
-    e = await db.scalar(select(Event).where(Event.public_token == token))
-    db.add(
-        Report(
-            reporter_id=db_user.id,
-            event_id=e.id if e else None,
-            organizer_id=e.organizer_id if e else None,
-            reason="other",
-            body="گزارش از ربات — جزئیات را در پیام بعدی بفرستید یا از پنل پیگیری کنید.",
-            status="new",
-        )
+    e = await db.scalar(select(Event).where(Event.public_token == token).options(selectinload(Event.organizer)))
+    if not e:
+        await cb.answer("کاستوم یافت نشد", show_alert=True)
+        return
+    org = e.organizer
+    if org and org.user_id == db_user.id:
+        await cb.answer("نمی‌توانید کاستوم خودتان را گزارش کنید.", show_alert=True)
+        return
+    await cb.message.answer(
+        f"گزارش کاستوم «{e.title}»\nدلیل را انتخاب کنید:",
+        reply_markup=report_reasons_kb(token),
     )
-    await cb.message.answer("گزارش ثبت شد. اگر مدرک دارید برای پشتیبانی ارسال کنید.")
     await cb.answer()
+
+
+@router.callback_query(F.data.startswith("repr:"))
+async def report_reason_chosen(cb: CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
+    rest = cb.data.split(":", 2)
+    if len(rest) < 3:
+        await cb.answer("نامعتبر", show_alert=True)
+        return
+    token, reason = rest[1], rest[2]
+    e = await db.scalar(select(Event).where(Event.public_token == token).options(selectinload(Event.organizer)))
+    if not e:
+        await cb.answer("کاستوم یافت نشد", show_alert=True)
+        return
+    if reason == "other":
+        await state.set_state(ReportSG.body)
+        await state.update_data(event_token=token, reason=reason)
+        await cb.message.answer("توضیح کوتاه بفرستید: چه اتفاقی افتاد؟")
+        await cb.answer()
+        return
+    report, err = await create_player_report(db, reporter=db_user, event=e, reason=reason)
+    if err:
+        await cb.answer(err, show_alert=True)
+        return
+    await _notify_report(cb.bot, db, report, e, db_user)
+    await cb.message.answer("گزارش برای مالک ربات ثبت شد.")
+    await cb.answer()
+
+
+@router.message(ReportSG.body)
+async def report_other_body(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
+    body = (message.text or "").strip()
+    if len(body) < 5:
+        await message.answer("کمی بیشتر توضیح بدهید (حداقل چند کلمه).")
+        return
+    data = await state.get_data()
+    token = data.get("event_token")
+    reason = data.get("reason") or "other"
+    e = await db.scalar(select(Event).where(Event.public_token == token).options(selectinload(Event.organizer)))
+    await state.clear()
+    if not e:
+        await message.answer("کاستوم یافت نشد.")
+        return
+    report, err = await create_player_report(db, reporter=db_user, event=e, reason=reason, body=body)
+    if err:
+        await message.answer(err)
+        return
+    await _notify_report(message.bot, db, report, e, db_user)
+    await message.answer("گزارش برای مالک ربات ثبت شد.")
+
+
+async def _notify_report(bot, db: AsyncSession, report, event: Event, reporter: User) -> None:
+    org = event.organizer or await db.get(Organizer, event.organizer_id)
+    org_user = await db.get(User, org.user_id) if org else None
+    await notify_active_admins(
+        bot,
+        db,
+        format_report_alert(
+            event=event,
+            reporter=reporter,
+            reason=report.reason,
+            body=report.body,
+            organizer_user=org_user,
+        ),
+    )
+
+
+async def _notify_prize_vote(
+    bot, db: AsyncSession, reporter: User, event: Event, prize: str, extra: str | None
+) -> None:
+    if prize not in {"yes", "no"}:
+        return
+    org = event.organizer or await db.get(Organizer, event.organizer_id)
+    org_user = await db.get(User, org.user_id) if org else None
+    paid = prize == "yes"
+    if not paid:
+        await create_player_report(
+            db,
+            reporter=reporter,
+            event=event,
+            reason="unpaid_prize",
+            body=(extra or "").strip() or "از نظر بازیکن: جایزه را نداد.",
+        )
+    await notify_active_admins(
+        bot,
+        db,
+        format_prize_vote_alert(
+            event=event,
+            reporter=reporter,
+            organizer_user=org_user,
+            paid=paid,
+            extra=extra,
+        ),
+    )
+
+
+async def _event_by_token(db: AsyncSession, token: str | None) -> Event | None:
+    if not token:
+        return None
+    return await db.scalar(
+        select(Event).where(Event.public_token == token).options(selectinload(Event.organizer))
+    )
+
+
+@router.callback_query(F.data.startswith("rvl:"))
+async def list_reviews(cb: CallbackQuery, db: AsyncSession):
+    token = cb.data.split(":", 1)[1]
+    e = await _event_by_token(db, token)
+    if not e:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    rows = await list_event_reviews(db, e.id)
+    summary = await review_summary_for_event(db, e.id)
+    org_sum = await review_summary_for_organizer(db, e.organizer_id)
+    text = (
+        f"نظرات کاستوم «{e.title}»\n"
+        f"{format_rating_line(summary, prefix='این کاستوم')}\n"
+        f"{format_rating_line(org_sum, prefix='سابقه برگزارکننده')}\n"
+    )
+    if not rows:
+        text += "\nهنوز نظری نیست. اگر در این کاستوم بودید، «نظر و امتیاز» را بزنید."
+    else:
+        text += "\n" + "\n\n".join(format_review_item(r) for r in rows)
+    await cb.message.answer(text)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("rev:"))
+async def start_review(cb: CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
+    token = cb.data.split(":", 1)[1]
+    e = await _event_by_token(db, token)
+    if not e:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    ok, err = await can_review(db, db_user, e)
+    if not ok:
+        await cb.answer(err or "نمی‌توانید نظر بدهید.", show_alert=True)
+        return
+    await state.update_data(review_token=token)
+    await cb.message.answer(
+        f"به کاستوم «{e.title}» از ۱ تا ۵ ستاره بدهید.",
+        reply_markup=review_stars_kb(token),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("rvs:"))
+async def review_star(cb: CallbackQuery, state: FSMContext):
+    rest = cb.data.split(":")
+    if len(rest) < 3:
+        await cb.answer("نامعتبر", show_alert=True)
+        return
+    token, raw = rest[1], rest[2]
+    try:
+        rating = int(raw)
+    except ValueError:
+        await cb.answer("نامعتبر", show_alert=True)
+        return
+    if rating not in {1, 2, 3, 4, 5}:
+        await cb.answer("امتیاز باید ۱ تا ۵ باشد.", show_alert=True)
+        return
+    await state.update_data(review_token=token, review_rating=rating)
+    await cb.message.answer(
+        "جایزه این کاستوم را به برنده دادند؟\n"
+        "این جواب فقط برای مالک ربات می‌رود و بقیه بازیکن‌ها آن را نمی‌بینند.",
+        reply_markup=review_prize_kb(token),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("rvp:"))
+async def review_prize(cb: CallbackQuery, state: FSMContext):
+    rest = cb.data.split(":")
+    if len(rest) < 3:
+        await cb.answer("نامعتبر", show_alert=True)
+        return
+    token, vote = rest[1], rest[2]
+    await state.set_state(ReviewSG.comment)
+    await state.update_data(review_token=token, review_prize=vote)
+    await cb.message.answer(
+        "اگر توضیحی برای نظر عمومی دارید در یک پیام بفرستید (امتیاز و متن برای همه دیده می‌شود).\n"
+        "وضعیت جایزه را بقیه نمی‌بینند؛ همان فقط به مالک ربات می‌رود.\n"
+        "اگر توضیح نمی‌خواهید، دکمه زیر را بزنید.",
+        reply_markup=review_comment_kb(token),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("rvn:"))
+async def review_skip_comment(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_user: User):
+    data = await state.get_data()
+    token = cb.data.split(":", 1)[1]
+    await _finish_review(cb.message, state, db, db_user, token, data, comment=None)
+    await cb.answer()
+
+
+@router.message(ReviewSG.comment)
+async def review_comment(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
+    data = await state.get_data()
+    token = data.get("review_token")
+    await _finish_review(message, state, db, db_user, token, data, comment=message.text)
+
+
+async def _finish_review(message, state: FSMContext, db: AsyncSession, db_user: User, token, data: dict, comment: str | None):
+    e = await _event_by_token(db, token)
+    rating = int(data.get("review_rating") or 0)
+    prize = data.get("review_prize") or "unknown"
+    await state.clear()
+    if not e:
+        await message.answer("کاستوم یافت نشد.")
+        return
+    _row, err = await create_review(
+        db, user=db_user, event=e, rating=rating, prize_paid=prize, comment=comment
+    )
+    if err:
+        await message.answer(err)
+        return
+    await _notify_prize_vote(message.bot, db, db_user, e, prize, comment)
+    if prize in {"yes", "no"}:
+        await message.answer(
+            "نظر و امتیاز شما ثبت شد و برای بقیه دیده می‌شود.\n"
+            "وضعیت جایزه فقط برای مالک ربات ارسال شد."
+        )
+    else:
+        await message.answer("نظر و امتیاز شما ثبت شد و برای بقیه دیده می‌شود.")
 
 
 @router.callback_query(F.data == "menu:home")

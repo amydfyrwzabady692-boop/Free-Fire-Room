@@ -108,6 +108,7 @@ class DeliveryStatus(StrEnum):
 
 
 class ReportReason(StrEnum):
+    NO_CREDENTIALS = "no_credentials"
     FAKE_PRIZE = "fake_prize"
     FAKE_ORGANIZER = "fake_organizer"
     WRONG_ROOM = "wrong_room"
@@ -162,7 +163,14 @@ class TrustEventType(StrEnum):
     CREDENTIAL_ACCURACY = "credential_accuracy"
     PRIZE_PROOF = "prize_proof"
     ACTIVITY_DURATION = "activity_duration"
+    PLAYER_REVIEW = "player_review"
     CHANNEL_VERIFIED = "channel_verified"
+
+
+class PrizePaidVote(StrEnum):
+    YES = "yes"
+    NO = "no"
+    UNKNOWN = "unknown"
 
 
 class DeepLinkKind(StrEnum):
@@ -170,3 +178,9 @@ class DeepLinkKind(StrEnum):
     REFERRAL = "ref"
     ORGANIZER = "org"
     START = "start"
+
+
+class AnnouncementStatus(StrEnum):
+    PUBLISHED = "published"
+    HIDDEN = "hidden"
+    DELETED = "deleted"

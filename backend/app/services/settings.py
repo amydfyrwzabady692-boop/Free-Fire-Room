@@ -10,7 +10,9 @@ from app.core.config import get_settings
 from app.models.admin import SystemSetting
 
 DEFAULTS: dict[str, Any] = {
-    "event_approval_required": True,
+    "event_approval_required": False,
+    "auto_approve_organizers": True,
+    "max_announcements_per_day": 5,
     "max_events_per_organizer": 10,
     "max_required_channels_per_event": 5,
     "max_required_referrals": 20,
@@ -63,6 +65,7 @@ async def all_settings(db: AsyncSession) -> dict[str, Any]:
     data = dict(DEFAULTS)
     env = get_settings()
     data["event_approval_required"] = env.event_approval_required
+    data["auto_approve_organizers"] = env.auto_approve_organizers
     data["max_events_per_organizer"] = env.max_events_per_organizer
     data["max_required_channels_per_event"] = env.max_required_channels_per_event
     data["max_required_referrals"] = env.max_required_referrals

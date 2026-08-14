@@ -9,19 +9,26 @@ class OnboardingSG(StatesGroup):
 
 class EventWizardSG(StatesGroup):
     title = State()
-    description = State()
-    banner = State()
     starts_at = State()
-    registration_ends_at = State()
-    credentials_send_at = State()
     channel = State()
-    region_mode = State()
+    extra_channels = State()
     capacity = State()
     prizes = State()
-    rules = State()
     requirements = State()
     room = State()
-    visibility = State()
+    preview = State()
+
+
+class CredsWaitSG(StatesGroup):
+    waiting = State()
+
+
+class AnnounceSG(StatesGroup):
+    channel_name = State()
+    starts_at = State()
+    channel_link = State()
+    prize = State()
+    extra_links = State()
     preview = State()
 
 
@@ -37,6 +44,10 @@ class SupportSG(StatesGroup):
 class ReportSG(StatesGroup):
     reason = State()
     body = State()
+
+
+class ReviewSG(StatesGroup):
+    comment = State()
 
 
 class AdminSG(StatesGroup):

@@ -1,4 +1,5 @@
 from app.models.admin import Admin, AdminSession, AuditLog, BotContent, SystemSetting
+from app.models.announcement import CustomAnnouncement
 from app.models.broadcast import BroadcastCampaign, BroadcastDelivery
 from app.models.channel import Channel, ChannelOwnership, GlobalRequiredChannel
 from app.models.event import Event, EventPrize, EventRequiredChannel, EventRequirement, RoomCredential
@@ -7,6 +8,7 @@ from app.models.organizer import Organizer, OrganizerTrustEvent
 from app.models.referral import Referral, ReferralLink
 from app.models.registration import Registration, RegistrationRequirementStatus, WaitlistEntry
 from app.models.report import Report
+from app.models.review import EventReview
 from app.models.user import Ban, Permission, Role, RolePermission, User, UserNote, UserProfile, UserRole
 
 __all__ = [
@@ -43,6 +45,8 @@ __all__ = [
     "SystemSetting",
     "BotContent",
     "Report",
+    "EventReview",
     "BroadcastCampaign",
     "BroadcastDelivery",
+    "CustomAnnouncement",
 ]

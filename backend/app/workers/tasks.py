@@ -15,6 +15,7 @@ from app.models.broadcast import BroadcastCampaign, BroadcastDelivery
 from app.models.channel import Channel
 from app.models.event import Event, RoomCredential
 from app.models.jobs import ScheduledJob
+from app.models.organizer import Organizer
 from app.models.registration import Registration
 from app.models.user import User
 from app.services.credentials import deliver_one
@@ -107,9 +108,30 @@ async def _send_credentials(db, job: ScheduledJob) -> None:
         job.status = JobStatus.CANCELLED
         return
     creds = db.scalar(select(RoomCredential).where(RoomCredential.event_id == event.id))
-    if not creds:
-        job.status = JobStatus.FAILED
-        job.last_error = "missing_credentials"
+    from app.services.reports import credentials_deadline, creds_were_provided
+
+    now = datetime.now(UTC)
+    if not creds_were_provided(creds):
+        if now > credentials_deadline(event):
+            await _expire_missing_credentials(bot, db, event, job)
+            return
+        payload = dict(job.payload or {})
+        last = payload.get("last_prompt_ts")
+        should_prompt = True
+        if last:
+            try:
+                prev = datetime.fromisoformat(last)
+                should_prompt = now - prev >= timedelta(minutes=2)
+            except ValueError:
+                should_prompt = True
+        if should_prompt:
+            await _prompt_organizer_for_creds(bot, db, event)
+            payload["last_prompt_ts"] = now.isoformat()
+            payload["prompted"] = True
+            job.payload = payload
+        job.status = JobStatus.PENDING
+        job.run_at = now + timedelta(minutes=1)
+        job.last_error = "waiting_organizer_credentials"
         return
     redis = Redis.from_url(get_settings().redis_url)
     lock_key = f"lock:creds:{event.id}:{creds.version}"
@@ -155,7 +177,10 @@ async def _send_reminders(db, job: ScheduledJob) -> None:
     if not event:
         return
     regs = db.scalars(select(Registration).where(Registration.event_id == event.id, Registration.status == "confirmed")).all()
-    text = f"یادآوری: کاستوم «{event.title}» به‌زودی شروع می‌شود."
+    text = (
+        f"یادآوری: کاستوم «{event.title}» به‌زودی شروع می‌شود.\n"
+        "اگر کانال‌های جوین اجباری را عضو شده باشید، سر ساعت آیدی و رمز برایتان می‌آید."
+    )
     for reg in regs:
         user = db.get(User, reg.user_id)
         if not user or user.is_bot_blocked:
@@ -165,6 +190,131 @@ async def _send_reminders(db, job: ScheduledJob) -> None:
         except Exception:
             continue
         await asyncio.sleep(0.04)
+
+
+async def _prompt_organizer_for_creds(bot, db, event: Event) -> None:
+    org = db.get(Organizer, event.organizer_id)
+    if not org:
+        return
+    user = db.get(User, org.user_id)
+    if not user:
+        return
+    from app.bot.keyboards.common import send_creds_kb
+    from app.core.config import get_settings
+    from app.core.time import format_local
+
+    grace = get_settings().credentials_grace_minutes
+    try:
+        await bot.send_message(
+            user.telegram_id,
+            f"ساعت کاستوم «{event.title}» رسید ({format_local(event.starts_at, event.timezone)}).\n\n"
+            "الان آیدی و رمز اتاق را داخل ربات بفرستید؛ مثال:\n"
+            "<code>12345678 mypass</code>\n\n"
+            f"فقط {grace} دقیقه فرصت دارید. اگر نفرستید اخطار می‌گیرید و بازیکن‌ها می‌توانند گزارش بدهند.\n"
+            "یا دکمه سبز را بزنید و بعد همان یک خط را ارسال کنید.\n"
+            "بعد فقط برای کسانی که کانال‌های این کاستوم را جوین کرده‌اند ارسال می‌شود.",
+            reply_markup=send_creds_kb(event.public_token),
+        )
+    except Exception:
+        log.exception("organizer_cred_prompt_failed", event_id=str(event.id))
+
+
+async def _expire_missing_credentials(bot, db, event: Event, job: ScheduledJob) -> None:
+    from app.bot.keyboards.common import report_reasons_kb
+    from app.core.config import get_settings
+    from app.models.admin import Admin
+    from app.services.reports import format_person
+
+    grace = get_settings().credentials_grace_minutes
+    job.status = JobStatus.FAILED
+    job.last_error = "organizer_did_not_send_credentials"
+    job.completed_at = datetime.now(UTC)
+    event.status = EventStatus.FINISHED
+    event.finished_at = datetime.now(UTC)
+
+    org = db.get(Organizer, event.organizer_id)
+    org_user = db.get(User, org.user_id) if org else None
+    if org_user:
+        try:
+            await bot.send_message(
+                org_user.telegram_id,
+                f"اخطار: مهلت {grace} دقیقه‌ای ارسال آیدی و رمز کاستوم «{event.title}» تمام شد.\n"
+                "رمز برای بازیکن‌ها ارسال نشد و ممکن است گزارش تخلف دریافت کنید.",
+            )
+        except Exception:
+            log.exception("organizer_missed_creds_warn_failed", event_id=str(event.id))
+
+    regs = db.scalars(
+        select(Registration).where(Registration.event_id == event.id, Registration.status == "confirmed")
+    ).all()
+    player_text = (
+        f"برگزارکننده کاستوم «{event.title}» در مهلت {grace} دقیقه‌ای آیدی و رمز را نفرستاد.\n"
+        "اگر ثبت‌نام کرده بودید، از دکمه زیر به مالک ربات گزارش بدهید."
+    )
+    for reg in regs:
+        user = db.get(User, reg.user_id)
+        if not user or user.is_bot_blocked:
+            continue
+        try:
+            await bot.send_message(
+                user.telegram_id,
+                player_text,
+                reply_markup=report_reasons_kb(event.public_token),
+            )
+        except Exception:
+            continue
+        await asyncio.sleep(0.04)
+
+    admin_text = (
+        f"مهلت ارسال رمز تمام شد ({grace} دقیقه).\n\n"
+        f"کاستوم: {event.title}\n"
+        f"برگزارکننده: {format_person(org_user)}\n"
+        f"ثبت‌نام قطعی: {event.confirmed_count}"
+    )
+    admins = db.scalars(select(Admin).where(Admin.is_active.is_(True))).all()
+    for admin in admins:
+        user = db.get(User, admin.user_id)
+        if not user:
+            continue
+        try:
+            await bot.send_message(user.telegram_id, admin_text)
+        except Exception:
+            continue
+
+    log.info("credentials_window_expired", event_id=str(event.id), confirmed=event.confirmed_count)
+
+
+@celery_app.task(name="app.workers.tasks.send_event_credentials")
+def send_event_credentials(event_id: str):
+    db = SyncSessionLocal()
+    try:
+        from uuid import UUID as _UUID
+
+        event = db.get(Event, _UUID(event_id))
+        if not event:
+            return
+        job = db.scalar(
+            select(ScheduledJob)
+            .where(ScheduledJob.entity_id == event.id, ScheduledJob.job_type == JobType.SEND_CREDENTIALS)
+            .order_by(ScheduledJob.created_at.desc())
+        )
+        if job is None:
+            job = ScheduledJob(
+                job_type=JobType.SEND_CREDENTIALS,
+                entity_type="event",
+                entity_id=event.id,
+                run_at=datetime.now(UTC),
+                status=JobStatus.RUNNING,
+                idempotency_key=f"send_credentials:{event.id}:manual",
+            )
+            db.add(job)
+            db.flush()
+        else:
+            job.status = JobStatus.RUNNING
+        _run(_send_credentials(db, job))
+        db.commit()
+    finally:
+        db.close()
 
 
 @celery_app.task(name="app.workers.tasks.run_broadcast", bind=True)

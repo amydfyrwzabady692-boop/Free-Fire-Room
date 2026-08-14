@@ -44,6 +44,7 @@ from app.services import events as event_svc
 from app.services import organizers as org_svc
 from app.services import settings as settings_svc
 from app.services.audit import write_audit
+from app.services.reports import format_person, report_label
 
 router_auth = APIRouter(prefix="/auth", tags=["auth"])
 router_users = APIRouter(prefix="/users", tags=["users"])
@@ -699,12 +700,26 @@ async def toggle_global_channel(row_id: UUID, admin_user: User = Depends(require
 @router_admin.get("/reports")
 async def admin_reports(db: AsyncSession = Depends(get_db), _: User = Depends(require_permission("admin.reports"))):
     rows = (await db.scalars(select(Report).order_by(Report.created_at.desc()).limit(200))).all()
-    return {
-        "items": [
-            {"id": str(r.id), "reason": r.reason, "status": r.status, "body": r.body, "created_at": r.created_at.isoformat()}
-            for r in rows
-        ]
-    }
+    items = []
+    for r in rows:
+        event = await db.get(Event, r.event_id) if r.event_id else None
+        reporter = await db.get(User, r.reporter_id)
+        org = await db.get(Organizer, r.organizer_id) if r.organizer_id else None
+        org_user = await db.get(User, org.user_id) if org else None
+        items.append(
+            {
+                "id": str(r.id),
+                "reason": r.reason,
+                "reason_label": report_label(r.reason),
+                "status": r.status,
+                "body": r.body,
+                "created_at": r.created_at.isoformat(),
+                "event_title": event.title if event else None,
+                "reporter": format_person(reporter),
+                "organizer": format_person(org_user),
+            }
+        )
+    return {"items": items}
 
 
 @router_admin.post("/reports/{report_id}/status")

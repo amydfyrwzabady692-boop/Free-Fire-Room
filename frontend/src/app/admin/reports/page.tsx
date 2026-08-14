@@ -18,18 +18,35 @@ const nav = [
 
 export default function Page() {
   const [items, setItems] = useState<any[]>([]);
+  const load = () => {
+    api("/admin/reports")
+      .then((d) => setItems(d.items || []))
+      .catch(() => undefined);
+  };
   useEffect(() => {
-    api("/admin/reports").then((d) => setItems(d.items || [])).catch(() => undefined);
+    load();
   }, []);
+  const closeReport = async (id: string) => {
+    await api(`/admin/reports/${id}/status?status=closed`, { method: "POST" });
+    load();
+  };
   return (
     <Shell title="پنل مالک ربات" items={nav}>
       <h1 className="mb-4 text-2xl font-bold">گزارش تخلف</h1>
       {items.map((r) => (
         <div key={r.id} className="card mb-2">
           <div className="font-bold">
-            {r.reason} — {r.status}
+            {r.reason_label || r.reason} — {r.status}
           </div>
+          <p className="text-sm text-white/80">کاستوم: {r.event_title || "—"}</p>
+          <p className="text-sm text-white/80">برگزارکننده: {r.organizer || "—"}</p>
+          <p className="text-sm text-white/80">گزارش‌دهنده: {r.reporter || "—"}</p>
           <p className="text-sm text-white/70">{r.body}</p>
+          {r.status === "new" ? (
+            <button className="mt-2 text-sm underline" onClick={() => closeReport(r.id)}>
+              بستن گزارش
+            </button>
+          ) : null}
         </div>
       ))}
     </Shell>

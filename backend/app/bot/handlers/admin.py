@@ -12,10 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.bot.access import is_active_admin, menu_for
+from app.bot.keyboards.common import DANGER, PRIMARY, SUCCESS, ibtn
 from app.bot.states.groups import AdminSG
-from app.core.enums import BanScope, EventStatus, OrganizerStatus, RegistrationStatus
+from app.core.enums import BanScope, EventStatus, OrganizerStatus, RegistrationStatus, ReportStatus, UserStatus
 from app.core.errors import AppError
-from app.core.time import utcnow
+from app.core.time import utcnow, format_local
+from app.models.announcement import CustomAnnouncement
 from app.models.broadcast import BroadcastCampaign
 from app.models.channel import GlobalRequiredChannel
 from app.models.event import Event
@@ -28,7 +30,9 @@ from app.services import channels as channel_svc
 from app.services import events as event_svc
 from app.services import organizers as org_svc
 from app.services import settings as settings_svc
+from app.services.announcements import hide_announcement
 from app.services.audit import write_audit
+from app.services.reports import format_person, report_label
 from app.services.users import get_by_telegram
 
 router = Router(name="admin")
@@ -37,28 +41,33 @@ router = Router(name="admin")
 def _admin_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="داشبورد", callback_data="adm:dash")],
+            [ibtn("داشبورد", callback_data="adm:dash", style=PRIMARY)],
             [
-                InlineKeyboardButton(text="کاستوم‌های در انتظار", callback_data="adm:ev"),
-                InlineKeyboardButton(text="برگزارکنندگان", callback_data="adm:org"),
+                ibtn("کاستوم‌های در انتظار", callback_data="adm:ev", style=SUCCESS),
+                ibtn("برگزارکنندگان", callback_data="adm:org", style=PRIMARY),
             ],
             [
-                InlineKeyboardButton(text="جستجوی کاربر", callback_data="adm:usr"),
-                InlineKeyboardButton(text="کانال اجباری", callback_data="adm:ch"),
+                ibtn("جستجوی کاربر", callback_data="adm:usr", style=PRIMARY),
+                ibtn("کانال اجباری", callback_data="adm:ch", style=PRIMARY),
             ],
             [
-                InlineKeyboardButton(text="گزارش تخلف", callback_data="adm:rep"),
-                InlineKeyboardButton(text="ارسال همگانی", callback_data="adm:bc"),
+                ibtn("گزارش تخلف", callback_data="adm:rep", style=DANGER),
+                ibtn("ارسال همگانی", callback_data="adm:bc", style=PRIMARY),
             ],
-            [InlineKeyboardButton(text="تعمیرات ربات", callback_data="adm:mt")],
-            [InlineKeyboardButton(text="منوی بازیکن", callback_data="adm:player")],
+            [
+                ibtn("اطلاع‌رسانی‌ها", callback_data="adm:ann"),
+                ibtn("کاربران اخیر", callback_data="adm:lu"),
+            ],
+            [ibtn("تنظیمات ربات", callback_data="adm:cfg", style=PRIMARY)],
+            [ibtn("تعمیرات ربات", callback_data="adm:mt", style=DANGER)],
+            [ibtn("منوی بازیکن", callback_data="adm:player")],
         ]
     )
 
 
 def _back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="بازگشت به پنل ادمین", callback_data="adm:home")]]
+        inline_keyboard=[[ibtn("بازگشت به پنل ادمین", callback_data="adm:home", style=PRIMARY)]]
     )
 
 
@@ -76,13 +85,15 @@ async def _ok(db: AsyncSession, user: User | None) -> bool:
 
 async def _show_home(message: Message) -> None:
     await message.answer(
-        "پنل مدیریت ربات\nاز دکمه‌های زیر استفاده کنید. مرورگر لازم نیست.",
+        "پنل مالک ربات — فقط برای صاحب همین ربات.\n"
+        "گزارش تخلف، بن، کانال اجباری ورود، تنظیمات. "
+        "پنل برگزارکننده جداست و برای کاربرانی است که کاستوم جایزه‌دار می‌گذارند.",
         reply_markup=_admin_kb(),
     )
 
 
 @router.message(Command("admin"))
-@router.message(F.text == "پنل ادمین")
+@router.message(F.text.in_({"پنل ادمین", "پنل مالک ربات"}))
 async def admin_home(message: Message, db: AsyncSession, db_user: User, state: FSMContext):
     if not await _ok(db, db_user):
         await _deny(message)
@@ -133,6 +144,9 @@ async def admin_dash(cb: CallbackQuery, db: AsyncSession, db_user: User):
         select(func.count()).select_from(Registration).where(Registration.status == RegistrationStatus.CONFIRMED)
     )
     sent = await db.scalar(select(func.count()).select_from(Delivery).where(Delivery.status == "sent"))
+    anns = await db.scalar(
+        select(func.count()).select_from(CustomAnnouncement).where(CustomAnnouncement.status == "published")
+    )
     maint = await settings_svc.get_setting(db, "maintenance_mode", False)
     await cb.message.answer(
         "<b>داشبورد</b>\n"
@@ -142,6 +156,7 @@ async def admin_dash(cb: CallbackQuery, db: AsyncSession, db_user: User):
         f"کاستوم فعال: {events_active} | در انتظار تأیید: {pending_events}\n"
         f"ثبت‌نام قطعی: {regs}\n"
         f"ارسال مشخصات موفق: {sent}\n"
+        f"اطلاع‌رسانی فعال: {anns}\n"
         f"حالت تعمیرات: {'روشن' if maint else 'خاموش'}",
         reply_markup=_back_kb(),
     )
@@ -171,8 +186,8 @@ async def admin_events(cb: CallbackQuery, db: AsyncSession, db_user: User):
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="تأیید و انتشار", callback_data=f"adm:ea:{e.id}"),
-                    InlineKeyboardButton(text="رد", callback_data=f"adm:er:{e.id}"),
+                    ibtn("تأیید و انتشار", callback_data=f"adm:ea:{e.id}", style=SUCCESS),
+                    ibtn("رد", callback_data=f"adm:er:{e.id}", style=DANGER),
                 ],
                 [InlineKeyboardButton(text="بازگشت", callback_data="adm:home")],
             ]
@@ -241,8 +256,8 @@ async def admin_orgs(cb: CallbackQuery, db: AsyncSession, db_user: User):
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    InlineKeyboardButton(text="تأیید", callback_data=f"adm:oa:{org.id}"),
-                    InlineKeyboardButton(text="رد", callback_data=f"adm:oj:{org.id}"),
+                    ibtn("تأیید", callback_data=f"adm:oa:{org.id}", style=SUCCESS),
+                    ibtn("رد", callback_data=f"adm:oj:{org.id}", style=DANGER),
                 ]
             ]
         )
@@ -310,8 +325,9 @@ async def admin_user_show(message: Message, db: AsyncSession, db_user: User, sta
     )
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="بن ربات", callback_data=f"adm:bn:{target.telegram_id}")],
-            [InlineKeyboardButton(text="رفع بن", callback_data=f"adm:ub:{target.telegram_id}")],
+            [ibtn("بن ربات", callback_data=f"adm:bn:{target.telegram_id}", style=DANGER)],
+            [ibtn("بن برگزاری", callback_data=f"adm:bno:{target.telegram_id}", style=DANGER)],
+            [ibtn("رفع بن", callback_data=f"adm:ub:{target.telegram_id}", style=SUCCESS)],
             [InlineKeyboardButton(text="بازگشت", callback_data="adm:home")],
         ]
     )
@@ -325,14 +341,17 @@ async def admin_user_show(message: Message, db: AsyncSession, db_user: User, sta
     await state.clear()
 
 
-@router.callback_query(F.data.startswith("adm:bn:"))
+@router.callback_query(F.data.startswith("adm:bn:") | F.data.startswith("adm:bno:"))
 async def admin_ban_ask(cb: CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
     if not await _ok(db, db_user):
         await _deny(cb)
         return
+    parts = cb.data.split(":")
+    scope = BanScope.BOT if parts[1] == "bn" else BanScope.ORGANIZE
     await state.set_state(AdminSG.ban_reason)
-    await state.update_data(target_tg=int(cb.data.split(":")[-1]))
-    await cb.message.answer("دلیل بن را بنویسید (حداقل ۳ حرف).")
+    await state.update_data(target_tg=int(parts[-1]), ban_scope=scope)
+    label = "ربات" if scope == BanScope.BOT else "برگزاری / اطلاع‌رسانی"
+    await cb.message.answer(f"دلیل بن {label} را بنویسید (حداقل ۳ حرف).")
     await cb.answer()
 
 
@@ -351,20 +370,23 @@ async def admin_ban_do(message: Message, db: AsyncSession, db_user: User, state:
         await message.answer("کاربر یافت نشد.")
         await state.clear()
         return
+    scope = data.get("ban_scope") or BanScope.BOT
     db.add(
         Ban(
             user_id=target.id,
-            scope=BanScope.BOT,
+            scope=scope,
             reason=reason,
             is_active=True,
             created_by=db_user.id,
         )
     )
+    if scope == BanScope.BOT:
+        target.status = UserStatus.BANNED
     await write_audit(
-        db, action="user_banned", entity_type="user", entity_id=target.id, actor_id=db_user.id, extra={"reason": reason}
+        db, action="user_banned", entity_type="user", entity_id=target.id, actor_id=db_user.id, extra={"reason": reason, "scope": scope}
     )
     await state.clear()
-    await message.answer(f"کاربر {target.telegram_id} بن شد.", reply_markup=_back_kb())
+    await message.answer(f"کاربر {target.telegram_id} بن شد ({scope}).", reply_markup=_back_kb())
 
 
 @router.callback_query(F.data.startswith("adm:ub:"))
@@ -381,6 +403,7 @@ async def admin_unban(cb: CallbackQuery, db: AsyncSession, db_user: User):
     ).all()
     for row in rows:
         row.is_active = False
+    target.status = UserStatus.ACTIVE
     await write_audit(db, action="user_unbanned", entity_type="user", entity_id=target.id, actor_id=db_user.id)
     await cb.message.answer("بن برداشته شد.", reply_markup=_back_kb())
     await cb.answer()
@@ -466,16 +489,31 @@ async def admin_reports(cb: CallbackQuery, db: AsyncSession, db_user: User):
     if not await _ok(db, db_user):
         await _deny(cb)
         return
-    rows = (await db.scalars(select(Report).where(Report.status == "new").order_by(Report.created_at.desc()).limit(10))).all()
+    rows = (
+        await db.scalars(select(Report).where(Report.status == ReportStatus.NEW).order_by(Report.created_at.desc()).limit(15))
+    ).all()
     if not rows:
         await cb.message.answer("گزارش جدیدی نیست.", reply_markup=_back_kb())
         await cb.answer()
         return
     for r in rows:
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="بسته شد", callback_data=f"adm:rok:{r.id}")]]
+        event = await db.get(Event, r.event_id) if r.event_id else None
+        reporter = await db.get(User, r.reporter_id)
+        org = await db.get(Organizer, r.organizer_id) if r.organizer_id else None
+        org_user = await db.get(User, org.user_id) if org else None
+        when = format_local(event.starts_at, event.timezone) if event else "-"
+        text = (
+            f"<b>{report_label(r.reason)}</b>\n"
+            f"کاستوم: {event.title if event else '-'}\n"
+            f"ساعت: {when}\n"
+            f"برگزارکننده: {format_person(org_user)}\n"
+            f"گزارش‌دهنده: {format_person(reporter)}\n\n"
+            f"{(r.body or '')[:400]}"
         )
-        await cb.message.answer(f"{r.reason}\n{r.body[:400]}", reply_markup=kb)
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[ibtn("بسته شد", callback_data=f"adm:rok:{r.id}", style=SUCCESS)]]
+        )
+        await cb.message.answer(text, reply_markup=kb)
     await cb.answer()
 
 
@@ -488,7 +526,7 @@ async def admin_report_ok(cb: CallbackQuery, db: AsyncSession, db_user: User):
     if not row:
         await cb.answer("یافت نشد", show_alert=True)
         return
-    row.status = "resolved"
+    row.status = ReportStatus.CLOSED
     row.resolved_at = datetime.now(UTC)
     row.admin_note = "از پنل ربات"
     await cb.message.answer("گزارش بسته شد.", reply_markup=_back_kb())
@@ -536,8 +574,8 @@ async def admin_bc_body(message: Message, db: AsyncSession, db_user: User, state
     await state.clear()
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="تأیید و ارسال", callback_data=f"adm:bok:{row.id}")],
-            [InlineKeyboardButton(text="انصراف", callback_data="adm:home")],
+            [ibtn("تأیید و ارسال", callback_data=f"adm:bok:{row.id}", style=SUCCESS)],
+            [ibtn("انصراف", callback_data="adm:home", style=DANGER)],
         ]
     )
     await message.answer(f"پیش‌نویس آماده است:\n<b>{row.title}</b>\n{row.body}", reply_markup=kb)
@@ -575,3 +613,115 @@ async def admin_maintenance(cb: CallbackQuery, db: AsyncSession, db_user: User):
         reply_markup=_back_kb(),
     )
     await cb.answer()
+
+
+@router.callback_query(F.data == "adm:ann")
+async def admin_anns(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    if not await _ok(db, db_user):
+        await _deny(cb)
+        return
+    rows = (
+        await db.scalars(
+            select(CustomAnnouncement)
+            .where(CustomAnnouncement.status == "published")
+            .order_by(CustomAnnouncement.starts_at.asc())
+            .limit(12)
+        )
+    ).all()
+    if not rows:
+        await cb.message.answer("اطلاع‌رسانی فعالی نیست.", reply_markup=_back_kb())
+        await cb.answer()
+        return
+    for row in rows:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="مخفی کردن", callback_data=f"adm:ah:{row.id}")]]
+        )
+        await cb.message.answer(
+            f"<b>{row.title}</b>\nکانال: {row.channel_name}\nزمان: {format_local(row.starts_at, row.timezone)}",
+            reply_markup=kb,
+        )
+    await cb.message.answer("بازگشت:", reply_markup=_back_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("adm:ah:"))
+async def admin_ann_hide(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    if not await _ok(db, db_user):
+        await _deny(cb)
+        return
+    row = await db.get(CustomAnnouncement, UUID(cb.data.split(":")[-1]))
+    if not row:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    await hide_announcement(db, row, db_user.id, "مخفی از پنل ادمین")
+    await cb.message.answer("اطلاع‌رسانی مخفی شد.", reply_markup=_back_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "adm:lu")
+async def admin_recent_users(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    if not await _ok(db, db_user):
+        await _deny(cb)
+        return
+    rows = (
+        await db.scalars(select(User).where(User.deleted_at.is_(None)).order_by(User.created_at.desc()).limit(15))
+    ).all()
+    if not rows:
+        await cb.message.answer("کاربری نیست.", reply_markup=_back_kb())
+        await cb.answer()
+        return
+    text = "کاربران اخیر:\n"
+    for u in rows:
+        text += f"• {u.first_name or '-'} | {u.telegram_id} | {u.status}\n"
+    await cb.message.answer(text + "\nبرای بن/رفع بن از «جستجوی کاربر» شناسه را بفرستید.", reply_markup=_back_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "adm:cfg")
+async def admin_cfg(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    if not await _ok(db, db_user):
+        await _deny(cb)
+        return
+    approval = bool(await settings_svc.get_setting(db, "event_approval_required", False))
+    auto_org = bool(await settings_svc.get_setting(db, "auto_approve_organizers", True))
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"تأیید کاستوم: {'روشن' if approval else 'خاموش'}",
+                    callback_data="adm:tg:event_approval_required",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=f"تأیید خودکار برگزارکننده: {'روشن' if auto_org else 'خاموش'}",
+                    callback_data="adm:tg:auto_approve_organizers",
+                )
+            ],
+            [InlineKeyboardButton(text="بازگشت", callback_data="adm:home")],
+        ]
+    )
+    await cb.message.answer(
+        "تنظیمات ربات:\n"
+        "اگر تأیید کاستوم خاموش باشد، کاستوم جایزه‌دار بلافاصله در فهرست می‌آید.\n"
+        "اگر تأیید خودکار برگزارکننده روشن باشد، هر کاربر می‌تواند کاستوم خودش را بسازد.",
+        reply_markup=kb,
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("adm:tg:"))
+async def admin_toggle_setting(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    if not await _ok(db, db_user):
+        await _deny(cb)
+        return
+    key = cb.data.split(":", 2)[-1]
+    if key not in {"event_approval_required", "auto_approve_organizers"}:
+        await cb.answer("نامعتبر", show_alert=True)
+        return
+    current = bool(await settings_svc.get_setting(db, key, False))
+    await settings_svc.set_setting(db, key, not current, updated_by=db_user.id)
+    await write_audit(db, action="setting_toggled", entity_type="setting", actor_id=db_user.id, extra={"key": key, "value": not current})
+    await cb.message.answer(f"{key} = {'روشن' if not current else 'خاموش'}", reply_markup=_back_kb())
+    await cb.answer()
+

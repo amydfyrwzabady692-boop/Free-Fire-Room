@@ -70,10 +70,13 @@ class Settings(BaseSettings):
     delivery_log_retention_days: int = 90
     soft_delete_purge_days: int = 180
 
-    event_approval_required: bool = True
+    event_approval_required: bool = False
+    auto_approve_organizers: bool = True
     max_events_per_organizer: int = 10
     max_required_channels_per_event: int = 5
     max_required_referrals: int = 20
+    credentials_grace_minutes: int = 5
+    past_events_hours: int = 48
     maintenance_mode: bool = False
     openapi_enabled: bool = True
 

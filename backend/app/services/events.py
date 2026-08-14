@@ -27,12 +27,12 @@ def _validate_times(starts_at, registration_ends_at, credentials_send_at) -> Non
     now = datetime.now(UTC)
     if starts_at <= now + timedelta(minutes=10):
         raise ValidationAppError("starts_too_soon", "زمان برگزاری باید حداقل ۱۰ دقیقه بعد باشد.")
-    if registration_ends_at >= starts_at:
-        raise ValidationAppError("reg_after_start", "پایان ثبت‌نام باید قبل از شروع بازی باشد.")
+    if registration_ends_at > starts_at:
+        raise ValidationAppError("reg_after_start", "پایان ثبت‌نام نمی‌تواند بعد از شروع بازی باشد.")
     if credentials_send_at > starts_at:
         raise ValidationAppError("creds_after_start", "ارسال رمز نمی‌تواند بعد از شروع بازی باشد.")
     if credentials_send_at < registration_ends_at:
-        raise ValidationAppError("creds_before_reg_end", "ارسال رمز باید بعد از پایان ثبت‌نام باشد.")
+        raise ValidationAppError("creds_before_reg_end", "ارسال رمز باید هم‌زمان یا بعد از پایان ثبت‌نام باشد.")
 
 
 async def create_event(db: AsyncSession, organizer: Organizer, data: dict, actor_id) -> Event:
@@ -189,9 +189,7 @@ async def submit_for_publish(db: AsyncSession, event: Event, actor_id) -> Event:
     if not event.channel_id:
         raise ValidationAppError("channel_required", "کانال برگزارکننده را مشخص کنید.")
     creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == event.id))
-    if not creds:
-        raise ValidationAppError("credentials_required", "شناسه و رمز اتاق را وارد کنید.")
-    approval = await get_setting(db, "event_approval_required", True)
+    approval = await get_setting(db, "event_approval_required", False)
     if approval:
         event.status = EventStatus.PENDING_APPROVAL
     else:
@@ -299,6 +297,34 @@ async def update_credentials(db: AsyncSession, event: Event, actor_id, room_id: 
     )
     await db.flush()
     return creds
+
+
+async def waiting_live_credential_event(db: AsyncSession, user_id) -> Event | None:
+    """کاستومی که زمانش رسیده و هنوز رمز از برگزارکننده نگرفته یا ارسال نشده."""
+    now = datetime.now(UTC)
+    org = await db.scalar(select(Organizer).where(Organizer.user_id == user_id))
+    if not org:
+        return None
+    rows = (
+        await db.scalars(
+            select(Event)
+            .where(
+                Event.organizer_id == org.id,
+                Event.deleted_at.is_(None),
+                Event.status.in_(
+                    [EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED]
+                ),
+                Event.starts_at <= now + timedelta(minutes=20),
+                Event.starts_at >= now - timedelta(minutes=get_settings().credentials_grace_minutes),
+            )
+            .order_by(Event.starts_at.asc())
+        )
+    ).all()
+    for event in rows:
+        creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == event.id))
+        if creds is None or creds.sent_at is None:
+            return event
+    return None
 
 
 async def copy_event(db: AsyncSession, event: Event, organizer: Organizer, actor_id) -> Event:

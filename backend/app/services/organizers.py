@@ -13,8 +13,13 @@ from app.services.audit import write_audit
 
 
 async def get_or_apply(db: AsyncSession, user: User, display_name: str | None = None) -> Organizer:
+    from app.services.settings import get_setting
+
+    auto = bool(await get_setting(db, "auto_approve_organizers", True))
     existing = await db.scalar(select(Organizer).where(Organizer.user_id == user.id))
     if existing:
+        if existing.status == OrganizerStatus.PENDING and auto:
+            await approve_organizer(db, existing, user.id, verified=False)
         return existing
     org = Organizer(
         user_id=user.id,
@@ -25,6 +30,8 @@ async def get_or_apply(db: AsyncSession, user: User, display_name: str | None = 
     db.add(org)
     await write_audit(db, action="organizer_applied", entity_type="organizer", entity_id=org.id, actor_id=user.id)
     await db.flush()
+    if auto:
+        await approve_organizer(db, org, user.id, verified=False)
     return org
 
 
