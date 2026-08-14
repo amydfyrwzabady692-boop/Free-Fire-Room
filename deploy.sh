@@ -108,8 +108,16 @@ if empty_or_placeholder BOT_USERNAME; then
   exit 1
 fi
 
-echo "Ø¯Ø± Ø­Ø§Ù„ build Ùˆ Ø§Ø¬Ø±Ø§..."
-docker compose up -d --build
+echo "در حال build و اجرا..."
+if ! docker compose up -d --build; then
+  echo
+  echo "deploy failed — api logs:"
+  docker compose logs api --tail 150 || true
+  echo
+  echo "container status:"
+  docker compose ps -a || true
+  exit 1
+fi
 
 echo
 echo "ØªÙ…Ø§Ù…. Ù¾Ù†Ù„: http://${IP:-SERVER}"

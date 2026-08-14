@@ -3,10 +3,8 @@ from __future__ import annotations
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.fsm.storage.redis import RedisStorage
 
 from app.core.config import get_settings
-from app.core.redis import get_redis
 
 _bot: Bot | None = None
 _dp: Dispatcher | None = None
@@ -25,6 +23,8 @@ def get_bot() -> Bot:
 def get_dispatcher() -> Dispatcher:
     global _dp
     if _dp is None:
+        from aiogram.fsm.storage.redis import RedisStorage
+
         storage = RedisStorage.from_url(get_settings().redis_url)
         _dp = Dispatcher(storage=storage)
         from app.bot.handlers import setup_handlers

@@ -44,7 +44,6 @@ from app.services import events as event_svc
 from app.services import organizers as org_svc
 from app.services import settings as settings_svc
 from app.services.audit import write_audit
-from app.bot.loader import get_bot
 
 router_auth = APIRouter(prefix="/auth", tags=["auth"])
 router_users = APIRouter(prefix="/users", tags=["users"])
@@ -59,6 +58,12 @@ router_admin = APIRouter(prefix="/admin", tags=["admin"])
 router_broadcasts = APIRouter(prefix="/admin/broadcasts", tags=["broadcasts"])
 router_analytics = APIRouter(prefix="/admin/analytics", tags=["analytics"])
 router_settings = APIRouter(prefix="/admin/settings", tags=["settings"])
+
+
+def _bot():
+    from app.bot.loader import get_bot
+
+    return get_bot()
 
 
 def _client_ip(request: Request) -> str | None:
@@ -104,7 +109,7 @@ async def request_otp(telegram_id: int, db: AsyncSession = Depends(get_db)):
     if not user:
         return {"ok": True}
     code = await auth_svc.issue_otp(telegram_id)
-    bot = get_bot()
+    bot = _bot()
     await bot.send_message(telegram_id, f"کد ورود پنل: `{code}`\nاین کد ۵ دقیقه اعتبار دارد.", parse_mode="Markdown")
     return {"ok": True}
 
@@ -364,7 +369,7 @@ async def my_deliveries(event_id: UUID, org=Depends(get_organizer), db: AsyncSes
 
 @router_channels.post("/connect")
 async def connect_channel(body: ChannelIn, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    bot = get_bot()
+    bot = _bot()
     ch = await channel_svc.connect_organizer_channel(db, bot, user, body.chat_ref)
     await db.commit()
     return {"id": str(ch.id), "title": ch.title, "telegram_chat_id": ch.telegram_chat_id, "bot_is_admin": ch.bot_is_admin}
@@ -373,12 +378,11 @@ async def connect_channel(body: ChannelIn, user: User = Depends(get_current_user
 @router_regs.post("/{token}")
 async def register_via_api(token: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     from app.services.registration import register_user
-    from app.bot.loader import get_bot
 
     event = await db.scalar(select(Event).where(Event.public_token == token))
     if not event:
         raise NotFoundError("event_not_found", "کاستوم یافت نشد.")
-    bot = get_bot()
+    bot = _bot()
     result = await register_user(db, user=user, event=event, bot=bot, source="api")
     await db.commit()
     return {
@@ -675,7 +679,7 @@ async def list_global_channels(db: AsyncSession = Depends(get_db), _: User = Dep
 
 @router_admin.post("/global-channels")
 async def add_global_channel(body: ChannelIn, admin_user: User = Depends(require_permission("admin.channels")), db: AsyncSession = Depends(get_db)):
-    bot = get_bot()
+    bot = _bot()
     row = await channel_svc.add_global_required_channel(db, bot, admin_user.id, body.chat_ref, scope=body.scope, sort_order=body.sort_order)
     await db.commit()
     return {"id": str(row.id)}

@@ -5,7 +5,6 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.api.v1.routers import all_routers
 from app.core.config import get_settings
@@ -21,6 +20,7 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     configure_logging()
+    log.info("api_startup")
     get_redis()
     if settings.sentry_dsn:
         import sentry_sdk
@@ -50,10 +50,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
     allow_headers=["Authorization", "Content-Type", "X-Correlation-Id"],
 )
-
-if settings.prometheus_enabled:
-    Instrumentator(should_gzip=True).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
-
 
 @app.middleware("http")
 async def correlation_middleware(request: Request, call_next):
@@ -105,3 +101,14 @@ async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: st
 
 for r in all_routers():
     app.include_router(r, prefix="/api")
+
+if settings.prometheus_enabled:
+    try:
+        from prometheus_fastapi_instrumentator import Instrumentator
+
+        Instrumentator(
+            should_gzip=True,
+            excluded_handlers=["/health/live", "/health/ready"],
+        ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+    except Exception:
+        log.exception("prometheus_init_failed")
