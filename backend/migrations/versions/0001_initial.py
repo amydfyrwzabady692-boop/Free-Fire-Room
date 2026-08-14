@@ -8,7 +8,7 @@ Create Date: 2026-08-14
 from alembic import op
 
 from app.core.db import Base
-from app import models  # noqa: F401
+import app.models  # noqa: F401
 
 revision = "0001_initial"
 down_revision = None
