@@ -177,6 +177,17 @@ def checklist_kb(token: str, join_urls: list[tuple[str, str]] | None = None) -> 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def pick_date_kb(prefix: str) -> InlineKeyboardMarkup:
+    from app.core.time import upcoming_local_dates
+
+    rows = []
+    for item in upcoming_local_dates(3):
+        style = SUCCESS if item["offset"] == 0 else PRIMARY
+        rows.append([ibtn(item["label"], callback_data=f"{prefix}:{item['offset']}", style=style)])
+    rows.append([ibtn("لغو", callback_data="wiz:cancel", style=DANGER)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def wizard_nav(include_skip: bool = False) -> InlineKeyboardMarkup:
     row = [ibtn("لغو", callback_data="wiz:cancel", style=DANGER)]
     if include_skip:

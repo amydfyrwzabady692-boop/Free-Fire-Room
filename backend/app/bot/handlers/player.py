@@ -168,7 +168,7 @@ def _join_urls(items) -> list[tuple[str, str]]:
 
 
 def _list_title(e: Event) -> str:
-    stamp = format_local(e.starts_at, e.timezone)
+    stamp = format_local(e.starts_at, e.timezone, compact=True)
     if e.starts_at < datetime.now(UTC):
         return f"گذشته | {stamp} | {e.title}"
     return f"{stamp} | {e.title}"
@@ -201,7 +201,7 @@ async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> st
         f"{org_line}\n"
         f"{ev_line}\n"
         f"کانال: {ch}\n"
-        f"ساعت کاستوم: {format_local(e.starts_at, e.timezone)}\n"
+        f"ساعت کاستوم (شمسی): {format_local(e.starts_at, e.timezone)}\n"
         f"مانده: {left} دقیقه\n\n"
         f"{extra}"
     )

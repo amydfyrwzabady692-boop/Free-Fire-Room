@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime as dt
+from datetime import UTC, date, datetime as dt
 from uuid import UUID
 
 from aiogram import F, Router
@@ -9,13 +9,13 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.access import menu_for
-from app.bot.helpers import normalize_join_url, parse_user_datetime
-from app.bot.keyboards.common import announcement_list_kb, wizard_nav
+from app.bot.helpers import normalize_join_url
+from app.bot.keyboards.common import announcement_list_kb, pick_date_kb, wizard_nav
 from app.bot.onboarding import ensure_onboarding, target_message
 from app.bot.states.groups import AnnounceSG
 from app.core.enums import BanScope
 from app.core.errors import AppError
-from app.core.time import format_local
+from app.core.time import combine_local_date_and_clock, format_jalali_date, format_local, parse_clock, upcoming_local_dates
 from app.models.announcement import CustomAnnouncement
 from app.models.user import User
 from app.services.announcements import (
@@ -36,7 +36,7 @@ def _card(row: CustomAnnouncement) -> str:
     return (
         f"<b>{row.title}</b>\n"
         f"کانال: {row.channel_name}\n"
-        f"زمان: {format_local(row.starts_at, row.timezone)}\n"
+        f"زمان (شمسی): {format_local(row.starts_at, row.timezone)}\n"
         f"جایزه: {row.prize_summary or '—'}\n"
         f"{row.description or ''}"
         f"{extra}\n\n"
@@ -113,19 +113,60 @@ async def ann_name(message: Message, state: FSMContext):
         return
     await state.update_data(channel_name=name, title=f"کاستوم {name}")
     await state.set_state(AnnounceSG.starts_at)
-    await message.answer("ساعت کاستوم را بفرستید. نمونه: 2026-08-20 22:00 یا 1405-05-29 22:00")
+    await message.answer(
+        "روز کاستوم را انتخاب کنید (شمسی، تهران).",
+        reply_markup=pick_date_kb("and"),
+    )
+
+
+@router.callback_query(AnnounceSG.starts_at, F.data.startswith("and:"))
+async def ann_pick_date(cb: CallbackQuery, state: FSMContext):
+    try:
+        offset = int(cb.data.split(":")[1])
+    except (IndexError, ValueError):
+        await cb.answer("نامعتبر", show_alert=True)
+        return
+    choices = upcoming_local_dates(3)
+    if offset < 0 or offset >= len(choices):
+        await cb.answer("این روز در دسترس نیست.", show_alert=True)
+        return
+    day = choices[offset]["date"]
+    await state.update_data(picked_date=day.isoformat())
+    await state.set_state(AnnounceSG.starts_time)
+    await cb.message.answer(
+        f"تاریخ: {format_jalali_date(day)}\nحالا ساعت را بفرستید. نمونه: 22:00 یا 22",
+        reply_markup=wizard_nav(),
+    )
+    await cb.answer()
 
 
 @router.message(AnnounceSG.starts_at)
+async def ann_need_date(message: Message):
+    await message.answer("یکی از دکمه‌های امروز / فردا / پس‌فردا را بزنید.", reply_markup=pick_date_kb("and"))
+
+
+@router.message(AnnounceSG.starts_time)
 async def ann_time(message: Message, state: FSMContext):
+    data = await state.get_data()
+    picked = data.get("picked_date")
+    if not picked:
+        await state.set_state(AnnounceSG.starts_at)
+        await message.answer("اول روز را انتخاب کنید.", reply_markup=pick_date_kb("and"))
+        return
     try:
-        when = parse_user_datetime(message.text or "")
+        hour, minute = parse_clock(message.text or "")
+        when = combine_local_date_and_clock(date.fromisoformat(picked), hour, minute)
     except ValueError:
-        await message.answer("زمان نامعتبر است.")
+        await message.answer("ساعت نامعتبر است. نمونه: 22:00 یا 22")
+        return
+    if when <= dt.now(UTC):
+        await message.answer("این ساعت گذشته است. ساعت بعدی همین روز را بفرستید.")
         return
     await state.update_data(starts_at=when.isoformat())
     await state.set_state(AnnounceSG.channel_link)
-    await message.answer("لینک یا @username کانال را بفرستید. اگر ندارید «-» بفرستید.")
+    await message.answer(
+        f"زمان: {format_local(when)}\nلینک یا @username کانال را بفرستید. اگر ندارید «-» بفرستید."
+    )
 
 
 @router.message(AnnounceSG.channel_link)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime as dt
+from datetime import UTC, date, datetime as dt
 from uuid import UUID
 
 from aiogram import F, Router
@@ -13,14 +13,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.bot.access import menu_for
-from app.bot.helpers import event_deep_link, parse_user_datetime
-from app.bot.keyboards.common import DANGER, PRIMARY, SUCCESS, ibtn, organizer_home_kb, wizard_nav
+from app.bot.helpers import event_deep_link
+from app.bot.keyboards.common import DANGER, PRIMARY, SUCCESS, ibtn, organizer_home_kb, pick_date_kb, wizard_nav
 from app.bot.onboarding import ensure_onboarding, target_message
 from app.bot.states.groups import CredsWaitSG, EventWizardSG
 from app.core.config import get_settings
 from app.core.enums import BanScope, EventStatus, OrganizerStatus
 from app.core.errors import AppError
-from app.core.time import format_local
+from app.core.time import combine_local_date_and_clock, format_jalali_date, format_local, parse_clock, upcoming_local_dates
 from app.models.channel import ChannelOwnership
 from app.models.event import Event, RoomCredential
 from app.models.organizer import Organizer
@@ -76,12 +76,9 @@ async def start_org(event: Message | CallbackQuery, db: AsyncSession, db_user: U
     await state.set_state(EventWizardSG.starts_at)
     await state.update_data(required_channel_ids=[])
     await msg.answer(
-        "ساعت کاستوم جایزه‌دار را بفرستید (تهران).\n"
-        "نمونه: 2026-08-20 22:00\n"
-        "یا شمسی: 1405-05-29 22:00\n\n"
-        "سر همین ساعت، Room ID و Password فقط برای کسانی ارسال می‌شود که در کانال‌های این کاستوم عضو باشند.\n"
-        "برای انصراف /cancel",
-        reply_markup=wizard_nav(),
+        "روز کاستوم را انتخاب کنید (شمسی، تهران).\n"
+        "بعد ساعت را می‌فرستید.",
+        reply_markup=pick_date_kb("wzd"),
     )
     if isinstance(event, CallbackQuery):
         await event.answer()
@@ -126,12 +123,50 @@ async def cancel_wiz(event: Message | CallbackQuery, state: FSMContext, db: Asyn
         await event.answer()
 
 
-@router.message(EventWizardSG.starts_at)
-async def wiz_starts(message: Message, state: FSMContext):
+@router.callback_query(EventWizardSG.starts_at, F.data.startswith("wzd:"))
+async def wiz_pick_date(cb: CallbackQuery, state: FSMContext):
     try:
-        when = parse_user_datetime(message.text or "")
+        offset = int(cb.data.split(":")[1])
+    except (IndexError, ValueError):
+        await cb.answer("نامعتبر", show_alert=True)
+        return
+    choices = upcoming_local_dates(3)
+    if offset < 0 or offset >= len(choices):
+        await cb.answer("این روز در دسترس نیست.", show_alert=True)
+        return
+    day = choices[offset]["date"]
+    await state.update_data(picked_date=day.isoformat())
+    await state.set_state(EventWizardSG.starts_time)
+    await cb.message.answer(
+        f"تاریخ: {format_jalali_date(day)}\n"
+        "حالا ساعت را بفرستید. نمونه: 22:00 یا 22\n"
+        "سر همین ساعت آیدی و رمز فقط برای کسانی می‌رود که کانال‌ها را جوین کرده باشند.",
+        reply_markup=wizard_nav(),
+    )
+    await cb.answer()
+
+
+@router.message(EventWizardSG.starts_at)
+async def wiz_need_date(message: Message):
+    await message.answer("یکی از دکمه‌های امروز / فردا / پس‌فردا را بزنید.", reply_markup=pick_date_kb("wzd"))
+
+
+@router.message(EventWizardSG.starts_time)
+async def wiz_starts(message: Message, state: FSMContext):
+    data = await state.get_data()
+    picked = data.get("picked_date")
+    if not picked:
+        await state.set_state(EventWizardSG.starts_at)
+        await message.answer("اول روز را انتخاب کنید.", reply_markup=pick_date_kb("wzd"))
+        return
+    try:
+        hour, minute = parse_clock(message.text or "")
+        when = combine_local_date_and_clock(date.fromisoformat(picked), hour, minute)
     except ValueError:
-        await message.answer("زمان نامعتبر است. نمونه: 2026-08-20 22:00")
+        await message.answer("ساعت نامعتبر است. نمونه: 22:00 یا 22")
+        return
+    if when <= dt.now(UTC):
+        await message.answer("این ساعت گذشته است. ساعت بعدی همین روز را بفرستید.")
         return
     iso = when.isoformat()
     await state.update_data(
@@ -142,6 +177,7 @@ async def wiz_starts(message: Message, state: FSMContext):
     )
     await state.set_state(EventWizardSG.channel)
     await message.answer(
+        f"زمان کاستوم: {format_local(when)}\n\n"
         "اولین کانال جوین اجباری را بفرستید: @username یا آیدی عددی.\n\n"
         "ربات را اول ادمین آن کانال کنید. بدون ادمین بودن ربات، عضویت بازیکن قابل بررسی نیست و رمز نباید بی‌دلیل ارسال شود."
     )
@@ -226,7 +262,7 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
         if event.status == EventStatus.PUBLISHED:
             await message.answer(
                 "کاستوم در فهرست همه کاربران قرار گرفت.\n\n"
-                f"ساعت کاستوم: {format_local(event.starts_at, event.timezone)}\n"
+                f"ساعت کاستوم (شمسی): {format_local(event.starts_at, event.timezone)}\n"
                 f"کانال جوین اجباری: {len(payload['required_channel_ids'])} مورد\n\n"
                 f"<b>لینک این کاستوم:</b>\n{link}\n\n"
                 "سر همین ساعت ربات از شما آیدی و رمز را می‌گیرد. "
@@ -285,7 +321,7 @@ async def org_mine(cb: CallbackQuery, db: AsyncSession, db_user: User):
         )
         await cb.message.answer(
             f"<b>{e.title}</b>\n"
-            f"زمان: {format_local(e.starts_at, e.timezone)}\n"
+            f"زمان (شمسی): {format_local(e.starts_at, e.timezone)}\n"
             f"وضعیت: {e.status}\n"
             f"{format_audience_stats(stats)}\n"
             f"{rating}",

@@ -10,6 +10,7 @@ class OnboardingSG(StatesGroup):
 class EventWizardSG(StatesGroup):
     title = State()
     starts_at = State()
+    starts_time = State()
     channel = State()
     extra_channels = State()
     capacity = State()
@@ -26,6 +27,7 @@ class CredsWaitSG(StatesGroup):
 class AnnounceSG(StatesGroup):
     channel_name = State()
     starts_at = State()
+    starts_time = State()
     channel_link = State()
     prize = State()
     extra_links = State()

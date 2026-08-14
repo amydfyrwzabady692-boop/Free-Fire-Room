@@ -1,26 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
-
 from app.core.config import get_settings
-from app.core.time import parse_naive_in_tz
-
-
-def parse_user_datetime(text: str) -> datetime:
-    text = (text or "").strip().replace("/", "-")
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d-%H:%M"):
-        try:
-            naive = datetime.strptime(text, fmt)
-            if naive.year < 1700:
-                import jdatetime
-
-                j = jdatetime.datetime(naive.year, naive.month, naive.day, naive.hour, naive.minute)
-                g = j.togregorian()
-                return parse_naive_in_tz(datetime(g.year, g.month, g.day, g.hour, g.minute), "Asia/Tehran")
-            return parse_naive_in_tz(naive, "Asia/Tehran")
-        except ValueError:
-            continue
-    raise ValueError("bad date")
 
 
 def event_deep_link(token: str) -> str:
