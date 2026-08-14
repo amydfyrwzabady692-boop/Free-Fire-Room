@@ -24,7 +24,7 @@ export default function Page() {
     setPeople(d.items || []);
   }
   async function cancel(id: string) {
-    if (!confirm("لغو کاستوم به همه اطلاع داده می‌شود و Jobها متوقف می‌شوند. ادامه؟")) return;
+    if (!window.confirm("لغو کاستوم به همه اطلاع داده می‌شود و Jobها متوقف می‌شوند. ادامه؟")) return;
     await api(`/events/${id}/cancel`, { method: "POST", body: JSON.stringify({ reason: "لغو توسط برگزارکننده" }) });
     await load();
   }

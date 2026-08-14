@@ -26,8 +26,8 @@ export default function Page() {
     setId(row.id);
     setMsg("پیش‌نویس ساخته شد. برای ارسال نهایی دوباره تأیید کنید.");
   }
-  async function confirm() {
-    if (!confirm("ارسال همگانی قطعی می‌شود. مطمئن هستید؟")) return;
+  async function confirmSend() {
+    if (!window.confirm("ارسال همگانی قطعی می‌شود. مطمئن هستید؟")) return;
     await api(`/admin/broadcasts/${id}/confirm`, { method: "POST" });
     setMsg("کمپین تأیید و صف‌بندی شد.");
   }
@@ -40,7 +40,7 @@ export default function Page() {
         <button className="btn" onClick={create}>
           پیش‌نویس
         </button>
-        <button className="btn-ghost" onClick={confirm} disabled={!id}>
+        <button className="btn-ghost" onClick={confirmSend} disabled={!id}>
           تأیید نهایی ارسال
         </button>
         {msg && <p>{msg}</p>}

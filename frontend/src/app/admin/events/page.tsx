@@ -23,7 +23,7 @@ export default function EventsAdmin() {
     load().catch(() => undefined);
   }, []);
   async function act(id: string, path: string, extra: any = { reason: "بررسی مدیریت" }) {
-    if (!confirm("این عملیات حساس است. ادامه می‌دهید؟")) return;
+    if (!window.confirm("این عملیات حساس است. ادامه می‌دهید؟")) return;
     await api(`/admin/events/${id}/${path}`, { method: "POST", body: JSON.stringify(extra) });
     await load();
   }
