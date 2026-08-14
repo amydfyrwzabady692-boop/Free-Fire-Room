@@ -28,7 +28,7 @@ class Organizer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     suspended_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    user: Mapped["User"] = relationship(back_populates="organizer")
+    user: Mapped["User"] = relationship(back_populates="organizer", foreign_keys=[user_id])
     events: Mapped[list["Event"]] = relationship(back_populates="organizer")
     trust_events: Mapped[list["OrganizerTrustEvent"]] = relationship(back_populates="organizer")
 

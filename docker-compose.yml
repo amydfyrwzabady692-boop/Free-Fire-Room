@@ -31,7 +31,16 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     env_file: .env
-    command: ["sh", "-c", "alembic upgrade head && python -m app.cli.main bootstrap"]
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "migrate: alembic upgrade"
+        alembic upgrade head
+        echo "migrate: bootstrap"
+        python -m app.cli.main bootstrap
+        echo "migrate: done"
     depends_on:
       postgres:
         condition: service_healthy

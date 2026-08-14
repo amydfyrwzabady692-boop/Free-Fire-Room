@@ -33,10 +33,12 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     notification_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
     profile: Mapped[UserProfile | None] = relationship(back_populates="user", uselist=False)
-    roles: Mapped[list[UserRole]] = relationship(back_populates="user")
+    roles: Mapped[list[UserRole]] = relationship(back_populates="user", foreign_keys="UserRole.user_id")
     bans: Mapped[list[Ban]] = relationship(back_populates="user", foreign_keys="Ban.user_id")
-    organizer: Mapped[Organizer | None] = relationship(back_populates="user", uselist=False)
-    notes: Mapped[list[UserNote]] = relationship(back_populates="user")
+    organizer: Mapped[Organizer | None] = relationship(
+        back_populates="user", uselist=False, foreign_keys="Organizer.user_id"
+    )
+    notes: Mapped[list[UserNote]] = relationship(back_populates="user", foreign_keys="UserNote.user_id")
 
 
 class UserProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
