@@ -24,8 +24,8 @@
 روی سرور (اوبونتو + Docker):
 
 ```bash
-git clone https://github.com/USER/REPO.git
-cd REPO
+git clone https://github.com/amydfyrwzabady692-boop/Free-Fire-Room.git
+cd Free-Fire-Room
 cp .env.example .env
 nano .env   # حداقل این سه تا را پر کن
 chmod +x deploy.sh
