@@ -9,7 +9,8 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards.common import main_menu, wizard_nav
+from app.bot.access import menu_for
+from app.bot.keyboards.common import wizard_nav
 from app.bot.states.groups import EventWizardSG
 from app.core.enums import OrganizerStatus
 from app.core.time import parse_naive_in_tz
@@ -38,10 +39,10 @@ async def start_org(message: Message, db: AsyncSession, db_user: User, state: FS
 
 @router.message(F.text == "/cancel")
 @router.callback_query(F.data == "wiz:cancel")
-async def cancel_wiz(event: Message | CallbackQuery, state: FSMContext):
+async def cancel_wiz(event: Message | CallbackQuery, state: FSMContext, db: AsyncSession, db_user: User):
     await state.clear()
     msg = event.message if isinstance(event, CallbackQuery) else event
-    await msg.answer("ویزارد لغو شد.", reply_markup=main_menu())
+    await msg.answer("ویزارد لغو شد.", reply_markup=await menu_for(db, db_user))
     if isinstance(event, CallbackQuery):
         await event.answer()
 
@@ -236,10 +237,10 @@ async def wiz_finish(message: Message, state: FSMContext, db: AsyncSession, db_u
             await submit_for_publish(db, event, db_user.id)
             await message.answer(
                 f"کاستوم ثبت شد. وضعیت: {event.status}\nلینک اختصاصی پس از انتشار در پنل و ربات نمایش داده می‌شود.",
-                reply_markup=main_menu(),
+                reply_markup=await menu_for(db, db_user),
             )
         else:
-            await message.answer(f"پیش‌نویس ذخیره شد. شناسه: {event.id}", reply_markup=main_menu())
+            await message.answer(f"پیش‌نویس ذخیره شد. شناسه: {event.id}", reply_markup=await menu_for(db, db_user))
     except Exception as exc:  # noqa: BLE001
         await message.answer(f"خطا: {getattr(exc, 'message', exc)}")
         return

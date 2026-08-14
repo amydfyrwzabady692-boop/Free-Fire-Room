@@ -9,11 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.bot.access import menu_for
 from app.bot.keyboards.common import (
     checklist_kb,
     event_detail_kb,
     event_list_kb,
-    main_menu,
     membership_kb,
     tos_kb,
 )
@@ -97,7 +97,7 @@ async def cmd_start(message: Message, command: CommandObject, db: AsyncSession, 
     extra = ""
     if kind == "event" and token:
         extra = "\nاز لینک اختصاصی یک کاستوم وارد شدید."
-    await message.answer("منوی اصلی آماده است." + extra, reply_markup=main_menu())
+    await message.answer("منوی اصلی آماده است." + extra, reply_markup=await menu_for(db, db_user))
     if kind == "event" and token:
         await _show_event(message, db, db_user, token)
 
@@ -109,7 +109,7 @@ async def tos_accept(cb: CallbackQuery, db: AsyncSession, db_user: User):
     await db.flush()
     await cb.message.answer("شرایط پذیرفته شد.")
     if await _ensure_onboarding(cb.message, db_user, db):
-        await cb.message.answer("خوش آمدید.", reply_markup=main_menu())
+        await cb.message.answer("خوش آمدید.", reply_markup=await menu_for(db, db_user))
     await cb.answer()
 
 
@@ -123,7 +123,7 @@ async def tos_privacy(cb: CallbackQuery):
 async def membership_recheck(cb: CallbackQuery, db: AsyncSession, db_user: User):
     await hit_rate_limit(f"rl:mem:{db_user.telegram_id}", get_settings().rate_limit_membership_per_minute)
     if await _ensure_onboarding(cb.message, db_user, db):
-        await cb.message.answer("عضویت تأیید شد.", reply_markup=main_menu())
+        await cb.message.answer("عضویت تأیید شد.", reply_markup=await menu_for(db, db_user))
     await cb.answer()
 
 
@@ -420,6 +420,6 @@ async def report_event(cb: CallbackQuery, db: AsyncSession, db_user: User):
 
 
 @router.callback_query(F.data == "menu:home")
-async def menu_home(cb: CallbackQuery):
-    await cb.message.answer("منوی اصلی", reply_markup=main_menu())
+async def menu_home(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    await cb.message.answer("منوی اصلی", reply_markup=await menu_for(db, db_user))
     await cb.answer()

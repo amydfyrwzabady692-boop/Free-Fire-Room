@@ -1,17 +1,17 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 
-def main_menu() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="کاستوم‌های آینده"), KeyboardButton(text="کاستوم‌های امروز")],
-            [KeyboardButton(text="ثبت‌نام‌های من"), KeyboardButton(text="نتایج و تاریخچه")],
-            [KeyboardButton(text="دعوت دوستان"), KeyboardButton(text="ثبت کاستوم")],
-            [KeyboardButton(text="اعلان‌های من"), KeyboardButton(text="پروفایل")],
-            [KeyboardButton(text="راهنما و قوانین"), KeyboardButton(text="پشتیبانی")],
-        ],
-        resize_keyboard=True,
-    )
+def main_menu(*, admin: bool = False) -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton(text="کاستوم‌های آینده"), KeyboardButton(text="کاستوم‌های امروز")],
+        [KeyboardButton(text="ثبت‌نام‌های من"), KeyboardButton(text="نتایج و تاریخچه")],
+        [KeyboardButton(text="دعوت دوستان"), KeyboardButton(text="ثبت کاستوم")],
+        [KeyboardButton(text="اعلان‌های من"), KeyboardButton(text="پروفایل")],
+        [KeyboardButton(text="راهنما و قوانین"), KeyboardButton(text="پشتیبانی")],
+    ]
+    if admin:
+        rows.append([KeyboardButton(text="پنل ادمین")])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 def tos_kb() -> InlineKeyboardMarkup:

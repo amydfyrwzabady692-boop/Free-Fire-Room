@@ -37,3 +37,11 @@ class SupportSG(StatesGroup):
 class ReportSG(StatesGroup):
     reason = State()
     body = State()
+
+
+class AdminSG(StatesGroup):
+    user_query = State()
+    ban_reason = State()
+    channel_ref = State()
+    broadcast_title = State()
+    broadcast_body = State()
