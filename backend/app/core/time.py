@@ -26,6 +26,13 @@ def to_tz(dt: datetime, tz_name: str = DEFAULT_TZ) -> datetime:
     return as_utc(dt).astimezone(ZoneInfo(tz_name))
 
 
+def local_day_bounds(tz_name: str = DEFAULT_TZ, *, now: datetime | None = None) -> tuple[datetime, datetime]:
+    local = (now or datetime.now(UTC)).astimezone(ZoneInfo(tz_name))
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    return start.astimezone(UTC), end.astimezone(UTC)
+
+
 def _jalali(dt: datetime, tz_name: str = DEFAULT_TZ) -> jdatetime.datetime:
     local = to_tz(dt, tz_name).replace(tzinfo=None)
     return jdatetime.datetime.fromgregorian(datetime=local)

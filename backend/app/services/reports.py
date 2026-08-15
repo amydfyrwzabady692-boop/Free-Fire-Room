@@ -22,6 +22,7 @@ REPORT_LABELS = {
     ReportReason.FAKE_PRIZE: "جایزه دروغ / کاستوم جعلی",
     ReportReason.FAKE_ORGANIZER: "برگزارکننده جعلی",
     ReportReason.SUDDEN_RULE_CHANGE: "قوانین را ناگهان عوض کرد",
+    ReportReason.CHEATER: "چیتر در کاستوم",
     ReportReason.INAPPROPRIATE: "محتوای نامناسب",
     ReportReason.OTHER: "مورد دیگر",
 }
@@ -31,8 +32,10 @@ PLAYER_REASONS = {
     ReportReason.UNPAID_PRIZE,
     ReportReason.WRONG_ROOM,
     ReportReason.FAKE_PRIZE,
+    ReportReason.CHEATER,
     ReportReason.OTHER,
 }
+CHEATER_REPORT_LIMIT = 5
 
 
 def report_label(reason: str) -> str:
@@ -74,7 +77,8 @@ async def event_missed_credentials(db: AsyncSession, event: Event) -> bool:
     return not creds_were_provided(creds)
 
 
-async def notify_active_admins(bot, db: AsyncSession, text: str) -> None:
+async def notify_active_admins(bot, db: AsyncSession, text: str) -> set[int]:
+    sent: set[int] = set()
     rows = (
         await db.scalars(
             select(Admin).where(Admin.is_active.is_(True)).options(selectinload(Admin.user))
@@ -86,14 +90,58 @@ async def notify_active_admins(bot, db: AsyncSession, text: str) -> None:
             continue
         try:
             await bot.send_message(user.telegram_id, text)
+            sent.add(user.telegram_id)
         except Exception:
             continue
+    return sent
+
+
+async def notify_telegram_user(bot, telegram_id: int | None, text: str) -> bool:
+    if not telegram_id:
+        return False
+    try:
+        await bot.send_message(telegram_id, text)
+        return True
+    except Exception:
+        return False
+
+
+def normalize_cheater_name(text: str) -> str:
+    raw = (text or "").strip()
+    for prefix in ("نام چیتر:", "چیتر:", "cheater:"):
+        if raw.lower().startswith(prefix.lower()):
+            raw = raw[len(prefix) :].strip()
+            break
+    return raw[:48]
+
+
+def format_cheater_body(name: str) -> str:
+    return f"نام چیتر: {normalize_cheater_name(name)}"
 
 
 async def existing_user_report(db: AsyncSession, user_id, event_id) -> Report | None:
     return await db.scalar(
-        select(Report).where(Report.reporter_id == user_id, Report.event_id == event_id).limit(1)
+        select(Report)
+        .where(
+            Report.reporter_id == user_id,
+            Report.event_id == event_id,
+            Report.reason != ReportReason.CHEATER.value,
+        )
+        .limit(1)
     )
+
+
+async def cheater_reports_for_user(db: AsyncSession, user_id, event_id) -> list[Report]:
+    rows = (
+        await db.scalars(
+            select(Report).where(
+                Report.reporter_id == user_id,
+                Report.event_id == event_id,
+                Report.reason == ReportReason.CHEATER.value,
+            )
+        )
+    ).all()
+    return list(rows)
 
 
 async def create_player_report(
@@ -112,14 +160,26 @@ async def create_player_report(
         return None, "این نوع گزارش از ربات قابل ثبت نیست."
 
     org = event.organizer or await db.get(Organizer, event.organizer_id)
-    if org and org.user_id == reporter.id:
+    if reason_enum != ReportReason.CHEATER and org and org.user_id == reporter.id:
         return None, "نمی‌توانید کاستوم خودتان را گزارش کنید."
 
-    prev = await existing_user_report(db, reporter.id, event.id)
-    if prev:
+    now = datetime.now(UTC)
+    if reason_enum == ReportReason.CHEATER:
+        name = normalize_cheater_name(body or "")
+        if len(name) < 2:
+            return None, "نام چیتر را بفرستید (نام داخل Free Fire)."
+        if now < event.starts_at:
+            return None, "کاستوم هنوز شروع نشده؛ بعد از شروع می‌توانید چیتر را گزارش کنید."
+        prev_cheaters = await cheater_reports_for_user(db, reporter.id, event.id)
+        if len(prev_cheaters) >= CHEATER_REPORT_LIMIT:
+            return None, "برای این کاستوم سقف گزارش چیتر پر شده است."
+        seen = {normalize_cheater_name(row.body).casefold() for row in prev_cheaters}
+        if name.casefold() in seen:
+            return None, "همین نام را قبلاً برای این کاستوم گزارش کرده‌اید."
+        body = format_cheater_body(name)
+    elif await existing_user_report(db, reporter.id, event.id):
         return None, "قبلاً برای این کاستوم یک گزارش ثبت کرده‌اید."
 
-    now = datetime.now(UTC)
     if reason_enum == ReportReason.NO_CREDENTIALS:
         if credentials_window_open(event, now):
             return None, "هنوز مهلت ۵ دقیقه‌ای برگزارکننده برای ارسال آیدی و رمز تمام نشده است."
@@ -145,14 +205,29 @@ async def create_player_report(
 
 
 def format_report_alert(*, event: Event, reporter: User, reason: str, body: str, organizer_user: User | None) -> str:
+    title = "گزارش چیتر در کاستوم" if reason == ReportReason.CHEATER else "گزارش جدید از بازیکن"
+    extra = ""
+    if reason == ReportReason.CHEATER:
+        extra = f"نام چیتر: {normalize_cheater_name(body)}\n"
     return (
-        "گزارش جدید از بازیکن\n\n"
+        f"{title}\n\n"
         f"کاستوم: {event.title}\n"
         f"ساعت: {format_local(event.starts_at, event.timezone)}\n"
         f"دلیل: {report_label(reason)}\n"
+        f"{extra}"
         f"گزارش‌دهنده: {format_person(reporter)}\n"
         f"برگزارکننده: {format_person(organizer_user)}\n\n"
         f"{body[:500]}"
+    )
+
+
+def format_cheater_alert_for_organizer(*, event: Event, reporter: User, body: str) -> str:
+    return (
+        "گزارش چیتر در کاستوم شما\n\n"
+        f"کاستوم: {event.title}\n"
+        f"ساعت: {format_local(event.starts_at, event.timezone)}\n"
+        f"نام چیتر: {normalize_cheater_name(body)}\n"
+        f"گزارش‌دهنده: {format_person(reporter)}"
     )
 
 

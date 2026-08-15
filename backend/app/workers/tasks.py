@@ -410,3 +410,78 @@ def send_telegram_message(telegram_id: int, text: str):
         await get_bot().send_message(telegram_id, text)
 
     _run(_s())
+
+
+@celery_app.task(name="app.workers.tasks.send_daily_custom_digest")
+def send_daily_custom_digest():
+    db = SyncSessionLocal()
+    try:
+        _run(_send_daily_custom_digest(db))
+        db.commit()
+    finally:
+        db.close()
+
+
+async def _send_daily_custom_digest(db) -> None:
+    from redis import Redis
+    from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+    from app.bot.keyboards.common import event_list_kb
+    from app.bot.loader import get_bot
+    from app.core.config import get_settings
+    from app.core.enums import UserStatus
+    from app.core.time import DEFAULT_TZ, to_tz
+    from app.services.digest import digest_button_items, format_daily_digest, upcoming_prize_customs_sync
+
+    settings = get_settings()
+    day_key = to_tz(datetime.now(UTC), DEFAULT_TZ).date().isoformat()
+    redis = Redis.from_url(settings.redis_url)
+    lock_key = f"lock:daily_digest:{day_key}"
+    try:
+        locked = bool(redis.set(lock_key, WORKER_ID, nx=True, ex=26 * 3600))
+    except Exception:
+        log.exception("daily_digest_lock_failed")
+        locked = True
+    if not locked:
+        log.info("daily_digest_already_sent", day=day_key)
+        return
+
+    events = upcoming_prize_customs_sync(db)
+    if not events:
+        log.info("daily_digest_skipped_empty")
+        return
+
+    text = format_daily_digest(events)
+    markup = event_list_kb(digest_button_items(events), mode="digest")
+    users = db.scalars(
+        select(User).where(
+            User.deleted_at.is_(None),
+            User.is_bot_blocked.is_(False),
+            User.notification_enabled.is_(True),
+            User.status == UserStatus.ACTIVE,
+        )
+    ).all()
+    bot = get_bot()
+    sent = failed = skipped = 0
+    for user in users:
+        if not user.telegram_id:
+            skipped += 1
+            continue
+        try:
+            await bot.send_message(user.telegram_id, text, reply_markup=markup)
+            sent += 1
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(exc.retry_after + 0.5)
+            try:
+                await bot.send_message(user.telegram_id, text, reply_markup=markup)
+                sent += 1
+            except Exception:
+                failed += 1
+        except TelegramForbiddenError:
+            user.is_bot_blocked = True
+            skipped += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(1 / max(get_outbound_rate(), 1))
+        if (sent + failed + skipped) % 50 == 0:
+            db.commit()
+    log.info("daily_digest_sent", day=day_key, users=len(users), sent=sent, failed=failed, skipped=skipped)

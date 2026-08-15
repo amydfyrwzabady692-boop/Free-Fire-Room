@@ -25,7 +25,7 @@ from app.bot.keyboards.common import (
 from app.bot.onboarding import ensure_onboarding
 from app.bot.states.groups import ReportSG, ReviewSG
 from app.core.config import get_settings
-from app.core.enums import EventStatus, EventVisibility, RegistrationStatus, RequirementType
+from app.core.enums import EventStatus, EventVisibility, RegistrationStatus, ReportReason, RequirementType
 from app.core.errors import AppError
 from app.core.rate_limit import hit_rate_limit
 from app.core.time import format_local
@@ -39,9 +39,11 @@ from app.services.registration import register_user
 from app.services.reports import (
     create_player_report,
     event_missed_credentials,
+    format_cheater_alert_for_organizer,
     format_prize_vote_alert,
     format_report_alert,
     notify_active_admins,
+    notify_telegram_user,
 )
 from app.services.requirements import evaluate_requirements
 from app.services.reviews import (
@@ -87,13 +89,10 @@ async def cmd_start(message: Message, command: CommandObject, db: AsyncSession, 
         return
     extra = ""
     if kind == "event" and token:
-        extra = "\nاز لینک یک کاستوم وارد شدید. کانال‌های جوین اجباری همان کاستوم را عضو شوید تا سر ساعت رمز برایتان بیاید."
+        extra = "\n\nاز لینک یک کاستوم وارد شدید. کانال‌های جوین اجباری همان کاستوم را عضو شوید تا سر ساعت رمز برایتان بیاید."
     await message.answer(
-        "منوی اصلی آماده است.\n"
-        "• برای ورود باید کانال‌های مالک ربات را جوین باشید\n"
-        "• «کاستوم‌های جایزه‌دار» را ببینید یا خودتان با «ثبت کاستوم» بگذارید\n"
-        "• پنل برگزارکننده برای کسی است که کاستوم می‌گذارد؛ پنل مالک ربات فقط برای صاحب ربات است\n"
-        "• جزئیات کامل در «راهنما و قوانین»"
+        f"{T.INTRO}\n\n"
+        "منوی اصلی آماده است. جزئیات بیشتر در «راهنما و قوانین»."
         + extra,
         reply_markup=await menu_for(db, db_user),
     )
@@ -108,7 +107,7 @@ async def tos_accept(cb: CallbackQuery, db: AsyncSession, db_user: User):
     await db.flush()
     await cb.message.answer("شرایط پذیرفته شد.")
     if await _ensure_onboarding(cb.message, db_user, db):
-        await cb.message.answer("خوش آمدید.", reply_markup=await menu_for(db, db_user))
+        await cb.message.answer(T.INTRO, reply_markup=await menu_for(db, db_user))
     await cb.answer()
 
 
@@ -147,10 +146,10 @@ async def _list_events(db: AsyncSession, *, mode: str = "upcoming") -> list[Even
             Event.starts_at.desc()
         )
     elif mode == "today":
-        end = now.replace(hour=23, minute=59, second=59)
-        stmt = stmt.where(
-            Event.starts_at >= now.replace(hour=0, minute=0, second=0), Event.starts_at <= end
-        ).order_by(Event.starts_at.asc())
+        from app.core.time import local_day_bounds
+
+        start, end = local_day_bounds()
+        stmt = stmt.where(Event.starts_at >= start, Event.starts_at < end).order_by(Event.starts_at.asc())
     else:
         stmt = stmt.where(Event.starts_at >= now).order_by(Event.starts_at.asc())
     return list((await db.scalars(stmt)).all())
@@ -559,7 +558,12 @@ async def report_event(cb: CallbackQuery, db: AsyncSession, db_user: User):
         return
     org = e.organizer
     if org and org.user_id == db_user.id:
-        await cb.answer("نمی‌توانید کاستوم خودتان را گزارش کنید.", show_alert=True)
+        await cb.message.answer(
+            f"گزارش کاستوم «{e.title}»\n"
+            "برای کاستوم خودتان فقط می‌توانید چیتر را گزارش کنید.",
+            reply_markup=report_reasons_kb(token, cheater_only=True),
+        )
+        await cb.answer()
         return
     await cb.message.answer(
         f"گزارش کاستوم «{e.title}»\nدلیل را انتخاب کنید:",
@@ -585,6 +589,18 @@ async def report_reason_chosen(cb: CallbackQuery, db: AsyncSession, db_user: Use
         await cb.message.answer("توضیح کوتاه بفرستید: چه اتفاقی افتاد؟")
         await cb.answer()
         return
+    if reason == "cheater":
+        if datetime.now(UTC) < e.starts_at:
+            await cb.answer("کاستوم هنوز شروع نشده.", show_alert=True)
+            return
+        await state.set_state(ReportSG.body)
+        await state.update_data(event_token=token, reason=reason)
+        await cb.message.answer(
+            "نام چیتر داخل Free Fire را بفرستید.\n"
+            "همان نامی که در کاستوم دیدید."
+        )
+        await cb.answer()
+        return
     report, err = await create_player_report(db, reporter=db_user, event=e, reason=reason)
     if err:
         await cb.answer(err, show_alert=True)
@@ -597,12 +613,16 @@ async def report_reason_chosen(cb: CallbackQuery, db: AsyncSession, db_user: Use
 @router.message(ReportSG.body)
 async def report_other_body(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
     body = (message.text or "").strip()
-    if len(body) < 5:
-        await message.answer("کمی بیشتر توضیح بدهید (حداقل چند کلمه).")
-        return
     data = await state.get_data()
     token = data.get("event_token")
     reason = data.get("reason") or "other"
+    if reason == "cheater":
+        if len(body) < 2:
+            await message.answer("نام چیتر را بفرستید (حداقل ۲ حرف).")
+            return
+    elif len(body) < 5:
+        await message.answer("کمی بیشتر توضیح بدهید (حداقل چند کلمه).")
+        return
     e = await db.scalar(select(Event).where(Event.public_token == token).options(selectinload(Event.organizer)))
     await state.clear()
     if not e:
@@ -613,6 +633,9 @@ async def report_other_body(message: Message, state: FSMContext, db: AsyncSessio
         await message.answer(err)
         return
     await _notify_report(message.bot, db, report, e, db_user)
+    if reason == "cheater":
+        await message.answer("گزارش چیتر برای مالک ربات و برگزارکننده کاستوم ثبت شد.")
+        return
     await message.answer("گزارش برای مالک ربات ثبت شد.")
 
 
@@ -629,6 +652,13 @@ async def _notify_report(bot, db: AsyncSession, report, event: Event, reporter: 
             body=report.body,
             organizer_user=org_user,
         ),
+    )
+    if report.reason != ReportReason.CHEATER or not org_user:
+        return
+    await notify_telegram_user(
+        bot,
+        org_user.telegram_id,
+        format_cheater_alert_for_organizer(event=event, reporter=reporter, body=report.body),
     )
 
 

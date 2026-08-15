@@ -68,6 +68,9 @@ def event_list_kb(items: list[tuple[str, str]], *, mode: str | None = None) -> I
         rows.append([ibtn("کاستوم‌های ۴۸ ساعت گذشته", callback_data="list:past")])
     elif mode == "past":
         rows.append([ibtn("کاستوم‌های پیش‌رو", callback_data="list:upcoming", style=PRIMARY)])
+    elif mode == "digest":
+        rows.append([ibtn("همه کاستوم‌های جایزه‌دار", callback_data="list:upcoming", style=SUCCESS)])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
     rows.append([ibtn("بازگشت", callback_data="menu:home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -151,17 +154,22 @@ def help_back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[ibtn("بازگشت به راهنما", callback_data="help:home", style=PRIMARY)]])
 
 
-def report_reasons_kb(token: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [ibtn("آیدی و رمز را نفرستاد", callback_data=f"repr:{token}:no_credentials", style=DANGER)],
-            [ibtn("بعد از کاستوم جایزه نداد", callback_data=f"repr:{token}:unpaid_prize", style=DANGER)],
-            [ibtn("رمز یا اتاق اشتباه بود", callback_data=f"repr:{token}:wrong_room", style=DANGER)],
-            [ibtn("جایزه دروغ / کاستوم جعلی", callback_data=f"repr:{token}:fake_prize", style=DANGER)],
-            [ibtn("مورد دیگر", callback_data=f"repr:{token}:other")],
-            [ibtn("بازگشت", callback_data=f"ev:{token}")],
-        ]
-    )
+def report_reasons_kb(token: str, *, cheater_only: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    if not cheater_only:
+        rows.extend(
+            [
+                [ibtn("آیدی و رمز را نفرستاد", callback_data=f"repr:{token}:no_credentials", style=DANGER)],
+                [ibtn("بعد از کاستوم جایزه نداد", callback_data=f"repr:{token}:unpaid_prize", style=DANGER)],
+                [ibtn("رمز یا اتاق اشتباه بود", callback_data=f"repr:{token}:wrong_room", style=DANGER)],
+                [ibtn("جایزه دروغ / کاستوم جعلی", callback_data=f"repr:{token}:fake_prize", style=DANGER)],
+            ]
+        )
+    rows.append([ibtn("چیتر در کاستوم", callback_data=f"repr:{token}:cheater", style=DANGER)])
+    if not cheater_only:
+        rows.append([ibtn("مورد دیگر", callback_data=f"repr:{token}:other")])
+    rows.append([ibtn("بازگشت", callback_data=f"ev:{token}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def checklist_kb(token: str, join_urls: list[tuple[str, str]] | None = None) -> InlineKeyboardMarkup:

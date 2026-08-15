@@ -25,10 +25,15 @@ celery_app.conf.update(
             "task": "app.workers.tasks.purge_old_credentials",
             "schedule": crontab(hour=3, minute=10),
         },
+        "daily-prize-custom-digest": {
+            "task": "app.workers.tasks.send_daily_custom_digest",
+            "schedule": crontab(hour=14, minute=30),
+        },
     },
     task_routes={
         "app.workers.tasks.send_telegram_message": {"queue": "telegram"},
         "app.workers.tasks.run_broadcast": {"queue": "broadcasts"},
+        "app.workers.tasks.send_daily_custom_digest": {"queue": "broadcasts"},
         "app.workers.tasks.dispatch_due_jobs": {"queue": "default"},
     },
 )

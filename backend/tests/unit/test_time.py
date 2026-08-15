@@ -1,8 +1,9 @@
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pytest
 
-from app.core.time import combine_local_date_and_clock, parse_clock, upcoming_local_dates
+from app.core.time import combine_local_date_and_clock, local_day_bounds, parse_clock, upcoming_local_dates
 
 
 @pytest.mark.parametrize(
@@ -45,3 +46,10 @@ def test_combine_local_date_and_clock_uses_tehran():
     assert local.day == 15
     assert local.hour == 22
     assert local.minute == 0
+
+
+def test_local_day_bounds_use_tehran():
+    start, end = local_day_bounds(now=datetime(2026, 8, 15, 22, 0, tzinfo=ZoneInfo("Asia/Tehran")))
+    assert end - start == timedelta(days=1)
+    assert start.astimezone(ZoneInfo("Asia/Tehran")).hour == 0
+    assert start.tzinfo is not None

@@ -114,6 +114,7 @@ class ReportReason(StrEnum):
     WRONG_ROOM = "wrong_room"
     SUDDEN_RULE_CHANGE = "sudden_rule_change"
     UNPAID_PRIZE = "unpaid_prize"
+    CHEATER = "cheater"
     INAPPROPRIATE = "inappropriate"
     OTHER = "other"
 
