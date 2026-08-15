@@ -1,5 +1,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
+from app.bot.helpers import add_bot_to_channel_url
+
 PRIMARY = "primary"
 SUCCESS = "success"
 DANGER = "danger"
@@ -182,6 +184,25 @@ def checklist_kb(token: str, join_urls: list[tuple[str, str]] | None = None) -> 
         rows.append([ibtn(f"عضویت در {title[:28]}", url=url, style=PRIMARY)])
     rows.append([ibtn("عضو شدم — بررسی مجدد", callback_data=f"join:{token}", style=SUCCESS)])
     rows.append([ibtn("بازگشت", callback_data=f"ev:{token}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def add_required_channel_kb(
+    owned: list[tuple[str, str]] | None = None,
+    *,
+    include_done: bool = False,
+    cancel: bool = True,
+) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    add_url = add_bot_to_channel_url()
+    if add_url:
+        rows.append([ibtn("۱) افزودن ربات به کانال", url=add_url, style=SUCCESS)])
+    for cid, title in owned or []:
+        rows.append([ibtn(f"استفاده از {title[:28]}", callback_data=f"chpick:{cid}", style=PRIMARY)])
+    if include_done:
+        rows.append([ibtn("تمام شد — ادامه", callback_data="chdone", style=SUCCESS)])
+    if cancel:
+        rows.append([ibtn("لغو", callback_data="wiz:cancel", style=DANGER)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

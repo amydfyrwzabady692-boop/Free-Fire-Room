@@ -12,7 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.bot.access import is_active_admin, menu_for
-from app.bot.keyboards.common import DANGER, PRIMARY, SUCCESS, ibtn
+from app.bot.helpers import extract_channel_ref
+from app.bot.keyboards.common import DANGER, PRIMARY, SUCCESS, add_required_channel_kb, ibtn
 from app.bot.states.groups import AdminSG
 from app.core.enums import BanScope, EventStatus, OrganizerStatus, RegistrationStatus, ReportStatus, UserStatus
 from app.core.errors import AppError
@@ -446,7 +447,11 @@ async def admin_channel_ask(cb: CallbackQuery, db: AsyncSession, db_user: User, 
         await _deny(cb)
         return
     await state.set_state(AdminSG.channel_ref)
-    await cb.message.answer("آیدی عددی کانال یا @username را بفرستید. ربات باید ادمین کانال باشد.")
+    await cb.message.answer(
+        "کانال اجباری ورود به ربات را وصل کنید.\n\n"
+        "دکمه «افزودن ربات به کانال» را بزنید، بعد یک پست از کانال را فوروارد کنید یا @username / لینک را بفرستید.",
+        reply_markup=add_required_channel_kb(cancel=False),
+    )
     await cb.answer()
 
 
@@ -455,9 +460,12 @@ async def admin_channel_add(message: Message, db: AsyncSession, db_user: User, s
     if not await _ok(db, db_user):
         await _deny(message)
         return
-    ref = (message.text or "").strip()
-    if not ref:
-        await message.answer("مقدار خالی است.")
+    ref = extract_channel_ref(message)
+    if ref is None:
+        await message.answer(
+            "کانال شناخته نشد. دکمه افزودن ربات را بزنید یا یک پست از کانال را فوروارد کنید.",
+            reply_markup=add_required_channel_kb(cancel=False),
+        )
         return
     try:
         await channel_svc.add_global_required_channel(db, message.bot, db_user.id, ref, scope="all")

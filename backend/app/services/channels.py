@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.errors import ValidationAppError
 from app.models.channel import Channel, ChannelOwnership, GlobalRequiredChannel
@@ -80,6 +81,22 @@ async def connect_organizer_channel(db: AsyncSession, bot, user, chat_ref: str |
     )
     await db.flush()
     return ch
+
+
+async def list_owned_channels(db: AsyncSession, user_id) -> list[Channel]:
+    rows = (
+        await db.scalars(
+            select(ChannelOwnership)
+            .where(ChannelOwnership.user_id == user_id, ChannelOwnership.is_active.is_(True))
+            .options(selectinload(ChannelOwnership.channel))
+        )
+    ).all()
+    out: list[Channel] = []
+    for own in rows:
+        ch = own.channel
+        if ch and ch.deleted_at is None:
+            out.append(ch)
+    return out
 
 
 async def add_global_required_channel(

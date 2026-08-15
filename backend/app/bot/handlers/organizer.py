@@ -7,26 +7,36 @@ from aiogram import F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import default_state
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardMarkup, Message
+from aiogram.enums import ChatMemberStatus
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.bot.access import menu_for
-from app.bot.helpers import event_deep_link
-from app.bot.keyboards.common import DANGER, PRIMARY, SUCCESS, ibtn, organizer_home_kb, pick_date_kb, wizard_nav
+from app.bot.helpers import event_deep_link, extract_channel_ref
+from app.bot.keyboards.common import (
+    DANGER,
+    PRIMARY,
+    SUCCESS,
+    add_required_channel_kb,
+    ibtn,
+    organizer_home_kb,
+    pick_date_kb,
+    wizard_nav,
+)
 from app.bot.onboarding import ensure_onboarding, target_message
 from app.bot.states.groups import CredsWaitSG, EventWizardSG
 from app.core.config import get_settings
 from app.core.enums import BanScope, EventStatus, OrganizerStatus
 from app.core.errors import AppError
 from app.core.time import combine_local_date_and_clock, format_jalali_date, format_local, parse_clock, upcoming_local_dates
-from app.models.channel import ChannelOwnership
+from app.models.channel import Channel, ChannelOwnership
 from app.models.event import Event, RoomCredential
 from app.models.organizer import Organizer
 from app.models.user import User
 from app.services.bans import is_banned
-from app.services.channels import connect_organizer_channel
+from app.services.channels import connect_organizer_channel, list_owned_channels
 from app.services.events import cancel_event, create_event, submit_for_publish, update_credentials, waiting_live_credential_event
 from app.services.organizers import get_or_apply
 from app.services.reports import credentials_deadline, credentials_window_open, creds_were_provided
@@ -152,7 +162,7 @@ async def wiz_need_date(message: Message):
 
 
 @router.message(EventWizardSG.starts_time)
-async def wiz_starts(message: Message, state: FSMContext):
+async def wiz_starts(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
     data = await state.get_data()
     picked = data.get("picked_date")
     if not picked:
@@ -177,33 +187,117 @@ async def wiz_starts(message: Message, state: FSMContext):
     )
     await state.set_state(EventWizardSG.channel)
     await message.answer(
-        f"زمان کاستوم: {format_local(when)}\n\n"
-        "اولین کانال جوین اجباری را بفرستید: @username یا آیدی عددی.\n\n"
-        "ربات را اول ادمین آن کانال کنید. بدون ادمین بودن ربات، عضویت بازیکن قابل بررسی نیست و رمز نباید بی‌دلیل ارسال شود."
+        f"زمان کاستوم: {format_local(when)}\n\n" + CHANNEL_STEP_TEXT,
+        reply_markup=await _channel_step_kb(db, db_user, [], extra=False),
+    )
+
+
+CHANNEL_STEP_TEXT = (
+    "کانال جوین اجباری را وصل کنید — دیگر لازم نیست آیدی عددی حفظ کنید.\n\n"
+    "آسان‌ترین راه:\n"
+    "۱) دکمه «افزودن ربات به کانال» را بزنید و کانال را انتخاب کنید تا ربات ادمین شود.\n"
+    "۲) بعد همین‌جا یک پست از آن کانال را فوروارد کنید، یا @username / لینک را بفرستید.\n\n"
+    "اگر قبلاً کانالی وصل کرده‌اید، از دکمه‌های پایین انتخابش کنید."
+)
+
+
+async def _owned_channel_buttons(db: AsyncSession, db_user: User, used_ids: list[str]) -> list[tuple[str, str]]:
+    owned = await list_owned_channels(db, db_user.id)
+    items = []
+    used = set(used_ids)
+    for ch in owned:
+        if str(ch.id) in used:
+            continue
+        items.append((str(ch.id), ch.title or str(ch.telegram_chat_id)))
+    return items[:8]
+
+
+async def _channel_step_kb(db: AsyncSession, db_user: User, used_ids: list[str], *, extra: bool) -> InlineKeyboardMarkup:
+    return add_required_channel_kb(
+        await _owned_channel_buttons(db, db_user, used_ids),
+        include_done=extra and bool(used_ids),
+    )
+
+
+def _private_fsm(bot, user_telegram_id: int) -> FSMContext:
+    from aiogram.fsm.storage.base import StorageKey
+
+    from app.bot.loader import get_dispatcher
+
+    dp = get_dispatcher()
+    return FSMContext(
+        storage=dp.storage,
+        key=StorageKey(bot_id=bot.id, chat_id=user_telegram_id, user_id=user_telegram_id),
+    )
+
+
+async def _attach_wizard_channel(
+    *,
+    bot,
+    telegram_id: int,
+    state: FSMContext,
+    db: AsyncSession,
+    db_user: User,
+    ch,
+    extra: bool,
+) -> None:
+    data = await state.get_data()
+    ids: list[str] = list(data.get("required_channel_ids") or [])
+    max_ch = int(await get_setting(db, "max_required_channels_per_event", 5))
+    if extra and len(ids) >= max_ch and str(ch.id) not in ids:
+        await bot.send_message(telegram_id, f"سقف کانال اجباری {max_ch} است. «تمام شد» را بزنید.")
+        return
+    if str(ch.id) not in ids:
+        ids.append(str(ch.id))
+    payload = {"required_channel_ids": ids, "channel_title": ch.title}
+    if not data.get("channel_id"):
+        payload["channel_id"] = str(ch.id)
+        payload["title"] = f"کاستوم {ch.title}"[:160]
+    await state.update_data(**payload)
+    max_ch = int(await get_setting(db, "max_required_channels_per_event", 5))
+    if not extra:
+        await state.set_state(EventWizardSG.extra_channels)
+        await bot.send_message(
+            telegram_id,
+            f"کانال «{ch.title}» به‌عنوان جوین اجباری ثبت شد.\n"
+            "اگر کانال دیگری هم می‌خواهید همان روش را تکرار کنید.\n"
+            "اگر تمام شد دکمه «تمام شد» را بزنید یا «-» بفرستید.",
+            reply_markup=await _channel_step_kb(db, db_user, ids, extra=True),
+        )
+        return
+    await bot.send_message(
+        telegram_id,
+        f"کانال «{ch.title}» اضافه شد ({len(ids)}/{max_ch}).\n"
+        "کانال بعدی، یا «تمام شد» / «-».",
+        reply_markup=await _channel_step_kb(db, db_user, ids, extra=True),
     )
 
 
 @router.message(EventWizardSG.channel)
 async def wiz_channel(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
-    ref = (message.text or "").strip()
-    try:
-        ch = await connect_organizer_channel(
-            db, message.bot, db_user, int(ref) if ref.lstrip("-").isdigit() else ref
+    ref = extract_channel_ref(message)
+    if ref is None:
+        await message.answer(
+            "کانال شناخته نشد.\nدکمه افزودن ربات را بزنید، یا یک پست از کانال را فوروارد کنید.",
+            reply_markup=await _channel_step_kb(db, db_user, [], extra=False),
         )
-    except Exception as exc:  # noqa: BLE001
-        await message.answer(str(getattr(exc, "message", exc)))
         return
-    await state.update_data(
-        channel_id=str(ch.id),
-        required_channel_ids=[str(ch.id)],
-        title=f"کاستوم {ch.title}"[:160],
-        channel_title=ch.title,
-    )
-    await state.set_state(EventWizardSG.extra_channels)
-    await message.answer(
-        f"کانال «{ch.title}» به‌عنوان جوین اجباری ثبت شد.\n"
-        "اگر کانال اجباری دیگری هم می‌خواهید @username را بفرستید.\n"
-        "اگر تمام شد «-» بفرستید."
+    try:
+        ch = await connect_organizer_channel(db, message.bot, db_user, ref)
+    except Exception as exc:  # noqa: BLE001
+        await message.answer(
+            str(getattr(exc, "message", exc)) + "\nاگر ربات هنوز ادمین نیست، اول دکمه «افزودن ربات به کانال» را بزنید.",
+            reply_markup=await _channel_step_kb(db, db_user, [], extra=False),
+        )
+        return
+    await _attach_wizard_channel(
+        bot=message.bot,
+        telegram_id=message.chat.id,
+        state=state,
+        db=db,
+        db_user=db_user,
+        ch=ch,
+        extra=False,
     )
 
 
@@ -212,26 +306,145 @@ async def wiz_extra(message: Message, state: FSMContext, db: AsyncSession, db_us
     text = (message.text or "").strip()
     data = await state.get_data()
     ids: list[str] = list(data.get("required_channel_ids") or [])
+    if text in {"-", "تمام شد", "ادامه"}:
+        if not ids:
+            await message.answer("حداقل یک کانال لازم است.", reply_markup=await _channel_step_kb(db, db_user, [], extra=False))
+            return
+        await _publish_custom(message, state, db, db_user)
+        return
     max_ch = int(await get_setting(db, "max_required_channels_per_event", 5))
-    if text != "-":
-        if len(ids) >= max_ch:
-            await message.answer(f"سقف کانال اجباری {max_ch} است. «-» بفرستید.")
-            return
-        try:
-            ch = await connect_organizer_channel(
-                db, message.bot, db_user, int(text) if text.lstrip("-").isdigit() else text
-            )
-        except Exception as exc:  # noqa: BLE001
-            await message.answer(str(getattr(exc, "message", exc)))
-            return
-        if str(ch.id) not in ids:
-            ids.append(str(ch.id))
-            await state.update_data(required_channel_ids=ids)
+    if len(ids) >= max_ch:
+        await message.answer(f"سقف کانال اجباری {max_ch} است. «تمام شد» را بزنید.")
+        return
+    ref = extract_channel_ref(message)
+    if ref is None:
         await message.answer(
-            f"کانال «{ch.title}» اضافه شد ({len(ids)}/{max_ch}).\nکانال جوین اجباری بعدی یا «-» برای ادامه."
+            "کانال شناخته نشد. فوروارد پست، @username، یا دکمه افزودن ربات.",
+            reply_markup=await _channel_step_kb(db, db_user, ids, extra=True),
         )
         return
-    await _publish_custom(message, state, db, db_user)
+    try:
+        ch = await connect_organizer_channel(db, message.bot, db_user, ref)
+    except Exception as exc:  # noqa: BLE001
+        await message.answer(
+            str(getattr(exc, "message", exc)),
+            reply_markup=await _channel_step_kb(db, db_user, ids, extra=True),
+        )
+        return
+    await _attach_wizard_channel(
+        bot=message.bot,
+        telegram_id=message.chat.id,
+        state=state,
+        db=db,
+        db_user=db_user,
+        ch=ch,
+        extra=True,
+    )
+
+
+@router.callback_query(F.data == "chdone")
+async def wiz_channels_done(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_user: User):
+    current = await state.get_state()
+    if current not in {EventWizardSG.extra_channels.state, EventWizardSG.channel.state}:
+        await cb.answer("الان در ثبت کاستوم نیستید.", show_alert=True)
+        return
+    data = await state.get_data()
+    if not data.get("required_channel_ids"):
+        await cb.answer("حداقل یک کانال لازم است.", show_alert=True)
+        return
+    await _publish_custom(cb.message, state, db, db_user)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("chpick:"))
+async def wiz_pick_owned_channel(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_user: User):
+    current = await state.get_state()
+    extra = current == EventWizardSG.extra_channels.state
+    if current not in {EventWizardSG.channel.state, EventWizardSG.extra_channels.state}:
+        await cb.answer("اول ثبت کاستوم را شروع کنید.", show_alert=True)
+        return
+    try:
+        ch = await db.get(Channel, UUID(cb.data.split(":", 1)[1]))
+    except ValueError:
+        await cb.answer("نامعتبر", show_alert=True)
+        return
+    if not ch:
+        await cb.answer("کانال یافت نشد", show_alert=True)
+        return
+    try:
+        ch = await connect_organizer_channel(db, cb.bot, db_user, ch.telegram_chat_id)
+    except Exception as exc:  # noqa: BLE001
+        await cb.answer(str(getattr(exc, "message", exc)), show_alert=True)
+        return
+    await _attach_wizard_channel(
+        bot=cb.bot,
+        telegram_id=cb.from_user.id,
+        state=state,
+        db=db,
+        db_user=db_user,
+        ch=ch,
+        extra=extra,
+    )
+    await cb.answer("ثبت شد")
+
+
+@router.my_chat_member()
+async def bot_added_as_channel_admin(event: ChatMemberUpdated, db: AsyncSession, db_user: User | None = None):
+    if not db_user:
+        return
+    new = event.new_chat_member
+    if not new.user.is_bot or new.status not in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR}:
+        return
+    if event.chat.type not in {"channel", "supergroup"}:
+        return
+    me = await event.bot.get_me()
+    if new.user.id != me.id:
+        return
+    try:
+        ch = await connect_organizer_channel(db, event.bot, db_user, event.chat.id)
+    except Exception as exc:  # noqa: BLE001
+        try:
+            await event.bot.send_message(
+                event.from_user.id,
+                f"ربات به کانال «{event.chat.title}» اضافه شد، ولی ثبت نشد:\n{getattr(exc, 'message', exc)}",
+            )
+        except Exception:
+            return
+        return
+    state = _private_fsm(event.bot, event.from_user.id)
+    current = await state.get_state()
+    extra = current == EventWizardSG.extra_channels.state
+    if current in {EventWizardSG.channel.state, EventWizardSG.extra_channels.state}:
+        await _attach_wizard_channel(
+            bot=event.bot,
+            telegram_id=event.from_user.id,
+            state=state,
+            db=db,
+            db_user=db_user,
+            ch=ch,
+            extra=extra,
+        )
+        return
+    from app.bot.states.groups import AdminSG
+
+    if current == AdminSG.channel_ref.state:
+        from app.services.channels import add_global_required_channel
+
+        try:
+            await add_global_required_channel(db, event.bot, db_user.id, event.chat.id, scope="all")
+            await event.bot.send_message(event.from_user.id, f"کانال اجباری ورود «{ch.title}» ثبت شد.")
+        except Exception as exc:  # noqa: BLE001
+            await event.bot.send_message(event.from_user.id, str(getattr(exc, "message", exc)))
+        await state.clear()
+        return
+    try:
+        await event.bot.send_message(
+            event.from_user.id,
+            f"ربات ادمین کانال «{ch.title}» شد و ذخیره گردید.\n"
+            "موقع ثبت کاستوم از دکمه «استفاده از …» انتخابش کنید.",
+        )
+    except Exception:
+        return
 
 
 async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession, db_user: User) -> None:
@@ -372,8 +585,9 @@ async def org_channels(cb: CallbackQuery, db: AsyncSession, db_user: User):
     ).all()
     if not rows:
         await cb.message.answer(
-            "کانالی وصل نشده. هنگام ثبت کاستوم کانال را اضافه کنید.",
-            reply_markup=organizer_home_kb(),
+            "هنوز کانالی وصل نشده.\n"
+            "دکمه زیر را بزنید تا ربات ادمین کانال شود؛ بعد موقع ثبت کاستوم همان کانال را انتخاب می‌کنید.",
+            reply_markup=add_required_channel_kb(cancel=False),
         )
         await cb.answer()
         return
