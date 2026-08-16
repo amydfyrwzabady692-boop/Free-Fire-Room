@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+import html
+
 from app.core.config import get_settings
+
+
+def esc(value: object) -> str:
+    return html.escape(str(value or ""), quote=False)
 
 
 def event_deep_link(token: str) -> str:

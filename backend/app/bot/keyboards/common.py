@@ -42,7 +42,7 @@ def main_menu(*, admin: bool = False) -> ReplyKeyboardMarkup:
         [kbtn("کاستوم‌های جایزه‌دار", PRIMARY)],
         [kbtn("ثبت کاستوم", SUCCESS), kbtn("پنل برگزارکننده", PRIMARY)],
         [kbtn("ثبت‌نام‌های من"), kbtn("راهنما و قوانین")],
-        [kbtn("پروفایل")],
+        [kbtn("پروفایل"), kbtn("پشتیبانی")],
     ]
     if admin:
         rows.append([kbtn("پنل مالک ربات", PRIMARY)])

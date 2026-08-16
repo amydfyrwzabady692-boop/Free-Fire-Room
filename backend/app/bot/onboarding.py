@@ -39,8 +39,9 @@ async def ensure_onboarding(message: Message, user: User, db: AsyncSession) -> b
     if missing:
         buttons = []
         for ch, _ in missing:
-            url = f"https://t.me/{ch.username}" if ch.username else ch.invite_link
-            buttons.append((f"عضویت در {ch.title}", url or "https://t.me"))
+            url = f"https://t.me/{ch.username.lstrip('@')}" if ch.username else ch.invite_link
+            if url:
+                buttons.append((f"عضویت در {ch.title}", url))
         await message.answer(
             "برای استارت و استفاده از ربات باید در کانال‌های مالک ربات عضو شوید، سپس «بررسی مجدد عضویت» را بزنید.",
             reply_markup=membership_kb(buttons),

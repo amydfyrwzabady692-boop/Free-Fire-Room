@@ -19,14 +19,19 @@ from app.services.audit import write_audit
 from app.services.scheduler import cancel_event_jobs, schedule_event_jobs
 from app.services.settings import get_setting
 
+MIN_START_LEAD_MINUTES = 10
+
 
 def _validate_times(starts_at, registration_ends_at, credentials_send_at) -> None:
     starts_at = as_utc(starts_at)
     registration_ends_at = as_utc(registration_ends_at)
     credentials_send_at = as_utc(credentials_send_at)
     now = datetime.now(UTC)
-    if starts_at <= now + timedelta(minutes=10):
-        raise ValidationAppError("starts_too_soon", "زمان برگزاری باید حداقل ۱۰ دقیقه بعد باشد.")
+    if starts_at <= now + timedelta(minutes=MIN_START_LEAD_MINUTES):
+        raise ValidationAppError(
+            "starts_too_soon",
+            f"زمان برگزاری باید حداقل {MIN_START_LEAD_MINUTES} دقیقه بعد باشد تا بازیکن‌ها وقت جوین داشته باشند.",
+        )
     if registration_ends_at > starts_at:
         raise ValidationAppError("reg_after_start", "پایان ثبت‌نام نمی‌تواند بعد از شروع بازی باشد.")
     if credentials_send_at > starts_at:

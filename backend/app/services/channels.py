@@ -80,7 +80,20 @@ async def connect_organizer_channel(db: AsyncSession, bot, user, chat_ref: str |
         extra={"telegram_chat_id": ch.telegram_chat_id},
     )
     await db.flush()
+    await ensure_join_link(bot, ch)
     return ch
+
+
+async def ensure_join_link(bot, ch: Channel) -> None:
+    if ch.username or ch.invite_link:
+        return
+    try:
+        link = await bot.create_chat_invite_link(ch.telegram_chat_id)
+        ch.invite_link = getattr(link, "invite_link", None)
+        if ch.invite_link:
+            ch.bot_can_invite = True
+    except Exception:
+        return
 
 
 async def list_owned_channels(db: AsyncSession, user_id) -> list[Channel]:
@@ -104,6 +117,7 @@ async def add_global_required_channel(
 ) -> GlobalRequiredChannel:
     result = await inspect_bot_admin(bot, chat_ref)
     ch = await upsert_channel_from_inspect(db, result)
+    await ensure_join_link(bot, ch)
     existing = await db.scalar(
         select(GlobalRequiredChannel).where(GlobalRequiredChannel.channel_id == ch.id, GlobalRequiredChannel.scope == scope)
     )

@@ -121,8 +121,8 @@ async def can_review(db: AsyncSession, user: User, event: Event) -> tuple[bool, 
     reg = await db.scalar(
         select(Registration).where(Registration.event_id == event.id, Registration.user_id == user.id)
     )
-    if not reg or reg.status in {RegistrationStatus.CANCELLED}:
-        return False, "فقط کسانی که در این کاستوم ثبت‌نام کرده‌اند می‌توانند نظر بدهند."
+    if not reg or reg.status != RegistrationStatus.CONFIRMED:
+        return False, "فقط کسانی که در این کاستوم ثبت‌نام قطعی شده‌اند می‌توانند نظر بدهند."
     return True, None
 
 

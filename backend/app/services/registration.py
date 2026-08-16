@@ -95,7 +95,7 @@ async def register_user(
     hard_missing = [
         i
         for i in checklist.items
-        if i.status == RequirementStatus.NOT_DONE and i.requirement_type != "capacity"
+        if i.status in {RequirementStatus.NOT_DONE, RequirementStatus.EXPIRED} and i.requirement_type != "capacity"
     ]
     if hard_missing:
         holder.status = RegistrationStatus.PENDING

@@ -151,7 +151,7 @@ def _collect_required_chat_ids(db: Session, event: Event) -> list[int]:
     ).all()
     for g in globals_:
         ch = db.get(Channel, g.channel_id)
-        if ch and ch.bot_is_admin:
+        if ch:
             ids.append(ch.telegram_chat_id)
     locals_ = db.scalars(
         select(EventRequiredChannel).where(
@@ -160,7 +160,7 @@ def _collect_required_chat_ids(db: Session, event: Event) -> list[int]:
     ).all()
     for e in locals_:
         ch = db.get(Channel, e.channel_id)
-        if ch and ch.bot_is_admin:
+        if ch:
             ids.append(ch.telegram_chat_id)
     return ids
 
@@ -212,15 +212,20 @@ def _upsert_delivery(db: Session, *, user, event, job, idem, status, error=None,
 
 
 def _render_credentials_message(event: Event, user: User, room_id: str, password: str, version: int) -> str:
+    import html
+
+    def esc(value: str) -> str:
+        return html.escape(str(value or ""), quote=False)
+
     name = user.first_name or user.username or str(user.telegram_id)
     header = event.custom_credentials_message or "مشخصات اتاق کاستوم شما:"
-    personal = f"\nشرکت‌کننده: {name} | کد ثبت‌نام: {str(user.id)[:8]}" if event.personalize_delivery else ""
+    personal = f"\nشرکت‌کننده: {esc(name)} | کد ثبت‌نام: {str(user.id)[:8]}" if event.personalize_delivery else ""
     ver = f"\nنسخه اطلاعات: {version}" if version > 1 else ""
     return (
-        f"{header}\n\n"
-        f"کاستوم: {event.title}\n"
-        f"Room ID: `{room_id}`\n"
-        f"Password: `{password}`"
+        f"{esc(header)}\n\n"
+        f"کاستوم: {esc(event.title)}\n"
+        f"Room ID: <code>{esc(room_id)}</code>\n"
+        f"Password: <code>{esc(password)}</code>"
         f"{personal}{ver}\n\n"
         "این پیام فقط برای شماست. اسکرین‌شات و بازنشر را کاملاً نمی‌توانیم مسدود کنیم؛"
         " لطفاً اطلاعات را در اختیار دیگران نگذارید."
@@ -247,7 +252,7 @@ async def deliver_one(bot: Bot, db: Session, event: Event, user: User, creds: Ro
     password = decrypt_secret(creds.room_password_encrypted)
     text = _render_credentials_message(event, user, room_id, password, creds.version)
     try:
-        msg = await bot.send_message(user.telegram_id, text, parse_mode="Markdown")
+        msg = await bot.send_message(user.telegram_id, text)
         _upsert_delivery(
             db,
             user=user,

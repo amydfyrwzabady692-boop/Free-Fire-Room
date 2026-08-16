@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.bot.access import menu_for
+from app.bot.helpers import esc
 from app.bot.keyboards.common import (
     checklist_kb,
     event_detail_kb,
@@ -23,7 +24,7 @@ from app.bot.keyboards.common import (
     review_stars_kb,
 )
 from app.bot.onboarding import ensure_onboarding
-from app.bot.states.groups import ReportSG, ReviewSG
+from app.bot.states.groups import ReportSG, ReviewSG, SupportSG
 from app.core.config import get_settings
 from app.core.enums import EventStatus, EventVisibility, RegistrationStatus, ReportReason, RequirementType
 from app.core.errors import AppError
@@ -40,6 +41,7 @@ from app.services.reports import (
     create_player_report,
     event_missed_credentials,
     format_cheater_alert_for_organizer,
+    format_person,
     format_prize_vote_alert,
     format_report_alert,
     notify_active_admins,
@@ -87,6 +89,11 @@ async def cmd_start(message: Message, command: CommandObject, db: AsyncSession, 
     await db.flush()
     if not await _ensure_onboarding(message, db_user, db):
         return
+    await _welcome_after_onboarding(message, db, db_user)
+
+
+async def _welcome_after_onboarding(message: Message, db: AsyncSession, db_user: User) -> None:
+    kind, token = _parse_start(db_user.start_payload)
     extra = ""
     if kind == "event" and token:
         extra = "\n\nاز لینک یک کاستوم وارد شدید. کانال‌های جوین اجباری همان کاستوم را عضو شوید تا سر ساعت رمز برایتان بیاید."
@@ -107,7 +114,7 @@ async def tos_accept(cb: CallbackQuery, db: AsyncSession, db_user: User):
     await db.flush()
     await cb.message.answer("شرایط پذیرفته شد.")
     if await _ensure_onboarding(cb.message, db_user, db):
-        await cb.message.answer(T.INTRO, reply_markup=await menu_for(db, db_user))
+        await _welcome_after_onboarding(cb.message, db, db_user)
     await cb.answer()
 
 
@@ -121,7 +128,7 @@ async def tos_privacy(cb: CallbackQuery):
 async def membership_recheck(cb: CallbackQuery, db: AsyncSession, db_user: User):
     await hit_rate_limit(f"rl:mem:{db_user.telegram_id}", get_settings().rate_limit_membership_per_minute)
     if await _ensure_onboarding(cb.message, db_user, db):
-        await cb.message.answer("عضویت تأیید شد.", reply_markup=await menu_for(db, db_user))
+        await _welcome_after_onboarding(cb.message, db, db_user)
     await cb.answer()
 
 
@@ -195,18 +202,18 @@ async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> st
     org_line = format_rating_line(await review_summary_for_organizer(db, e.organizer_id), prefix="سابقه برگزارکننده")
     ev_line = format_rating_line(await review_summary_for_event(db, e.id), prefix="امتیاز این کاستوم")
     return (
-        f"<b>{e.title}</b>\n"
-        f"برگزارکننده: {org}\n"
+        f"<b>{esc(e.title)}</b>\n"
+        f"برگزارکننده: {esc(org)}\n"
         f"{org_line}\n"
         f"{ev_line}\n"
-        f"کانال: {ch}\n"
+        f"کانال: {esc(ch)}\n"
         f"ساعت کاستوم (شمسی): {format_local(e.starts_at, e.timezone)}\n"
         f"مانده: {left} دقیقه\n\n"
         f"{extra}"
     )
 
 
-@router.message(F.text.in_({"کاستوم‌های آینده", "کاستوم‌های جایزه‌دار", "اطلاع‌رسانی"}))
+@router.message(F.text.in_({"کاستوم‌های آینده", "کاستوم‌های جایزه‌دار"}))
 @router.callback_query(F.data == "list:upcoming")
 async def upcoming(event: Message | CallbackQuery, db: AsyncSession, db_user: User):
     msg = event.message if isinstance(event, CallbackQuery) else event
@@ -268,7 +275,10 @@ async def today(message: Message, db: AsyncSession, db_user: User):
 
 
 @router.callback_query(F.data.startswith("ev:"))
-async def show_event_cb(cb: CallbackQuery, db: AsyncSession, db_user: User):
+async def show_event_cb(cb: CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
+    current = await state.get_state()
+    if current and (current.startswith("ReviewSG") or current.startswith("ReportSG")):
+        await state.clear()
     token = cb.data.split(":", 1)[1]
     await _show_event(cb.message, db, db_user, token)
     await cb.answer()
@@ -305,7 +315,7 @@ async def _show_event(message: Message, db: AsyncSession, user: User, token: str
     elif not started:
         text += "\nبعد از جوین، «عضو شدم» را بزنید. سر ساعت برگزارکننده رمز را در ربات می‌فرستد و فقط به عضو‌ها می‌رسد."
     else:
-        text += "\nاگر رمز نیامد یا جایزه نداد: با «گزارش به مالک ربات» فقط به مالک خبر بدهید. نظر و امتیاز جداست و عمومی است."
+        text += "\nاگر رمز نیامد یا جایزه نداد: «گزارش به مالک ربات». گزارش چیتر هم به مالک می‌رسد هم به برگزارکننده."
     await message.answer(
         text,
         reply_markup=event_detail_kb(
@@ -496,8 +506,28 @@ async def help_section(cb: CallbackQuery):
 
 
 @router.message(F.text == "پشتیبانی")
-async def support(message: Message):
-    await message.answer("پیام خود را برای پشتیبانی بنویسید. تیم مدیریت آن را در پنل می‌بیند.\n" + T.DISCLAIMER)
+async def support(message: Message, state: FSMContext):
+    await state.set_state(SupportSG.message)
+    await message.answer("پیام خود را بنویسید. مستقیم به مالک ربات می‌رسد.\nبرای انصراف /cancel")
+
+
+@router.message(SupportSG.message)
+async def support_body(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
+    body = (message.text or "").strip()
+    if body in {"/cancel", "لغو", "انصراف"}:
+        await state.clear()
+        await message.answer("لغو شد.", reply_markup=await menu_for(db, db_user))
+        return
+    if len(body) < 3:
+        await message.answer("پیام خیلی کوتاه است.")
+        return
+    await notify_active_admins(
+        message.bot,
+        db,
+        f"پیام پشتیبانی\nاز: {format_person(db_user)}\n\n{body[:2000]}",
+    )
+    await state.clear()
+    await message.answer("پیام برای مالک ربات ارسال شد.", reply_markup=await menu_for(db, db_user))
 
 
 @router.message(F.text == "پروفایل")

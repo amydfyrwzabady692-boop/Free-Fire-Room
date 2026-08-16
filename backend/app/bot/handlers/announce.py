@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime as dt
+from datetime import UTC, date, datetime as dt, timedelta
 from uuid import UUID
 
 from aiogram import F, Router
@@ -24,6 +24,7 @@ from app.services.announcements import (
     list_upcoming_announcements,
 )
 from app.services.bans import is_banned
+from app.services.events import MIN_START_LEAD_MINUTES
 
 router = Router(name="announce")
 
@@ -159,8 +160,10 @@ async def ann_time(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("ساعت نامعتبر است. نمونه: 22:00 یا 22")
         return
-    if when <= dt.now(UTC):
-        await message.answer("این ساعت گذشته است. ساعت بعدی همین روز را بفرستید.")
+    if when <= dt.now(UTC) + timedelta(minutes=MIN_START_LEAD_MINUTES):
+        await message.answer(
+            f"ساعت باید حداقل {MIN_START_LEAD_MINUTES} دقیقه بعد باشد."
+        )
         return
     await state.update_data(starts_at=when.isoformat())
     await state.set_state(AnnounceSG.channel_link)

@@ -69,9 +69,11 @@ class MaintenanceMiddleware(BaseMiddleware):
                 admin = await db.scalar(select(Admin).where(Admin.user_id == user.id, Admin.is_active.is_(True)))
                 is_admin = bool(admin)
             if on and not is_admin:
-                from aiogram.types import Message
+                from aiogram.types import CallbackQuery, Message
 
                 if isinstance(event, Message):
                     await event.answer("ربات موقتاً در حال تعمیرات است. کمی بعد دوباره تلاش کنید.")
+                elif isinstance(event, CallbackQuery):
+                    await event.answer("ربات موقتاً در حال تعمیرات است.", show_alert=True)
                 return None
         return await handler(event, data)

@@ -183,8 +183,8 @@ async def evaluate_requirements(
                 CheckItem(
                     RequirementType.CHANNEL_MEMBERSHIP,
                     f"عضویت در {channel.title}",
-                    RequirementStatus.EXPIRED,
-                    "ربات دیگر در این کانال ادمین نیست؛ شرط موقتاً غیرفعال است.",
+                    RequirementStatus.NOT_DONE,
+                    "ربات الان ادمین این کانال نیست؛ عضویت قابل بررسی نیست. برگزارکننده باید دوباره ربات را ادمین کند.",
                     ref_id=str(channel.id),
                 )
             )
@@ -207,8 +207,8 @@ async def _membership_item(bot, user: User, channel: Channel, global_flag: bool)
         return CheckItem(
             rtype,
             label,
-            RequirementStatus.EXPIRED,
-            "ربات دسترسی لازم برای بررسی عضویت را ندارد.",
+            RequirementStatus.NOT_DONE,
+            "ربات دسترسی لازم برای بررسی عضویت را ندارد. برگزارکننده باید ربات را ادمین کند.",
             url=url,
             ref_id=str(channel.id),
         )

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, date, datetime as dt
+from datetime import UTC, date, datetime as dt, timedelta
 from uuid import UUID
 
 from aiogram import F, Router
@@ -28,16 +28,17 @@ from app.bot.keyboards.common import (
 from app.bot.onboarding import ensure_onboarding, target_message
 from app.bot.states.groups import CredsWaitSG, EventWizardSG
 from app.core.config import get_settings
-from app.core.enums import BanScope, EventStatus, OrganizerStatus
+from app.core.enums import BanScope, EventStatus, OrganizerStatus, RegistrationStatus
 from app.core.errors import AppError
 from app.core.time import combine_local_date_and_clock, format_jalali_date, format_local, parse_clock, upcoming_local_dates
 from app.models.channel import Channel, ChannelOwnership
 from app.models.event import Event, RoomCredential
 from app.models.organizer import Organizer
+from app.models.registration import Registration
 from app.models.user import User
 from app.services.bans import is_banned
 from app.services.channels import connect_organizer_channel, list_owned_channels
-from app.services.events import cancel_event, create_event, submit_for_publish, update_credentials, waiting_live_credential_event
+from app.services.events import MIN_START_LEAD_MINUTES, cancel_event, create_event, submit_for_publish, update_credentials, waiting_live_credential_event
 from app.services.organizers import get_or_apply
 from app.services.reports import credentials_deadline, credentials_window_open, creds_were_provided
 from app.services.settings import get_setting
@@ -62,7 +63,7 @@ async def _blocked_organize(db: AsyncSession, user: User, target: Message | Call
     return True
 
 
-@router.message(F.text.in_({"ثبت کاستوم", "ثبت کاستوم جایزه‌دار", "ثبت اطلاع‌رسانی"}))
+@router.message(F.text.in_({"ثبت کاستوم", "ثبت کاستوم جایزه‌دار"}))
 @router.callback_query(F.data == "orgp:new")
 async def start_org(event: Message | CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
     msg = target_message(event)
@@ -175,8 +176,10 @@ async def wiz_starts(message: Message, state: FSMContext, db: AsyncSession, db_u
     except ValueError:
         await message.answer("ساعت نامعتبر است. نمونه: 22:00 یا 22")
         return
-    if when <= dt.now(UTC):
-        await message.answer("این ساعت گذشته است. ساعت بعدی همین روز را بفرستید.")
+    if when <= dt.now(UTC) + timedelta(minutes=MIN_START_LEAD_MINUTES):
+        await message.answer(
+            f"ساعت باید حداقل {MIN_START_LEAD_MINUTES} دقیقه بعد باشد تا بازیکن‌ها وقت جوین داشته باشند."
+        )
         return
     iso = when.isoformat()
     await state.update_data(
@@ -570,7 +573,25 @@ async def org_cancel(cb: CallbackQuery, db: AsyncSession, db_user: User):
         await cb.answer("این کاستوم قابل لغو نیست.", show_alert=True)
         return
     await cancel_event(db, e, db_user.id, "لغو توسط برگزارکننده")
-    await cb.message.answer(f"کاستوم «{e.title}» لغو شد.")
+    regs = (
+        await db.scalars(
+            select(Registration).where(
+                Registration.event_id == e.id, Registration.status == RegistrationStatus.CONFIRMED
+            )
+        )
+    ).all()
+    for reg in regs:
+        user = await db.get(User, reg.user_id)
+        if not user or user.is_bot_blocked:
+            continue
+        try:
+            await cb.bot.send_message(
+                user.telegram_id,
+                f"کاستوم «{e.title}» لغو شد. آیدی و رمز ارسال نمی‌شود.",
+            )
+        except Exception:
+            continue
+    await cb.message.answer(f"کاستوم «{e.title}» لغو شد. به ثبت‌نام‌شده‌ها خبر داده شد.")
     await cb.answer()
 
 
@@ -674,11 +695,8 @@ async def _save_and_dispatch_creds(
 async def receive_live_creds(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
     parsed = _looks_like_room_creds(message.text)
     if parsed is None:
-        parts = (message.text or "").split(maxsplit=1)
-        if len(parts) < 2:
-            await message.answer("هر دو مقدار لازم است. نمونه:\n12345678 mypass")
-            return
-        parsed = (parts[0], parts[1])
+        await message.answer("فرمت نامعتبر است. Room ID و رمز را در یک خط بفرستید؛ نمونه:\n<code>12345678 mypass</code>")
+        return
     data = await state.get_data()
     token = data.get("event_token")
     e = await db.scalar(select(Event).where(Event.public_token == token).options(selectinload(Event.organizer)))
