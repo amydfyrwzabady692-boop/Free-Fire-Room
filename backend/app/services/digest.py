@@ -45,6 +45,9 @@ def format_daily_digest(events: list[Event]) -> str:
         org = html.escape(event.organizer.display_name) if event.organizer and event.organizer.display_name else "برگزارکننده"
         lines.append(f"{i}) {when}")
         lines.append(html.escape(event.title))
+        prize = (event.prize_summary or "").strip()
+        if prize and prize != event.title:
+            lines.append(f"جایزه: {html.escape(prize)}")
         lines.append(f"برگزارکننده: {org}")
         lines.append("")
     lines.append("دکمه‌های زیر را بزنید تا وارد همان کاستوم شوید.")
@@ -55,5 +58,7 @@ def digest_button_items(events: list[Event]) -> list[tuple[str, str]]:
     items = []
     for event in events:
         stamp = format_local(event.starts_at, event.timezone, compact=True)
-        items.append((event.public_token, f"{stamp} | {event.title}"))
+        prize = (event.prize_summary or "").strip().replace("\n", " ")
+        label = prize[:36] if prize else event.title
+        items.append((event.public_token, f"🕐 {stamp} · 🎁 {label}"))
     return items

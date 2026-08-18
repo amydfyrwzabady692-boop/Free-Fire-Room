@@ -24,9 +24,10 @@ def test_upcoming_prize_customs_only_future_published(db):
 def test_daily_digest_text_tells_users_to_join(db):
     host = make_user(db, 802)
     org = make_organizer(db, host)
-    make_event(db, org, title="کاستوم الماس")
+    make_event(db, org, title="کاستوم الماس", prize_summary="۱۰۰۰ الماس")
     text = format_daily_digest(upcoming_prize_customs_sync(db))
     assert "کاستوم‌های جایزه‌دار پیش‌رو" in text
     assert "عضو شدم" in text
     assert "کاستوم الماس" in text
+    assert "۱۰۰۰ الماس" in text
     assert "آیدی و رمز" in text

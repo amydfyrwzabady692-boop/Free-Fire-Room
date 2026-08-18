@@ -10,7 +10,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.access import menu_for
 from app.bot.helpers import esc, normalize_join_url
-from app.bot.keyboards.common import announcement_list_kb, pick_date_kb, wizard_nav
+from app.bot.keyboards.common import (
+    DANGER,
+    PRIMARY,
+    announcement_list_kb,
+    ibtn,
+    pick_date_kb,
+    wizard_nav,
+)
 from app.bot.onboarding import ensure_onboarding, target_message
 from app.bot.states.groups import AnnounceSG
 from app.core.enums import BanScope
@@ -51,13 +58,15 @@ def _ann_kb(row: CustomAnnouncement, *, owner: bool = False) -> InlineKeyboardMa
     if not url and row.channel_username:
         url = f"https://t.me/{row.channel_username.lstrip('@')}"
     if url:
-        buttons.append([InlineKeyboardButton(text=f"عضویت در {row.channel_name[:24]}", url=url)])
+        buttons.append([ibtn(f"عضویت در {row.channel_name[:24]}", url=url, style=PRIMARY)])
     for item in row.extra_join_links or []:
         if item.get("url"):
-            buttons.append([InlineKeyboardButton(text=f"عضویت در {str(item.get('label') or 'کانال')[:24]}", url=item["url"])])
+            buttons.append(
+                [ibtn(f"عضویت در {str(item.get('label') or 'کانال')[:24]}", url=item["url"], style=PRIMARY)]
+            )
     if owner:
-        buttons.append([InlineKeyboardButton(text="حذف اطلاع‌رسانی من", callback_data=f"ann:del:{row.id}")])
-    buttons.append([InlineKeyboardButton(text="بازگشت", callback_data="ann:list")])
+        buttons.append([ibtn("حذف اطلاع‌رسانی من", callback_data=f"ann:del:{row.id}", style=DANGER)])
+    buttons.append([ibtn("بازگشت", callback_data="ann:list", style=PRIMARY)])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 

@@ -66,6 +66,7 @@ class MenuResetMiddleware(BaseMiddleware):
         state = data.get("state")
         if isinstance(event, Message) and state is not None:
             text = (event.text or "").strip()
+            current = await state.get_state()
             if text in {"/cancel", "لغو", "انصراف"} or text.startswith("/cancel"):
                 await state.clear()
                 db = data.get("db")
@@ -78,6 +79,8 @@ class MenuResetMiddleware(BaseMiddleware):
                 await event.answer("لغو شد.", reply_markup=markup)
                 return None
             if text in MENU_BUTTON_TEXTS:
+                if current and str(current).startswith("CredsWaitSG"):
+                    return await handler(event, data)
                 await state.clear()
         return await handler(event, data)
 

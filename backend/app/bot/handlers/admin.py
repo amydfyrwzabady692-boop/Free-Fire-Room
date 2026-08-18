@@ -6,7 +6,7 @@ from uuid import UUID
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -56,12 +56,13 @@ def _admin_kb() -> InlineKeyboardMarkup:
                 ibtn("ارسال همگانی", callback_data="adm:bc", style=PRIMARY),
             ],
             [
-                ibtn("اطلاع‌رسانی‌ها", callback_data="adm:ann"),
-                ibtn("کاربران اخیر", callback_data="adm:lu"),
+                ibtn("اطلاع‌رسانی‌ها", callback_data="adm:ann", style=PRIMARY),
+                ibtn("کاربران اخیر", callback_data="adm:lu", style=PRIMARY),
             ],
+            [ibtn("همه کاستوم‌ها و آمار", callback_data="adm:all", style=SUCCESS)],
             [ibtn("تنظیمات ربات", callback_data="adm:cfg", style=PRIMARY)],
             [ibtn("تعمیرات ربات", callback_data="adm:mt", style=DANGER)],
-            [ibtn("منوی بازیکن", callback_data="adm:player")],
+            [ibtn("منوی بازیکن", callback_data="adm:player", style=PRIMARY)],
         ]
     )
 
@@ -149,18 +150,59 @@ async def admin_dash(cb: CallbackQuery, db: AsyncSession, db_user: User):
         select(func.count()).select_from(CustomAnnouncement).where(CustomAnnouncement.status == "published")
     )
     maint = await settings_svc.get_setting(db, "maintenance_mode", False)
+    hosted = await db.scalar(
+        select(func.count()).select_from(Event).where(Event.deleted_at.is_(None), Event.status != EventStatus.DRAFT)
+    )
     await cb.message.answer(
-        "<b>داشبورد</b>\n"
+        "<b>داشبورد مالک ربات</b>\n"
         f"کاربران: {users} (۲۴ساعت: {new_users})\n"
         f"بن‌شده: {banned}\n"
         f"برگزارکننده: {orgs} (در انتظار: {pending_orgs})\n"
+        f"کاستوم ثبت‌شده: {hosted}\n"
         f"کاستوم فعال: {events_active} | در انتظار تأیید: {pending_events}\n"
-        f"ثبت‌نام قطعی: {regs}\n"
+        f"ثبت‌نام قطعی بازیکن‌ها: {regs}\n"
         f"ارسال مشخصات موفق: {sent}\n"
         f"اطلاع‌رسانی فعال: {anns}\n"
         f"حالت تعمیرات: {'روشن' if maint else 'خاموش'}",
         reply_markup=_back_kb(),
     )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "adm:all")
+async def admin_all_events(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    if not await _ok(db, db_user):
+        await _deny(cb)
+        return
+    from app.services.reviews import event_audience_stats, format_audience_stats
+
+    rows = (
+        await db.scalars(
+            select(Event)
+            .where(Event.deleted_at.is_(None), Event.status != EventStatus.DRAFT)
+            .options(selectinload(Event.organizer))
+            .order_by(Event.starts_at.desc())
+            .limit(20)
+        )
+    ).all()
+    if not rows:
+        await cb.message.answer("کاستومی ثبت نشده.", reply_markup=_back_kb())
+        await cb.answer()
+        return
+    await cb.message.answer(f"آخرین {len(rows)} کاستوم ثبت‌شده:")
+    for i, e in enumerate(rows):
+        stats = await event_audience_stats(db, e.id)
+        org = e.organizer.display_name if e.organizer else "-"
+        prize = (e.prize_summary or "").strip() or "—"
+        await cb.message.answer(
+            f"🎮 <b>{esc(e.title)}</b>\n"
+            f"🎁 جایزه: {esc(prize)}\n"
+            f"🕐 {format_local(e.starts_at, e.timezone)}\n"
+            f"برگزارکننده: {esc(org)}\n"
+            f"وضعیت: {e.status}\n"
+            f"{format_audience_stats(stats)}",
+            reply_markup=_back_kb() if i == len(rows) - 1 else None,
+        )
     await cb.answer()
 
 
@@ -190,11 +232,15 @@ async def admin_events(cb: CallbackQuery, db: AsyncSession, db_user: User):
                     ibtn("تأیید و انتشار", callback_data=f"adm:ea:{e.id}", style=SUCCESS),
                     ibtn("رد", callback_data=f"adm:er:{e.id}", style=DANGER),
                 ],
-                [InlineKeyboardButton(text="بازگشت", callback_data="adm:home")],
+                [ibtn("بازگشت", callback_data="adm:home", style=PRIMARY)],
             ]
         )
         await cb.message.answer(
-            f"<b>{e.title}</b>\nبرگزارکننده: {org}\nظرفیت: {e.capacity}\nوضعیت: {e.status}",
+            f"<b>{esc(e.title)}</b>\n"
+            f"🎁 جایزه: {esc((e.prize_summary or '').strip() or '—')}\n"
+            f"برگزارکننده: {esc(org)}\n"
+            f"ساعت: {format_local(e.starts_at, e.timezone)}\n"
+            f"وضعیت: {e.status}",
             reply_markup=kb,
         )
     await cb.answer()
@@ -239,7 +285,7 @@ async def admin_orgs(cb: CallbackQuery, db: AsyncSession, db_user: User):
     if not await _ok(db, db_user):
         await _deny(cb)
         return
-    rows = (
+    pending = (
         await db.scalars(
             select(Organizer)
             .options(selectinload(Organizer.user))
@@ -248,11 +294,7 @@ async def admin_orgs(cb: CallbackQuery, db: AsyncSession, db_user: User):
             .limit(10)
         )
     ).all()
-    if not rows:
-        await cb.message.answer("درخواست برگزارکننده در انتظار نیست.", reply_markup=_back_kb())
-        await cb.answer()
-        return
-    for org in rows:
+    for org in pending:
         u = org.user
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
@@ -263,9 +305,47 @@ async def admin_orgs(cb: CallbackQuery, db: AsyncSession, db_user: User):
             ]
         )
         await cb.message.answer(
-            f"{org.display_name or '-'}\nتلگرام: {u.telegram_id if u else '-'}\nوضعیت: {org.status}",
+            f"در انتظار تأیید\n{esc(org.display_name or '-')}\nتلگرام: {u.telegram_id if u else '-'}",
             reply_markup=kb,
         )
+
+    rows = (
+        await db.scalars(
+            select(Organizer)
+            .options(selectinload(Organizer.user))
+            .order_by(Organizer.created_at.desc())
+            .limit(20)
+        )
+    ).all()
+    if not rows and not pending:
+        await cb.message.answer("برگزارکننده‌ای ثبت نشده.", reply_markup=_back_kb())
+        await cb.answer()
+        return
+    hosted_rows = (
+        await db.execute(
+            select(Event.organizer_id, func.count())
+            .where(Event.deleted_at.is_(None), Event.status != EventStatus.DRAFT)
+            .group_by(Event.organizer_id)
+        )
+    ).all()
+    hosted_map = {oid: int(n or 0) for oid, n in hosted_rows}
+    text = "برگزارکننده‌ها و تعداد ثبت کاستوم:\n"
+    for org in rows:
+        u = org.user
+        name = org.display_name or (u.first_name if u else "-")
+        tg = u.telegram_id if u else "-"
+        last = await db.scalar(
+            select(Event)
+            .where(Event.organizer_id == org.id, Event.deleted_at.is_(None))
+            .order_by(Event.starts_at.desc())
+        )
+        prize = (last.prize_summary or "").strip() if last else ""
+        prize_line = f" | آخرین جایزه: {prize[:40]}" if prize else ""
+        text += (
+            f"• {esc(name)} | {tg} | ثبت کاستوم: {hosted_map.get(org.id, 0)}"
+            f"{esc(prize_line)}\n"
+        )
+    await cb.message.answer(text, reply_markup=_back_kb())
     await cb.answer()
 
 
@@ -324,19 +404,67 @@ async def admin_user_show(message: Message, db: AsyncSession, db_user: User, sta
     banned = await db.scalar(
         select(Ban).where(Ban.user_id == target.id, Ban.is_active.is_(True)).order_by(Ban.created_at.desc())
     )
+    hosted = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(Event)
+            .join(Organizer, Organizer.id == Event.organizer_id)
+            .where(Organizer.user_id == target.id, Event.deleted_at.is_(None), Event.status != EventStatus.DRAFT)
+        )
+        or 0
+    )
+    joined = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(Registration)
+            .where(Registration.user_id == target.id, Registration.status == RegistrationStatus.CONFIRMED)
+        )
+        or 0
+    )
+    from_link = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(Registration)
+            .where(
+                Registration.user_id == target.id,
+                Registration.source == "deep_link",
+            )
+        )
+        or 0
+    )
+    last_events = (
+        await db.scalars(
+            select(Event)
+            .join(Organizer, Organizer.id == Event.organizer_id)
+            .where(Organizer.user_id == target.id, Event.deleted_at.is_(None))
+            .order_by(Event.starts_at.desc())
+            .limit(5)
+        )
+    ).all()
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [ibtn("بن ربات", callback_data=f"adm:bn:{target.telegram_id}", style=DANGER)],
             [ibtn("بن برگزاری", callback_data=f"adm:bno:{target.telegram_id}", style=DANGER)],
             [ibtn("رفع بن", callback_data=f"adm:ub:{target.telegram_id}", style=SUCCESS)],
-            [InlineKeyboardButton(text="بازگشت", callback_data="adm:home")],
+            [ibtn("بازگشت", callback_data="adm:home", style=PRIMARY)],
         ]
     )
+    extra = ""
+    for e in last_events:
+        extra += (
+            f"\n• {format_local(e.starts_at, e.timezone, compact=True)}"
+            f" | {esc((e.prize_summary or e.title or '—')[:50])}"
+            f" | {e.status}"
+        )
     await message.answer(
-        f"نام: {target.first_name or '-'}\n"
-        f"یوزرنیم: @{target.username or '-'}\n"
+        f"نام: {esc(target.first_name or '-')}\n"
+        f"یوزرنیم: @{esc(target.username or '-')}\n"
         f"شناسه: {target.telegram_id}\n"
-        f"وضعیت بن: {banned.reason if banned else 'آزاد'}",
+        f"کاستوم ثبت‌کرده: {hosted}\n"
+        f"ثبت‌نام قطعی به‌عنوان بازیکن: {joined}\n"
+        f"از لینک اختصاصی آمده: {from_link}\n"
+        f"وضعیت بن: {esc(banned.reason) if banned else 'آزاد'}"
+        + (f"\n\nآخرین کاستوم‌هایش:{extra}" if extra else ""),
         reply_markup=kb,
     )
     await state.clear()
@@ -422,9 +550,9 @@ async def admin_channels(cb: CallbackQuery, db: AsyncSession, db_user: User):
             )
         )
     ).all()
-    buttons = [[InlineKeyboardButton(text="افزودن کانال اجباری", callback_data="adm:ca")]]
+    buttons = [[ibtn("افزودن کانال اجباری", callback_data="adm:ca", style=SUCCESS)]]
     if not rows:
-        buttons.append([InlineKeyboardButton(text="بازگشت", callback_data="adm:home")])
+        buttons.append([ibtn("بازگشت", callback_data="adm:home", style=PRIMARY)])
         await cb.message.answer("کانال اجباری ثبت نشده.", reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
         await cb.answer()
         return
@@ -434,9 +562,15 @@ async def admin_channels(cb: CallbackQuery, db: AsyncSession, db_user: User):
         flag = "فعال" if r.is_active else "خاموش"
         text += f"• {title} — {flag}\n"
         buttons.append(
-            [InlineKeyboardButton(text=f"{'خاموش' if r.is_active else 'روشن'} کردن {title[:20]}", callback_data=f"adm:ct:{r.id}")]
+            [
+                ibtn(
+                    f"{'خاموش' if r.is_active else 'روشن'} کردن {title[:20]}",
+                    callback_data=f"adm:ct:{r.id}",
+                    style=DANGER if r.is_active else SUCCESS,
+                )
+            ]
         )
-    buttons.append([InlineKeyboardButton(text="بازگشت", callback_data="adm:home")])
+    buttons.append([ibtn("بازگشت", callback_data="adm:home", style=PRIMARY)])
     await cb.message.answer(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await cb.answer()
 
@@ -642,7 +776,7 @@ async def admin_anns(cb: CallbackQuery, db: AsyncSession, db_user: User):
         return
     for row in rows:
         kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="مخفی کردن", callback_data=f"adm:ah:{row.id}")]]
+            inline_keyboard=[[ibtn("مخفی کردن", callback_data=f"adm:ah:{row.id}", style=DANGER)]]
         )
         await cb.message.answer(
             f"<b>{esc(row.title)}</b>\nکانال: {esc(row.channel_name)}\nزمان: {format_local(row.starts_at, row.timezone)}",
@@ -680,7 +814,27 @@ async def admin_recent_users(cb: CallbackQuery, db: AsyncSession, db_user: User)
         return
     text = "کاربران اخیر:\n"
     for u in rows:
-        text += f"• {esc(u.first_name or '-')} | {u.telegram_id} | {u.status}\n"
+        hosted = int(
+            await db.scalar(
+                select(func.count())
+                .select_from(Event)
+                .join(Organizer, Organizer.id == Event.organizer_id)
+                .where(Organizer.user_id == u.id, Event.deleted_at.is_(None), Event.status != EventStatus.DRAFT)
+            )
+            or 0
+        )
+        joined = int(
+            await db.scalar(
+                select(func.count())
+                .select_from(Registration)
+                .where(Registration.user_id == u.id, Registration.status == RegistrationStatus.CONFIRMED)
+            )
+            or 0
+        )
+        text += (
+            f"• {esc(u.first_name or '-')} | {u.telegram_id}\n"
+            f"  ثبت کاستوم: {hosted} | ثبت‌نام بازیکن: {joined}\n"
+        )
     await cb.message.answer(text + "\nبرای بن/رفع بن از «جستجوی کاربر» شناسه را بفرستید.", reply_markup=_back_kb())
     await cb.answer()
 
@@ -695,18 +849,20 @@ async def admin_cfg(cb: CallbackQuery, db: AsyncSession, db_user: User):
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text=f"تأیید کاستوم: {'روشن' if approval else 'خاموش'}",
+                ibtn(
+                    f"تأیید کاستوم: {'روشن' if approval else 'خاموش'}",
                     callback_data="adm:tg:event_approval_required",
+                    style=SUCCESS if approval else PRIMARY,
                 )
             ],
             [
-                InlineKeyboardButton(
-                    text=f"تأیید خودکار برگزارکننده: {'روشن' if auto_org else 'خاموش'}",
+                ibtn(
+                    f"تأیید خودکار برگزارکننده: {'روشن' if auto_org else 'خاموش'}",
                     callback_data="adm:tg:auto_approve_organizers",
+                    style=SUCCESS if auto_org else PRIMARY,
                 )
             ],
-            [InlineKeyboardButton(text="بازگشت", callback_data="adm:home")],
+            [ibtn("بازگشت", callback_data="adm:home", style=PRIMARY)],
         ]
     )
     await cb.message.answer(

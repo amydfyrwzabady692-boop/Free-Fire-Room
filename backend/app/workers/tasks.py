@@ -226,10 +226,10 @@ async def _prompt_organizer_for_creds(bot, db, event: Event) -> None:
         await bot.send_message(
             user.telegram_id,
             f"ساعت کاستوم «{html.escape(event.title)}» رسید ({format_local(event.starts_at, event.timezone)}).\n\n"
-            "الان آیدی و رمز اتاق را داخل ربات بفرستید؛ مثال:\n"
-            "<code>12345678 mypass</code>\n\n"
+            "اول <b>فقط آیدی اتاق</b> را بفرستید.\n"
+            "بعد ربات از شما رمز را جدا می‌پرسد.\n\n"
             f"فقط {grace} دقیقه فرصت دارید. اگر نفرستید اخطار می‌گیرید و بازیکن‌ها می‌توانند گزارش بدهند.\n"
-            "یا دکمه سبز را بزنید و بعد همان یک خط را ارسال کنید.\n"
+            "دکمه سبز را بزنید و اول آیدی را بفرستید.\n"
             "بعد فقط برای کسانی که کانال‌های این کاستوم را جوین کرده‌اند ارسال می‌شود.",
             reply_markup=send_creds_kb(event.public_token),
         )

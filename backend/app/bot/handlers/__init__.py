@@ -9,5 +9,5 @@ from app.bot.handlers.player import router as player_router
 def setup_handlers(dp: Dispatcher) -> None:
     dp.include_router(admin_router)
     dp.include_router(announce_router)
-    dp.include_router(player_router)
     dp.include_router(organizer_router)
+    dp.include_router(player_router)

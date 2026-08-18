@@ -22,6 +22,16 @@ from app.services.requirements import evaluate_requirements
 
 log = get_logger(__name__)
 
+_WEAK_SOURCES = {None, "", "recheck", "rules"}
+
+
+def merge_registration_source(existing: str | None, incoming: str | None) -> str | None:
+    if incoming == "deep_link" or existing == "deep_link":
+        return "deep_link"
+    if incoming in _WEAK_SOURCES:
+        return existing or incoming
+    return existing or incoming
+
 
 @dataclass
 class RegisterResult:
@@ -66,12 +76,12 @@ async def register_user(
         select(Registration).where(Registration.event_id == event.id, Registration.user_id == user.id)
     )
     if existing and existing.status in {RegistrationStatus.CONFIRMED, RegistrationStatus.WAITLISTED}:
+        merged = merge_registration_source(existing.source, source)
+        if merged != existing.source:
+            existing.source = merged
+            await db.flush()
         raise ConflictError("already_registered", "شما قبلاً در این کاستوم ثبت‌نام کرده‌اید.")
 
-    if accept_rules:
-        if existing:
-            existing.rules_accepted_at = now
-        # temporary holder for checklist
     holder = existing
     if holder is None:
         holder = Registration(
@@ -87,8 +97,10 @@ async def register_user(
         except IntegrityError as exc:
             await db.rollback()
             raise ConflictError("already_registered", "شما قبلاً در این کاستوم ثبت‌نام کرده‌اید.") from exc
-    elif accept_rules:
-        holder.rules_accepted_at = now
+    else:
+        holder.source = merge_registration_source(holder.source, source)
+        if accept_rules:
+            holder.rules_accepted_at = now
 
     checklist = await evaluate_requirements(db, user=user, event=event, bot=bot, registration=holder)
     blocking = [i for i in checklist.items if i.status not in {RequirementStatus.DONE, RequirementStatus.PENDING_REVIEW}]

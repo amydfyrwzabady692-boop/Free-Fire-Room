@@ -100,6 +100,8 @@ def make_event(db: Session, organizer, capacity=2, **kwargs):
         timezone="Asia/Tehran",
         region="ME",
         game_mode="squad",
+        prize_summary=kwargs.get("prize_summary"),
+        banner_file_id=kwargs.get("banner_file_id"),
     )
     db.add(e)
     db.flush()

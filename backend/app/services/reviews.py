@@ -200,6 +200,14 @@ async def event_audience_stats(db: AsyncSession, event_id) -> dict:
     pending = int(await db.scalar(_count(RegistrationStatus.PENDING)) or 0)
     waitlisted = int(await db.scalar(_count(RegistrationStatus.WAITLISTED)) or 0)
     ineligible = int(await db.scalar(_count(RegistrationStatus.INELIGIBLE)) or 0)
+    from_link = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(Registration)
+            .where(Registration.event_id == event_id, Registration.source == "deep_link")
+        )
+        or 0
+    )
     delivered = int(
         await db.scalar(
             select(func.count())
@@ -218,6 +226,7 @@ async def event_audience_stats(db: AsyncSession, event_id) -> dict:
         "pending": pending,
         "waitlisted": waitlisted,
         "ineligible": ineligible,
+        "from_link": from_link,
         "delivered": delivered,
     }
 
@@ -225,6 +234,7 @@ async def event_audience_stats(db: AsyncSession, event_id) -> dict:
 def format_audience_stats(stats: dict) -> str:
     return (
         f"عضو آمده / ثبت‌نام کل: {stats['total']}\n"
+        f"از لینک اختصاصی آمدند: {stats.get('from_link', 0)}\n"
         f"شرایط را کامل کردند: {stats['confirmed']}\n"
         f"هنوز جوین نکرده‌اند: {stats['pending']}\n"
         f"لیست انتظار: {stats['waitlisted']}\n"

@@ -62,9 +62,9 @@ def main_menu(*, admin: bool = False) -> ReplyKeyboardMarkup:
     rows = [
         [kbtn("کاستوم‌های جایزه‌دار", PRIMARY)],
         [kbtn("ثبت کاستوم", SUCCESS), kbtn("پنل برگزارکننده", PRIMARY)],
-        [kbtn("ثبت‌نام‌های من"), kbtn("راهنما و قوانین")],
-        [kbtn("پروفایل"), kbtn("پشتیبانی")],
-        [kbtn("شروع مجدد")],
+        [kbtn("ثبت‌نام‌های من", PRIMARY), kbtn("راهنما و قوانین", PRIMARY)],
+        [kbtn("پروفایل", PRIMARY), kbtn("پشتیبانی", SUCCESS)],
+        [kbtn("شروع مجدد", DANGER)],
     ]
     if admin:
         rows.append([kbtn("پنل مالک ربات", PRIMARY)])
@@ -75,7 +75,7 @@ def tos_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [ibtn("می‌پذیرم", callback_data="tos:accept", style=SUCCESS)],
-            [ibtn("سیاست حریم خصوصی", callback_data="tos:privacy")],
+            [ibtn("سیاست حریم خصوصی", callback_data="tos:privacy", style=PRIMARY)],
         ]
     )
 
@@ -89,13 +89,13 @@ def membership_kb(buttons: list[tuple[str, str]]) -> InlineKeyboardMarkup:
 def event_list_kb(items: list[tuple[str, str]], *, mode: str | None = None) -> InlineKeyboardMarkup:
     rows = [[ibtn(title[:60], callback_data=f"ev:{token}", style=PRIMARY)] for token, title in items]
     if mode == "upcoming":
-        rows.append([ibtn("کاستوم‌های ۴۸ ساعت گذشته", callback_data="list:past")])
+        rows.append([ibtn("کاستوم‌های ۴۸ ساعت گذشته", callback_data="list:past", style=PRIMARY)])
     elif mode == "past":
-        rows.append([ibtn("کاستوم‌های پیش‌رو", callback_data="list:upcoming", style=PRIMARY)])
+        rows.append([ibtn("کاستوم‌های پیش‌رو", callback_data="list:upcoming", style=SUCCESS)])
     elif mode == "digest":
         rows.append([ibtn("همه کاستوم‌های جایزه‌دار", callback_data="list:upcoming", style=SUCCESS)])
         return InlineKeyboardMarkup(inline_keyboard=rows)
-    rows.append([ibtn("بازگشت", callback_data="menu:home")])
+    rows.append([ibtn("بازگشت", callback_data="menu:home", style=DANGER)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -118,9 +118,9 @@ def event_detail_kb(
     if can_review:
         rows.append([ibtn("نظر و امتیاز", callback_data=f"rev:{token}", style=PRIMARY)])
     if show_reviews:
-        rows.append([ibtn("نظرات بازیکن‌ها", callback_data=f"rvl:{token}")])
+        rows.append([ibtn("نظرات بازیکن‌ها", callback_data=f"rvl:{token}", style=PRIMARY)])
     rows.append([ibtn("گزارش به مالک ربات", callback_data=f"rep:{token}", style=DANGER)])
-    rows.append([ibtn("بازگشت به فهرست", callback_data="list:upcoming")])
+    rows.append([ibtn("بازگشت به فهرست", callback_data="list:upcoming", style=PRIMARY)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -128,15 +128,15 @@ def review_stars_kb(token: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                ibtn("⭐ ۱", callback_data=f"rvs:{token}:1"),
-                ibtn("⭐⭐ ۲", callback_data=f"rvs:{token}:2"),
-                ibtn("⭐⭐⭐ ۳", callback_data=f"rvs:{token}:3"),
+                ibtn("⭐ ۱", callback_data=f"rvs:{token}:1", style=DANGER),
+                ibtn("⭐⭐ ۲", callback_data=f"rvs:{token}:2", style=DANGER),
+                ibtn("⭐⭐⭐ ۳", callback_data=f"rvs:{token}:3", style=PRIMARY),
             ],
             [
                 ibtn("⭐⭐⭐⭐ ۴", callback_data=f"rvs:{token}:4", style=PRIMARY),
                 ibtn("⭐⭐⭐⭐⭐ ۵", callback_data=f"rvs:{token}:5", style=SUCCESS),
             ],
-            [ibtn("بازگشت", callback_data=f"ev:{token}")],
+            [ibtn("بازگشت", callback_data=f"ev:{token}", style=PRIMARY)],
         ]
     )
 
@@ -146,8 +146,8 @@ def review_prize_kb(token: str) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [ibtn("داد — فقط به مالک", callback_data=f"rvp:{token}:yes", style=SUCCESS)],
             [ibtn("نداد — گزارش به مالک", callback_data=f"rvp:{token}:no", style=DANGER)],
-            [ibtn("نمی‌دانم", callback_data=f"rvp:{token}:unknown")],
-            [ibtn("بازگشت", callback_data=f"rev:{token}")],
+            [ibtn("نمی‌دانم", callback_data=f"rvp:{token}:unknown", style=PRIMARY)],
+            [ibtn("بازگشت", callback_data=f"rev:{token}", style=PRIMARY)],
         ]
     )
 
@@ -167,9 +167,9 @@ def help_kb() -> InlineKeyboardMarkup:
             [ibtn("ربات چیست؟", callback_data="help:about", style=PRIMARY)],
             [ibtn("شرکت در کاستوم", callback_data="help:play", style=SUCCESS)],
             [ibtn("ثبت کاستوم جایزه‌دار", callback_data="help:host", style=PRIMARY)],
-            [ibtn("قوانین، گزارش و امتیاز", callback_data="help:rules")],
-            [ibtn("دو پنل: مالک و برگزارکننده", callback_data="help:panels")],
-            [ibtn("سؤالات رایج", callback_data="help:faq")],
+            [ibtn("قوانین، گزارش و امتیاز", callback_data="help:rules", style=DANGER)],
+            [ibtn("دو پنل: مالک و برگزارکننده", callback_data="help:panels", style=PRIMARY)],
+            [ibtn("سؤالات رایج", callback_data="help:faq", style=PRIMARY)],
         ]
     )
 
@@ -191,8 +191,8 @@ def report_reasons_kb(token: str, *, cheater_only: bool = False) -> InlineKeyboa
         )
     rows.append([ibtn("چیتر در کاستوم", callback_data=f"repr:{token}:cheater", style=DANGER)])
     if not cheater_only:
-        rows.append([ibtn("مورد دیگر", callback_data=f"repr:{token}:other")])
-    rows.append([ibtn("بازگشت", callback_data=f"ev:{token}")])
+        rows.append([ibtn("مورد دیگر", callback_data=f"repr:{token}:other", style=PRIMARY)])
+    rows.append([ibtn("بازگشت", callback_data=f"ev:{token}", style=PRIMARY)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -205,7 +205,7 @@ def checklist_kb(token: str, join_urls: list[tuple[str, str]] | None = None) -> 
         seen.add(url)
         rows.append([ibtn(f"عضویت در {title[:28]}", url=url, style=PRIMARY)])
     rows.append([ibtn("عضو شدم — بررسی مجدد", callback_data=f"join:{token}", style=SUCCESS)])
-    rows.append([ibtn("بازگشت", callback_data=f"ev:{token}")])
+    rows.append([ibtn("بازگشت", callback_data=f"ev:{token}", style=PRIMARY)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -242,7 +242,7 @@ def pick_date_kb(prefix: str) -> InlineKeyboardMarkup:
 def wizard_nav(include_skip: bool = False) -> InlineKeyboardMarkup:
     row = [ibtn("لغو", callback_data="wiz:cancel", style=DANGER)]
     if include_skip:
-        row.insert(0, ibtn("رد کردن", callback_data="wiz:skip"))
+        row.insert(0, ibtn("رد کردن", callback_data="wiz:skip", style=SUCCESS))
     return InlineKeyboardMarkup(inline_keyboard=[row])
 
 
@@ -263,20 +263,20 @@ def organizer_home_kb() -> InlineKeyboardMarkup:
             [ibtn("ثبت کاستوم جدید", callback_data="orgp:new", style=SUCCESS)],
             [ibtn("کاستوم‌ها و آمار من", callback_data="orgp:mine", style=PRIMARY)],
             [ibtn("کانال‌های من", callback_data="orgp:ch", style=PRIMARY)],
-            [ibtn("راهنمای برگزارکننده", callback_data="help:host")],
-            [ibtn("منوی اصلی", callback_data="menu:home")],
+            [ibtn("راهنمای برگزارکننده", callback_data="help:host", style=PRIMARY)],
+            [ibtn("منوی اصلی", callback_data="menu:home", style=DANGER)],
         ]
     )
 
 
 def send_creds_kb(token: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[ibtn("ارسال آیدی و رمز همین حالا", callback_data=f"orgp:creds:{token}", style=SUCCESS)]]
+        inline_keyboard=[[ibtn("۱) ارسال آیدی اتاق", callback_data=f"orgp:creds:{token}", style=SUCCESS)]]
     )
 
 
 def announcement_list_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     rows = [[ibtn(title[:60], callback_data=f"annv:{aid}", style=PRIMARY)] for aid, title in items]
     rows.append([ibtn("ثبت اطلاع‌رسانی", callback_data="ann:new", style=SUCCESS)])
-    rows.append([ibtn("بازگشت", callback_data="menu:home")])
+    rows.append([ibtn("بازگشت", callback_data="menu:home", style=DANGER)])
     return InlineKeyboardMarkup(inline_keyboard=rows)

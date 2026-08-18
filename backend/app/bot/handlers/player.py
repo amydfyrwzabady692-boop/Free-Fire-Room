@@ -95,17 +95,18 @@ async def cmd_start(message: Message, command: CommandObject, db: AsyncSession, 
 
 async def _welcome_after_onboarding(message: Message, db: AsyncSession, db_user: User) -> None:
     kind, token = _parse_start(db_user.start_payload)
-    extra = ""
     if kind == "event" and token:
-        extra = "\n\nاز لینک یک کاستوم وارد شدید. کانال‌های جوین اجباری همان کاستوم را عضو شوید تا سر ساعت رمز برایتان بیاید."
+        await message.answer(
+            "از لینک اختصاصی این کاستوم آمدید.\n"
+            "جایزه، شرایط و کانال‌های جوین اجباری را ببینید؛ عضو شوید تا سر ساعت آیدی و رمز برایتان بیاید.",
+            reply_markup=await menu_for(db, db_user),
+        )
+        await _show_event(message, db, db_user, token)
+        return
     await message.answer(
-        f"{T.INTRO}\n\n"
-        "منوی اصلی آماده است. جزئیات بیشتر در «راهنما و قوانین»."
-        + extra,
+        f"{T.INTRO}\n\nمنوی اصلی آماده است. جزئیات بیشتر در «راهنما و قوانین».",
         reply_markup=await menu_for(db, db_user),
     )
-    if kind == "event" and token:
-        await _show_event(message, db, db_user, token)
 
 
 @router.message(F.text == "شروع مجدد")
@@ -193,9 +194,11 @@ def _join_urls(items) -> list[tuple[str, str]]:
 
 def _list_title(e: Event) -> str:
     stamp = format_local(e.starts_at, e.timezone, compact=True)
+    prize = (e.prize_summary or "").strip().replace("\n", " ")
+    label = prize[:28] if prize else e.title
     if e.starts_at < datetime.now(UTC):
-        return f"گذشته | {stamp} | {e.title}"
-    return f"{stamp} | {e.title}"
+        return f"گذشته · 🕐 {stamp} · 🎁 {label}"
+    return f"🕐 {stamp} · 🎁 {label}"
 
 
 async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> str:
@@ -219,14 +222,23 @@ async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> st
         )
     org_line = format_rating_line(await review_summary_for_organizer(db, e.organizer_id), prefix="سابقه برگزارکننده")
     ev_line = format_rating_line(await review_summary_for_event(db, e.id), prefix="امتیاز این کاستوم")
+    prize = (e.prize_summary or "").strip()
+    if not prize and e.prizes:
+        prize = "\n".join(f"{p.place}. {p.title}" for p in e.prizes if p.title)
+    prize = prize or "اعلام نشده"
+    left_line = f"مانده: {left} دقیقه" if left else "ساعت کاستوم رسیده"
     return (
-        f"<b>{esc(e.title)}</b>\n"
-        f"برگزارکننده: {esc(org)}\n"
+        "🎮 <b>کاستوم جایزه‌دار</b>\n"
+        "━━━━━━━━━━━━━━\n"
+        f"<b>{esc(e.title)}</b>\n\n"
+        f"🎁 <b>جایزه</b>\n{esc(prize)}\n"
+        "━━━━━━━━━━━━━━\n"
+        f"🕐 {format_local(e.starts_at, e.timezone)}\n"
+        f"⏳ {left_line}\n"
+        f"👤 برگزارکننده: {esc(org)}\n"
         f"{org_line}\n"
         f"{ev_line}\n"
-        f"کانال: {esc(ch)}\n"
-        f"ساعت کاستوم (شمسی): {format_local(e.starts_at, e.timezone)}\n"
-        f"مانده: {left} دقیقه\n\n"
+        f"📢 کانال برگزارکننده: {esc(ch)}\n\n"
         f"{extra}"
     )
 
@@ -341,26 +353,42 @@ async def _show_event(message: Message, db: AsyncSession, user: User, token: str
     allowed, _ = await can_review(db, user, e)
     summary = await review_summary_for_event(db, e.id)
     text = await _event_card(db, e, missed=missed)
-    text += "\n\nکانال‌های جوین اجباری:\n"
-    for item in channel_items:
-        mark = "✅" if item.status == "done" else "❌"
-        text += f"{mark} {item.label}\n"
+    text += "\n━━━━━━━━━━━━━━\n✅ <b>شرایط شرکت</b>\n"
+    text += "باید در کانال‌های زیر عضو بمانید تا سر ساعت آیدی و رمز برایتان بیاید:\n"
+    if channel_items:
+        for item in channel_items:
+            mark = "✅" if item.status == "done" else "❌"
+            text += f"{mark} {esc(item.label)}\n"
+    else:
+        text += "کانال جوین اجباری ثبت نشده است.\n"
     if missed:
         text += "\nرمز ارسال نشد. گزارش بدهید و اگر ثبت‌نام کرده بودید نظر/امتیاز بگذارید."
     elif not started:
-        text += "\nبعد از جوین، «عضو شدم» را بزنید. سر ساعت برگزارکننده رمز را در ربات می‌فرستد و فقط به عضو‌ها می‌رسد."
+        text += "\nبعد از جوین، دکمه سبز «عضو شدم» را بزنید."
     else:
-        text += "\nاگر رمز نیامد یا جایزه نداد: «گزارش به مالک ربات». گزارش چیتر هم به مالک می‌رسد هم به برگزارکننده."
-    await message.answer(
-        text,
-        reply_markup=event_detail_kb(
-            token,
-            join_urls=_join_urls(channel_items),
-            can_join=not started and not missed,
-            can_review=allowed,
-            show_reviews=summary["count"] > 0 or started,
-        ),
+        text += "\nاگر رمز نیامد یا جایزه نداد: «گزارش به مالک ربات»."
+    kb = event_detail_kb(
+        token,
+        join_urls=_join_urls(channel_items),
+        can_join=not started and not missed,
+        can_review=allowed,
+        show_reviews=summary["count"] > 0 or started,
     )
+    if e.banner_file_id:
+        try:
+            if len(text) <= 1024:
+                await message.answer_photo(e.banner_file_id, caption=text, reply_markup=kb)
+                return
+            prize = (e.prize_summary or "").strip() or "—"
+            short = (
+                f"🎮 {esc(e.title)}\n"
+                f"🎁 {esc(prize)}\n"
+                f"🕐 {format_local(e.starts_at, e.timezone)}"
+            )
+            await message.answer_photo(e.banner_file_id, caption=short[:1024])
+        except Exception:
+            pass
+    await message.answer(text, reply_markup=kb)
 
 
 @router.callback_query(F.data.startswith("join:"))
@@ -374,8 +402,9 @@ async def join_event(cb: CallbackQuery, db: AsyncSession, db_user: User):
     if not e:
         await cb.answer("یافت نشد", show_alert=True)
         return
+    source = "deep_link" if (db_user.start_payload or "") == f"event_{token}" else "bot"
     try:
-        result = await register_user(db, user=db_user, event=e, bot=cb.bot, source="bot", accept_rules=True)
+        result = await register_user(db, user=db_user, event=e, bot=cb.bot, source=source, accept_rules=True)
     except AppError as exc:
         if exc.code == "already_registered":
             await cb.message.answer(
@@ -506,7 +535,9 @@ async def my_regs(message: Message, db: AsyncSession, db_user: User):
     for r in rows:
         if not r.event:
             continue
-        text += f"• {esc(r.event.title)} — {r.status}\n"
+        prize = (r.event.prize_summary or "").strip().replace("\n", " ")
+        label = prize[:40] if prize else r.event.title
+        text += f"• {esc(label)} — {r.status}\n"
         items.append((r.event.public_token, _list_title(r.event)))
     await message.answer(text, reply_markup=event_list_kb(items) if items else None)
 
@@ -524,7 +555,12 @@ async def history(message: Message, db: AsyncSession, db_user: User):
     if not rows:
         await message.answer("تاریخچه‌ای موجود نیست.")
         return
-    await message.answer("\n".join(f"• {e.title} ({e.status})" for e in rows))
+    lines = []
+    for e in rows:
+        prize = (e.prize_summary or "").strip().replace("\n", " ")
+        label = prize[:40] if prize else e.title
+        lines.append(f"• {esc(label)} ({e.status})")
+    await message.answer("\n".join(lines))
 
 
 @router.message(Command("help"))

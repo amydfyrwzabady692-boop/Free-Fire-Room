@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime
-from uuid import UUID
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter, TelegramBadRequest
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.exceptions import TelegramForbiddenError
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.enums import DeliveryStatus, EventStatus, JobStatus, RegistrationStatus
 from app.core.logging import get_logger
-from app.core.security import decrypt_secret, generate_unguessable_token
+from app.core.security import decrypt_secret
 from app.models.channel import Channel, GlobalRequiredChannel
 from app.models.event import Event, EventRequiredChannel, RoomCredential
 from app.models.jobs import Delivery, ScheduledJob
@@ -21,13 +18,6 @@ from app.models.user import User
 from app.services.telegram_ops import get_membership
 
 log = get_logger(__name__)
-
-PERMANENT_ERRORS = {"Forbidden", "bot was blocked", "user is deactivated", "chat not found"}
-
-
-def _is_permanent(msg: str) -> bool:
-    low = (msg or "").lower()
-    return any(p.lower() in low for p in PERMANENT_ERRORS)
 
 
 async def send_credentials_for_job(db: Session, job: ScheduledJob, bot: Bot, redis=None) -> dict:
@@ -45,16 +35,12 @@ async def send_credentials_for_job(db: Session, job: ScheduledJob, bot: Bot, red
         db.flush()
         return {"ok": False, "reason": "missing_credentials"}
 
-    room_id = decrypt_secret(creds.room_id_encrypted)
-    room_password = decrypt_secret(creds.room_password_encrypted)
-
     regs = db.scalars(
         select(Registration)
         .where(Registration.event_id == event.id, Registration.status == RegistrationStatus.CONFIRMED)
         .options(selectinload(Registration.user))
     ).all()
 
-    channel_ids = _collect_required_chat_ids(db, event)
     sent = failed = skipped = 0
 
     for reg in regs:
@@ -62,78 +48,17 @@ async def send_credentials_for_job(db: Session, job: ScheduledJob, bot: Bot, red
         if not user:
             skipped += 1
             continue
-        idem = f"creds:{event.id}:{user.id}:{creds.version}"
-        existing = db.scalar(select(Delivery).where(Delivery.idempotency_key == idem))
-        if existing and existing.status == DeliveryStatus.SENT:
-            skipped += 1
-            continue
-
-        eligible, reason = _recheck_user(db, bot, user, event, channel_ids)
-        if not eligible:
-            if reason == "bot_not_admin":
-                job.status = JobStatus.PENDING
-                job.last_error = "bot_not_admin_on_required_channel"
-                db.flush()
-                return {"ok": False, "reason": "bot_not_admin", "sent": sent, "failed": failed, "skipped": skipped}
-            _upsert_delivery(
-                db,
-                user=user,
-                event=event,
-                job=job,
-                idem=idem,
-                status=DeliveryStatus.SKIPPED,
-                error=reason,
-            )
-            reg.status = RegistrationStatus.INELIGIBLE
-            reg.ineligible_reason = reason
-            skipped += 1
-            continue
-
-        text = _render_credentials_message(event, user, room_id, room_password, creds.version)
-        kb = None
-        if event.reveal_button_enabled:
-            token = generate_unguessable_token(12)
-            if redis is not None:
-                redis.setex(f"reveal:{token}", event.reveal_ttl_seconds, f"{event.id}:{user.id}:{creds.version}")
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="نمایش اطلاعات اتاق", callback_data=f"reveal:{token}")]
-                ]
-            )
-            # Still send the credentials in private message; reveal is extra UX.
-        try:
-            msg = await bot.send_message(user.telegram_id, text, reply_markup=kb)
-            _upsert_delivery(
-                db,
-                user=user,
-                event=event,
-                job=job,
-                idem=idem,
-                status=DeliveryStatus.SENT,
-                telegram_message_id=msg.message_id,
-            )
+        result = await deliver_one(bot, db, event, user, creds, job, redis)
+        if result == "check_failed":
+            job.status = JobStatus.PENDING
+            job.last_error = "bot_not_admin_on_required_channel"
+            db.flush()
+            return {"ok": False, "reason": "bot_not_admin", "sent": sent, "failed": failed, "skipped": skipped}
+        if result == "sent":
             sent += 1
-        except TelegramRetryAfter as exc:
-            _upsert_delivery(
-                db, user=user, event=event, job=job, idem=idem, status=DeliveryStatus.FAILED, error="retry_after"
-            )
-            failed += 1
-            await asyncio.sleep(exc.retry_after + 0.3)
-        except TelegramForbiddenError as exc:
-            user.is_bot_blocked = True
-            _upsert_delivery(
-                db,
-                user=user,
-                event=event,
-                job=job,
-                idem=idem,
-                status=DeliveryStatus.PERMANENT_FAIL,
-                error=str(exc),
-            )
-            failed += 1
-        except TelegramBadRequest as exc:
-            status = DeliveryStatus.PERMANENT_FAIL if _is_permanent(str(exc)) else DeliveryStatus.FAILED
-            _upsert_delivery(db, user=user, event=event, job=job, idem=idem, status=status, error=str(exc))
+        elif result in {"skipped", "already"}:
+            skipped += 1
+        else:
             failed += 1
 
     creds.sent_at = datetime.now(UTC)
@@ -168,16 +93,6 @@ def _collect_required_chat_ids(db: Session, event: Event) -> list[int]:
         if ch:
             ids.append(ch.telegram_chat_id)
     return ids
-
-
-def _recheck_user(db: Session, bot: Bot, user: User, event: Event, chat_ids: list[int]) -> tuple[bool, str | None]:
-    from app.core.enums import BanScope
-    from app.services.bans import is_banned_sync
-
-    if is_banned_sync(db, user, BanScope.PARTICIPATE):
-        return False, "banned"
-    # membership checks are async; workers should call async path. This helper is used inside async function.
-    return True, None
 
 
 async def _recheck_user_async(bot: Bot, user: User, chat_ids: list[int]) -> tuple[bool, str | None]:
@@ -231,8 +146,9 @@ def _render_credentials_message(event: Event, user: User, room_id: str, password
     return (
         f"{esc(header)}\n\n"
         f"کاستوم: {esc(event.title)}\n"
-        f"Room ID: <code>{esc(room_id)}</code>\n"
-        f"Password: <code>{esc(password)}</code>"
+        f"جایزه: {esc((event.prize_summary or '').strip() or '—')}\n\n"
+        f"<b>آیدی اتاق</b>\n<code>{esc(room_id)}</code>\n\n"
+        f"<b>رمز اتاق</b>\n<code>{esc(password)}</code>"
         f"{personal}{ver}\n\n"
         "این پیام فقط برای شماست. اسکرین‌شات و بازنشر را کاملاً نمی‌توانیم مسدود کنیم؛"
         " لطفاً اطلاعات را در اختیار دیگران نگذارید."
