@@ -70,6 +70,11 @@ async def send_credentials_for_job(db: Session, job: ScheduledJob, bot: Bot, red
 
         eligible, reason = _recheck_user(db, bot, user, event, channel_ids)
         if not eligible:
+            if reason == "bot_not_admin":
+                job.status = JobStatus.PENDING
+                job.last_error = "bot_not_admin_on_required_channel"
+                db.flush()
+                return {"ok": False, "reason": "bot_not_admin", "sent": sent, "failed": failed, "skipped": skipped}
             _upsert_delivery(
                 db,
                 user=user,
@@ -178,6 +183,8 @@ def _recheck_user(db: Session, bot: Bot, user: User, event: Event, chat_ids: lis
 async def _recheck_user_async(bot: Bot, user: User, chat_ids: list[int]) -> tuple[bool, str | None]:
     for chat_id in chat_ids:
         result = await get_membership(bot, chat_id, user.telegram_id)
+        if result.error == "bot_not_admin":
+            return False, "bot_not_admin"
         if not result.ok:
             return False, f"left_channel:{chat_id}"
     return True, None
@@ -246,7 +253,17 @@ async def deliver_one(bot: Bot, db: Session, event: Event, user: User, creds: Ro
     if is_banned_sync(db, user, BanScope.PARTICIPATE):
         ok, reason = False, "banned"
     if not ok:
+        if reason == "bot_not_admin":
+            return "check_failed"
         _upsert_delivery(db, user=user, event=event, job=job, idem=idem, status=DeliveryStatus.SKIPPED, error=reason)
+        reg = db.scalar(
+            select(Registration).where(Registration.event_id == event.id, Registration.user_id == user.id)
+        )
+        if reg and reg.status == RegistrationStatus.CONFIRMED:
+            if event.confirmed_count > 0:
+                event.confirmed_count -= 1
+            reg.status = RegistrationStatus.INELIGIBLE
+            reg.ineligible_reason = reason
         return "skipped"
     room_id = decrypt_secret(creds.room_id_encrypted)
     password = decrypt_secret(creds.room_password_encrypted)
@@ -264,6 +281,7 @@ async def deliver_one(bot: Bot, db: Session, event: Event, user: User, creds: Ro
         )
         return "sent"
     except TelegramForbiddenError as exc:
+        user.is_bot_blocked = True
         _upsert_delivery(
             db, user=user, event=event, job=job, idem=idem, status=DeliveryStatus.PERMANENT_FAIL, error=str(exc)
         )

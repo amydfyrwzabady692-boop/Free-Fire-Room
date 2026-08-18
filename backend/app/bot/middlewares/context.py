@@ -46,12 +46,39 @@ class BanMiddleware(BaseMiddleware):
             if ban:
                 from aiogram.types import CallbackQuery, Message
 
-                text = f"حساب شما محدود شده است.\nدلیل: {ban.reason}"
+                from app.bot.helpers import esc
+
+                text = f"حساب شما محدود شده است.\nدلیل: {esc(ban.reason)}"
                 if isinstance(event, Message):
                     await event.answer(text)
                 elif isinstance(event, CallbackQuery):
                     await event.answer(text, show_alert=True)
                 return None
+        return await handler(event, data)
+
+
+class MenuResetMiddleware(BaseMiddleware):
+    async def __call__(self, handler: Callable, event: TelegramObject, data: dict[str, Any]) -> Any:
+        from aiogram.types import Message
+
+        from app.bot.keyboards.common import MENU_BUTTON_TEXTS
+
+        state = data.get("state")
+        if isinstance(event, Message) and state is not None:
+            text = (event.text or "").strip()
+            if text in {"/cancel", "لغو", "انصراف"} or text.startswith("/cancel"):
+                await state.clear()
+                db = data.get("db")
+                db_user = data.get("db_user")
+                markup = None
+                if db is not None and db_user is not None:
+                    from app.bot.access import menu_for
+
+                    markup = await menu_for(db, db_user)
+                await event.answer("لغو شد.", reply_markup=markup)
+                return None
+            if text in MENU_BUTTON_TEXTS:
+                await state.clear()
         return await handler(event, data)
 
 

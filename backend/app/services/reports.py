@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.bot.helpers import esc
 from app.core.config import get_settings
 from app.core.enums import ReportReason, ReportStatus
 from app.core.time import format_local
@@ -50,7 +51,7 @@ def format_person(user: User | None) -> str:
         return "نامشخص"
     name = " ".join(part for part in (user.first_name, user.last_name) if part) or "بدون نام"
     uname = f" @{user.username}" if user.username else ""
-    return f"{name}{uname} — {user.telegram_id}"
+    return f"{esc(name)}{esc(uname)} — {user.telegram_id}"
 
 
 def credentials_deadline(event: Event) -> datetime:
@@ -208,25 +209,25 @@ def format_report_alert(*, event: Event, reporter: User, reason: str, body: str,
     title = "گزارش چیتر در کاستوم" if reason == ReportReason.CHEATER else "گزارش جدید از بازیکن"
     extra = ""
     if reason == ReportReason.CHEATER:
-        extra = f"نام چیتر: {normalize_cheater_name(body)}\n"
+        extra = f"نام چیتر: {esc(normalize_cheater_name(body))}\n"
     return (
         f"{title}\n\n"
-        f"کاستوم: {event.title}\n"
+        f"کاستوم: {esc(event.title)}\n"
         f"ساعت: {format_local(event.starts_at, event.timezone)}\n"
         f"دلیل: {report_label(reason)}\n"
         f"{extra}"
         f"گزارش‌دهنده: {format_person(reporter)}\n"
         f"برگزارکننده: {format_person(organizer_user)}\n\n"
-        f"{body[:500]}"
+        f"{esc(body[:500])}"
     )
 
 
 def format_cheater_alert_for_organizer(*, event: Event, reporter: User, body: str) -> str:
     return (
         "گزارش چیتر در کاستوم شما\n\n"
-        f"کاستوم: {event.title}\n"
+        f"کاستوم: {esc(event.title)}\n"
         f"ساعت: {format_local(event.starts_at, event.timezone)}\n"
-        f"نام چیتر: {normalize_cheater_name(body)}\n"
+        f"نام چیتر: {esc(normalize_cheater_name(body))}\n"
         f"گزارش‌دهنده: {format_person(reporter)}"
     )
 
@@ -240,11 +241,11 @@ def format_prize_vote_alert(
     extra: str | None = None,
 ) -> str:
     verdict = "جایزه را داد" if paid else "جایزه را نداد"
-    note = f"\n\n{extra[:400]}" if extra else ""
+    note = f"\n\n{esc(extra[:400])}" if extra else ""
     return (
         "گزارش جایزه — فقط برای مالک ربات (عمومی نیست)\n\n"
         f"نتیجه: {verdict}\n"
-        f"کاستوم: {event.title}\n"
+        f"کاستوم: {esc(event.title)}\n"
         f"ساعت: {format_local(event.starts_at, event.timezone)}\n"
         f"گزارش‌دهنده: {format_person(reporter)}\n"
         f"برگزارکننده: {format_person(organizer_user)}"

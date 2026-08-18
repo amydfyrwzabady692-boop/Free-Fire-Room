@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -49,6 +50,9 @@ async def register_user(
 ) -> RegisterResult:
     await assert_not_banned(db, user, BanScope.PARTICIPATE)
 
+    if event.deleted_at is not None or not event.deep_link_active:
+        raise NotFoundError("event_not_found", "این کاستوم در دسترس نیست یا لغو شده است.")
+
     if event.status not in {EventStatus.PUBLISHED, EventStatus.FULL}:
         raise ValidationAppError("event_not_open", "این کاستوم در حال حاضر برای ثبت‌نام باز نیست.")
 
@@ -78,7 +82,11 @@ async def register_user(
             rules_accepted_at=now if accept_rules else None,
         )
         db.add(holder)
-        await db.flush()
+        try:
+            await db.flush()
+        except IntegrityError as exc:
+            await db.rollback()
+            raise ConflictError("already_registered", "شما قبلاً در این کاستوم ثبت‌نام کرده‌اید.") from exc
     elif accept_rules:
         holder.rules_accepted_at = now
 

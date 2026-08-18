@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import os
 import socket
 from datetime import UTC, datetime, timedelta
@@ -142,7 +143,7 @@ async def _send_credentials(db, job: ScheduledJob) -> None:
         return
     try:
         regs = db.scalars(select(Registration).where(Registration.event_id == event.id, Registration.status == "confirmed")).all()
-        sent = failed = skipped = 0
+        sent = failed = skipped = check_failed = 0
         for reg in regs:
             user = db.get(User, reg.user_id)
             if not user:
@@ -153,13 +154,30 @@ async def _send_credentials(db, job: ScheduledJob) -> None:
                 sent += 1
             elif result == "already":
                 skipped += 1
+            elif result == "check_failed":
+                check_failed += 1
             elif result == "skipped":
                 skipped += 1
-                if event.confirmed_count > 0:
-                    event.confirmed_count -= 1
             else:
                 failed += 1
                 await asyncio.sleep(min(8, 0.05 * (failed + 1)))
+        if check_failed:
+            job.status = JobStatus.PENDING
+            job.run_at = datetime.now(UTC) + timedelta(minutes=2)
+            job.last_error = "bot_not_admin_on_required_channel"
+            org = db.get(Organizer, event.organizer_id)
+            org_user = db.get(User, org.user_id) if org else None
+            if org_user:
+                try:
+                    await bot.send_message(
+                        org_user.telegram_id,
+                        f"رمز کاستوم «{html.escape(event.title)}» ارسال نشد چون ربات دیگر ادمین کانال جوین اجباری نیست.\n"
+                        "ربات را دوباره ادمین کنید تا ارسال تکرار شود.",
+                    )
+                except Exception:
+                    log.exception("organizer_bot_not_admin_warn_failed", event_id=str(event.id))
+            log.warning("credentials_blocked_bot_not_admin", event_id=str(event.id), check_failed=check_failed)
+            return
         creds.sent_at = datetime.now(UTC)
         event.status = EventStatus.STARTED
         job.status = JobStatus.DONE
@@ -178,7 +196,7 @@ async def _send_reminders(db, job: ScheduledJob) -> None:
         return
     regs = db.scalars(select(Registration).where(Registration.event_id == event.id, Registration.status == "confirmed")).all()
     text = (
-        f"یادآوری: کاستوم «{event.title}» به‌زودی شروع می‌شود.\n"
+        f"یادآوری: کاستوم «{html.escape(event.title)}» به‌زودی شروع می‌شود.\n"
         "اگر کانال‌های جوین اجباری را عضو شده باشید، سر ساعت آیدی و رمز برایتان می‌آید."
     )
     for reg in regs:
@@ -207,7 +225,7 @@ async def _prompt_organizer_for_creds(bot, db, event: Event) -> None:
     try:
         await bot.send_message(
             user.telegram_id,
-            f"ساعت کاستوم «{event.title}» رسید ({format_local(event.starts_at, event.timezone)}).\n\n"
+            f"ساعت کاستوم «{html.escape(event.title)}» رسید ({format_local(event.starts_at, event.timezone)}).\n\n"
             "الان آیدی و رمز اتاق را داخل ربات بفرستید؛ مثال:\n"
             "<code>12345678 mypass</code>\n\n"
             f"فقط {grace} دقیقه فرصت دارید. اگر نفرستید اخطار می‌گیرید و بازیکن‌ها می‌توانند گزارش بدهند.\n"
@@ -238,7 +256,7 @@ async def _expire_missing_credentials(bot, db, event: Event, job: ScheduledJob) 
         try:
             await bot.send_message(
                 org_user.telegram_id,
-                f"اخطار: مهلت {grace} دقیقه‌ای ارسال آیدی و رمز کاستوم «{event.title}» تمام شد.\n"
+                f"اخطار: مهلت {grace} دقیقه‌ای ارسال آیدی و رمز کاستوم «{html.escape(event.title)}» تمام شد.\n"
                 "رمز برای بازیکن‌ها ارسال نشد و ممکن است گزارش تخلف دریافت کنید.",
             )
         except Exception:
@@ -248,7 +266,7 @@ async def _expire_missing_credentials(bot, db, event: Event, job: ScheduledJob) 
         select(Registration).where(Registration.event_id == event.id, Registration.status == "confirmed")
     ).all()
     player_text = (
-        f"برگزارکننده کاستوم «{event.title}» در مهلت {grace} دقیقه‌ای آیدی و رمز را نفرستاد.\n"
+        f"برگزارکننده کاستوم «{html.escape(event.title)}» در مهلت {grace} دقیقه‌ای آیدی و رمز را نفرستاد.\n"
         "اگر ثبت‌نام کرده بودید، از دکمه زیر به مالک ربات گزارش بدهید."
     )
     for reg in regs:
@@ -267,7 +285,7 @@ async def _expire_missing_credentials(bot, db, event: Event, job: ScheduledJob) 
 
     admin_text = (
         f"مهلت ارسال رمز تمام شد ({grace} دقیقه).\n\n"
-        f"کاستوم: {event.title}\n"
+        f"کاستوم: {html.escape(event.title)}\n"
         f"برگزارکننده: {format_person(org_user)}\n"
         f"ثبت‌نام قطعی: {event.confirmed_count}"
     )

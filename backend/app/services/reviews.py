@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -111,6 +112,8 @@ def review_window_open(event: Event, now: datetime | None = None) -> bool:
 
 
 async def can_review(db: AsyncSession, user: User, event: Event) -> tuple[bool, str | None]:
+    if event.deleted_at is not None or not event.deep_link_active:
+        return False, "این کاستوم در دسترس نیست."
     org = event.organizer
     if org and org.user_id == user.id:
         return False, "نمی‌توانید برای کاستوم خودتان نظر بگذارید."
@@ -163,6 +166,11 @@ async def create_review(
         comment=text,
     )
     db.add(row)
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        return None, "قبلاً برای این کاستوم نظر ثبت کرده‌اید."
     org = event.organizer or await db.get(Organizer, event.organizer_id)
     if org:
         delta = _trust_delta(rating, prize.value)
@@ -226,8 +234,10 @@ def format_audience_stats(stats: dict) -> str:
 
 
 def format_review_item(row: EventReview) -> str:
+    from app.bot.helpers import esc
+
     name = "بازیکن"
     if row.reviewer:
         name = row.reviewer.first_name or row.reviewer.username or "بازیکن"
-    comment = f"\n«{row.comment}»" if row.comment else ""
-    return f"{stars(row.rating)} {name}{comment}"
+    comment = f"\n«{esc(row.comment)}»" if row.comment else ""
+    return f"{stars(row.rating)} {esc(name)}{comment}"

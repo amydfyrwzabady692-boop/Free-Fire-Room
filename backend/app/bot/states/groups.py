@@ -49,6 +49,8 @@ class ReportSG(StatesGroup):
 
 
 class ReviewSG(StatesGroup):
+    rating = State()
+    prize = State()
     comment = State()
 
 

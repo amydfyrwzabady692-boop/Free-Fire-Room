@@ -9,7 +9,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.access import menu_for
-from app.bot.helpers import normalize_join_url
+from app.bot.helpers import esc, normalize_join_url
 from app.bot.keyboards.common import announcement_list_kb, pick_date_kb, wizard_nav
 from app.bot.onboarding import ensure_onboarding, target_message
 from app.bot.states.groups import AnnounceSG
@@ -35,11 +35,11 @@ def _card(row: CustomAnnouncement) -> str:
     if links:
         extra = "\nکانال‌های پیشنهادی: " + "، ".join(str(x.get("label") or x.get("url")) for x in links[:6])
     return (
-        f"<b>{row.title}</b>\n"
-        f"کانال: {row.channel_name}\n"
+        f"<b>{esc(row.title)}</b>\n"
+        f"کانال: {esc(row.channel_name)}\n"
         f"زمان (شمسی): {format_local(row.starts_at, row.timezone)}\n"
-        f"جایزه: {row.prize_summary or '—'}\n"
-        f"{row.description or ''}"
+        f"جایزه: {esc(row.prize_summary or '—')}\n"
+        f"{esc(row.description or '')}"
         f"{extra}\n\n"
         "این مورد اطلاع‌رسانی است. مشخصات اتاق را ربات ارسال نمی‌کند مگر برگزارکننده کاستوم رسمی ثبت کرده باشد."
     )
@@ -218,8 +218,13 @@ async def ann_extra(message: Message, state: FSMContext):
         f"زمان: {format_local(dt.fromisoformat(data['starts_at']))}\n"
         f"جایزه: {data.get('prize_summary') or '—'}\n"
         f"لینک‌های جوین: {len(links) + (1 if data.get('channel_url') else 0)}\n\n"
-        "برای ثبت: تأیید"
+        "برای ثبت: تأیید\nبرای انصراف: /cancel"
     )
+
+
+@router.message(AnnounceSG.preview, ~F.text.in_({"تأیید", "انتشار"}))
+async def ann_preview_hint(message: Message):
+    await message.answer("برای ثبت، «تأیید» را بفرستید. برای انصراف /cancel")
 
 
 @router.message(AnnounceSG.preview, F.text.in_({"تأیید", "انتشار"}))

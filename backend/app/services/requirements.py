@@ -161,7 +161,19 @@ async def evaluate_requirements(
         if grc.ends_at and grc.ends_at < now:
             continue
         channel = await db.get(Channel, grc.channel_id)
-        if not channel or not channel.bot_is_admin:
+        if not channel:
+            continue
+        if not channel.bot_is_admin:
+            checklist.add(
+                CheckItem(
+                    RequirementType.GLOBAL_CHANNEL_MEMBERSHIP,
+                    f"عضویت در {channel.title}",
+                    RequirementStatus.NOT_DONE,
+                    "ربات الان ادمین این کانال نیست؛ عضویت قابل بررسی نیست.",
+                    url=_channel_url(channel),
+                    ref_id=str(channel.id),
+                )
+            )
             continue
         item = await _membership_item(bot, user, channel, global_flag=True)
         checklist.add(item)

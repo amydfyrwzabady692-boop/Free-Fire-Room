@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from aiogram import F, Router
-from aiogram.filters import CommandObject, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
@@ -34,7 +34,7 @@ from app.locales import fa as T
 from app.models.event import Event
 from app.models.organizer import Organizer
 from app.models.registration import Registration
-from app.models.user import User
+from app.models.user import User, UserProfile
 from app.services.referrals import apply_start_referral, get_or_create_link
 from app.services.registration import register_user
 from app.services.reports import (
@@ -78,7 +78,8 @@ async def _ensure_onboarding(message: Message, user: User, db: AsyncSession) -> 
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, command: CommandObject, db: AsyncSession, db_user: User):
+async def cmd_start(message: Message, command: CommandObject, db: AsyncSession, db_user: User, state: FSMContext):
+    await state.clear()
     await hit_rate_limit(f"rl:start:{db_user.telegram_id}", get_settings().rate_limit_start_per_minute)
     kind, token = _parse_start(command.args)
     db_user.start_payload = command.args
@@ -105,6 +106,23 @@ async def _welcome_after_onboarding(message: Message, db: AsyncSession, db_user:
     )
     if kind == "event" and token:
         await _show_event(message, db, db_user, token)
+
+
+@router.message(F.text == "شروع مجدد")
+async def restart_menu(message: Message, db: AsyncSession, db_user: User, state: FSMContext):
+    await state.clear()
+    db_user.start_payload = None
+    await db.flush()
+    if not await _ensure_onboarding(message, db_user, db):
+        return
+    await _welcome_after_onboarding(message, db, db_user)
+
+
+@router.message(Command("cancel"))
+@router.message(F.text.in_({"/cancel", "لغو", "انصراف"}))
+async def cancel_flow(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
+    await state.clear()
+    await message.answer("لغو شد.", reply_markup=await menu_for(db, db_user))
 
 
 @router.callback_query(F.data == "tos:accept")
@@ -187,12 +205,12 @@ async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> st
     left = max(0, int((e.starts_at - now).total_seconds() // 60))
     grace = get_settings().credentials_grace_minutes
     extra = (
-        "سر همین ساعت برگزارکننده حداکثر ۵ دقیقه فرصت دارد آیدی و رمز را داخل ربات بفرستد؛ "
+        f"سر همین ساعت برگزارکننده حداکثر {grace} دقیقه فرصت دارد آیدی و رمز را داخل ربات بفرستد؛ "
         "فقط اگر کانال‌های همین کاستوم را جوین کرده باشید برایتان ارسال می‌شود."
     )
     if missed:
         extra = (
-            "⚠️ برگزارکننده در مهلت ۵ دقیقه‌ای آیدی و رمز را نفرستاد.\n"
+            f"⚠️ برگزارکننده در مهلت {grace} دقیقه‌ای آیدی و رمز را نفرستاد.\n"
             "اگر ثبت‌نام کرده بودید، گزارش بدهید و نظر/امتیاز ثبت کنید."
         )
     elif e.starts_at <= now:
@@ -213,11 +231,15 @@ async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> st
     )
 
 
+@router.message(Command("customs"))
 @router.message(F.text.in_({"کاستوم‌های آینده", "کاستوم‌های جایزه‌دار"}))
 @router.callback_query(F.data == "list:upcoming")
-async def upcoming(event: Message | CallbackQuery, db: AsyncSession, db_user: User):
+async def upcoming(event: Message | CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
+    await state.clear()
     msg = event.message if isinstance(event, CallbackQuery) else event
     if not await _ensure_onboarding(msg, db_user, db):
+        if isinstance(event, CallbackQuery):
+            await event.answer()
         return
     rows = await _list_events(db, mode="upcoming")
     hours = get_settings().past_events_hours
@@ -242,7 +264,11 @@ async def upcoming(event: Message | CallbackQuery, db: AsyncSession, db_user: Us
 
 
 @router.callback_query(F.data == "list:past")
-async def past_customs(cb: CallbackQuery, db: AsyncSession, db_user: User):
+async def past_customs(cb: CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
+    await state.clear()
+    if not await _ensure_onboarding(cb.message, db_user, db):
+        await cb.answer()
+        return
     hours = get_settings().past_events_hours
     rows = await _list_events(db, mode="past")
     if not rows:
@@ -280,16 +306,25 @@ async def show_event_cb(cb: CallbackQuery, db: AsyncSession, db_user: User, stat
     if current and (current.startswith("ReviewSG") or current.startswith("ReportSG")):
         await state.clear()
     token = cb.data.split(":", 1)[1]
+    if not await _ensure_onboarding(cb.message, db_user, db):
+        await cb.answer()
+        return
     await _show_event(cb.message, db, db_user, token)
     await cb.answer()
 
 
-async def _show_event(message: Message, db: AsyncSession, user: User, token: str):
-    e = await db.scalar(
+async def _event_by_token(db: AsyncSession, token: str | None) -> Event | None:
+    if not token:
+        return None
+    return await db.scalar(
         select(Event)
-        .where(Event.public_token == token)
+        .where(Event.public_token == token, Event.deleted_at.is_(None))
         .options(selectinload(Event.organizer), selectinload(Event.channel), selectinload(Event.prizes))
     )
+
+
+async def _show_event(message: Message, db: AsyncSession, user: User, token: str):
+    e = await _event_by_token(db, token)
     if not e or not e.deep_link_active:
         await message.answer("این کاستوم در دسترس نیست یا لغو شده است.")
         return
@@ -331,8 +366,11 @@ async def _show_event(message: Message, db: AsyncSession, user: User, token: str
 @router.callback_query(F.data.startswith("join:"))
 async def join_event(cb: CallbackQuery, db: AsyncSession, db_user: User):
     await hit_rate_limit(f"rl:reg:{db_user.telegram_id}", get_settings().rate_limit_register_per_minute)
+    if not await _ensure_onboarding(cb.message, db_user, db):
+        await cb.answer()
+        return
     token = cb.data.split(":", 1)[1]
-    e = await db.scalar(select(Event).where(Event.public_token == token))
+    e = await _event_by_token(db, token)
     if not e:
         await cb.answer("یافت نشد", show_alert=True)
         return
@@ -372,7 +410,7 @@ async def join_event(cb: CallbackQuery, db: AsyncSession, db_user: User):
 async def recheck_req(cb: CallbackQuery, db: AsyncSession, db_user: User):
     await hit_rate_limit(f"rl:mem:{db_user.telegram_id}", get_settings().rate_limit_membership_per_minute)
     token = cb.data.split(":", 1)[1]
-    e = await db.scalar(select(Event).where(Event.public_token == token))
+    e = await _event_by_token(db, token)
     if not e:
         await cb.answer("یافت نشد", show_alert=True)
         return
@@ -392,20 +430,30 @@ async def recheck_req(cb: CallbackQuery, db: AsyncSession, db_user: User):
     await cb.message.answer(text, reply_markup=checklist_kb(token, join_urls=_join_urls(checklist.items)))
     if checklist.all_ok:
         try:
-            await register_user(db, user=db_user, event=e, bot=cb.bot, source="recheck", accept_rules=True)
-        except AppError:
-            pass
+            result = await register_user(db, user=db_user, event=e, bot=cb.bot, source="recheck", accept_rules=True)
+            if result.registration.status == RegistrationStatus.CONFIRMED:
+                await cb.message.answer("ثبت‌نام قطعی شد. سر ساعت اگر هنوز عضو کانال‌ها باشید رمز برایتان می‌آید.")
+            elif result.waitlisted:
+                await cb.message.answer("ظرفیت پر است. شما در لیست انتظار قرار گرفتید.")
+        except AppError as exc:
+            if exc.code != "already_registered":
+                await cb.message.answer(exc.message)
     await cb.answer()
 
 
 @router.callback_query(F.data.startswith("rules:"))
 async def accept_rules(cb: CallbackQuery, db: AsyncSession, db_user: User):
     token = cb.data.split(":", 1)[1]
-    e = await db.scalar(select(Event).where(Event.public_token == token))
+    e = await _event_by_token(db, token)
     if not e:
         await cb.answer("یافت نشد", show_alert=True)
         return
-    result = await register_user(db, user=db_user, event=e, bot=cb.bot, source="rules", accept_rules=True)
+    try:
+        result = await register_user(db, user=db_user, event=e, bot=cb.bot, source="rules", accept_rules=True)
+    except AppError as exc:
+        await cb.message.answer(exc.message)
+        await cb.answer()
+        return
     if result.registration.status == RegistrationStatus.CONFIRMED:
         await cb.message.answer("قوانین پذیرفته شد و ثبت‌نام قطعی شد.")
     else:
@@ -417,7 +465,7 @@ async def accept_rules(cb: CallbackQuery, db: AsyncSession, db_user: User):
 async def invite(cb: CallbackQuery, db: AsyncSession, db_user: User):
     await hit_rate_limit(f"rl:ref:{db_user.telegram_id}", get_settings().rate_limit_referral_per_minute)
     token = cb.data.split(":", 1)[1]
-    e = await db.scalar(select(Event).where(Event.public_token == token))
+    e = await _event_by_token(db, token)
     link = await get_or_create_link(db, db_user.id, e.id if e else None)
     bot_user = get_settings().bot_username
     url = f"https://t.me/{bot_user}?start=ref_{link.token}"
@@ -458,7 +506,7 @@ async def my_regs(message: Message, db: AsyncSession, db_user: User):
     for r in rows:
         if not r.event:
             continue
-        text += f"• {r.event.title} — {r.status}\n"
+        text += f"• {esc(r.event.title)} — {r.status}\n"
         items.append((r.event.public_token, _list_title(r.event)))
     await message.answer(text, reply_markup=event_list_kb(items) if items else None)
 
@@ -479,6 +527,7 @@ async def history(message: Message, db: AsyncSession, db_user: User):
     await message.answer("\n".join(f"• {e.title} ({e.status})" for e in rows))
 
 
+@router.message(Command("help"))
 @router.message(F.text.in_({"راهنما و قوانین", "راهنما"}))
 async def help_msg(message: Message):
     await message.answer(T.HELP + "\n\n" + T.DISCLAIMER, reply_markup=help_kb())
@@ -524,7 +573,7 @@ async def support_body(message: Message, state: FSMContext, db: AsyncSession, db
     await notify_active_admins(
         message.bot,
         db,
-        f"پیام پشتیبانی\nاز: {format_person(db_user)}\n\n{body[:2000]}",
+        f"پیام پشتیبانی\nاز: {format_person(db_user)}\n\n{esc(body[:2000])}",
     )
     await state.clear()
     await message.answer("پیام برای مالک ربات ارسال شد.", reply_markup=await menu_for(db, db_user))
@@ -535,7 +584,7 @@ async def profile(message: Message, db_user: User):
     ff = db_user.profile.ff_player_id if db_user.profile else "—"
     await message.answer(
         f"شناسه تلگرام: {db_user.telegram_id}\n"
-        f"نام: {db_user.first_name}\n"
+        f"نام: {esc(db_user.first_name)}\n"
         f"Free Fire ID: {ff}\n"
         f"منطقه زمانی: {db_user.timezone}\n"
         "برای تنظیم شناسه بازیکن بنویسید:\n/setid شناسه"
@@ -550,6 +599,8 @@ async def set_id(message: Message, db_user: User, db: AsyncSession):
         return
     if db_user.profile:
         db_user.profile.ff_player_id = parts[1].strip()[:32]
+    else:
+        db.add(UserProfile(user_id=db_user.id, ff_player_id=parts[1].strip()[:32]))
     await message.answer("شناسه Free Fire ذخیره شد.")
 
 
@@ -568,7 +619,7 @@ async def notifs(message: Message, db: AsyncSession, db_user: User):
     if not rows:
         await message.answer("اعلانی ندارید.")
         return
-    await message.answer("\n\n".join(f"<b>{n.title}</b>\n{n.body}" for n in rows))
+    await message.answer("\n\n".join(f"<b>{esc(n.title)}</b>\n{esc(n.body)}" for n in rows))
 
 
 @router.callback_query(F.data.startswith("reveal:"))
@@ -581,22 +632,25 @@ async def reveal(cb: CallbackQuery):
 
 @router.callback_query(F.data.startswith("rep:") & ~F.data.startswith("repr:"))
 async def report_event(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    if not await _ensure_onboarding(cb.message, db_user, db):
+        await cb.answer()
+        return
     token = cb.data.split(":", 1)[1]
-    e = await db.scalar(select(Event).where(Event.public_token == token).options(selectinload(Event.organizer)))
+    e = await _event_by_token(db, token)
     if not e:
         await cb.answer("کاستوم یافت نشد", show_alert=True)
         return
     org = e.organizer
     if org and org.user_id == db_user.id:
         await cb.message.answer(
-            f"گزارش کاستوم «{e.title}»\n"
+            f"گزارش کاستوم «{esc(e.title)}»\n"
             "برای کاستوم خودتان فقط می‌توانید چیتر را گزارش کنید.",
             reply_markup=report_reasons_kb(token, cheater_only=True),
         )
         await cb.answer()
         return
     await cb.message.answer(
-        f"گزارش کاستوم «{e.title}»\nدلیل را انتخاب کنید:",
+        f"گزارش کاستوم «{esc(e.title)}»\nدلیل را انتخاب کنید:",
         reply_markup=report_reasons_kb(token),
     )
     await cb.answer()
@@ -609,7 +663,7 @@ async def report_reason_chosen(cb: CallbackQuery, db: AsyncSession, db_user: Use
         await cb.answer("نامعتبر", show_alert=True)
         return
     token, reason = rest[1], rest[2]
-    e = await db.scalar(select(Event).where(Event.public_token == token).options(selectinload(Event.organizer)))
+    e = await _event_by_token(db, token)
     if not e:
         await cb.answer("کاستوم یافت نشد", show_alert=True)
         return
@@ -643,6 +697,10 @@ async def report_reason_chosen(cb: CallbackQuery, db: AsyncSession, db_user: Use
 @router.message(ReportSG.body)
 async def report_other_body(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
     body = (message.text or "").strip()
+    if body in {"/cancel", "لغو", "انصراف"}:
+        await state.clear()
+        await message.answer("لغو شد.", reply_markup=await menu_for(db, db_user))
+        return
     data = await state.get_data()
     token = data.get("event_token")
     reason = data.get("reason") or "other"
@@ -653,7 +711,7 @@ async def report_other_body(message: Message, state: FSMContext, db: AsyncSessio
     elif len(body) < 5:
         await message.answer("کمی بیشتر توضیح بدهید (حداقل چند کلمه).")
         return
-    e = await db.scalar(select(Event).where(Event.public_token == token).options(selectinload(Event.organizer)))
+    e = await _event_by_token(db, token)
     await state.clear()
     if not e:
         await message.answer("کاستوم یافت نشد.")
@@ -701,13 +759,15 @@ async def _notify_prize_vote(
     org_user = await db.get(User, org.user_id) if org else None
     paid = prize == "yes"
     if not paid:
-        await create_player_report(
+        _report, err = await create_player_report(
             db,
             reporter=reporter,
             event=event,
             reason="unpaid_prize",
             body=(extra or "").strip() or "از نظر بازیکن: جایزه را نداد.",
         )
+        if err and "قبلاً" not in (err or ""):
+            pass
     await notify_active_admins(
         bot,
         db,
@@ -718,14 +778,6 @@ async def _notify_prize_vote(
             paid=paid,
             extra=extra,
         ),
-    )
-
-
-async def _event_by_token(db: AsyncSession, token: str | None) -> Event | None:
-    if not token:
-        return None
-    return await db.scalar(
-        select(Event).where(Event.public_token == token).options(selectinload(Event.organizer))
     )
 
 
@@ -740,7 +792,7 @@ async def list_reviews(cb: CallbackQuery, db: AsyncSession):
     summary = await review_summary_for_event(db, e.id)
     org_sum = await review_summary_for_organizer(db, e.organizer_id)
     text = (
-        f"نظرات کاستوم «{e.title}»\n"
+        f"نظرات کاستوم «{esc(e.title)}»\n"
         f"{format_rating_line(summary, prefix='این کاستوم')}\n"
         f"{format_rating_line(org_sum, prefix='سابقه برگزارکننده')}\n"
     )
@@ -754,6 +806,9 @@ async def list_reviews(cb: CallbackQuery, db: AsyncSession):
 
 @router.callback_query(F.data.startswith("rev:"))
 async def start_review(cb: CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
+    if not await _ensure_onboarding(cb.message, db_user, db):
+        await cb.answer()
+        return
     token = cb.data.split(":", 1)[1]
     e = await _event_by_token(db, token)
     if not e:
@@ -763,9 +818,10 @@ async def start_review(cb: CallbackQuery, db: AsyncSession, db_user: User, state
     if not ok:
         await cb.answer(err or "نمی‌توانید نظر بدهید.", show_alert=True)
         return
+    await state.set_state(ReviewSG.rating)
     await state.update_data(review_token=token)
     await cb.message.answer(
-        f"به کاستوم «{e.title}» از ۱ تا ۵ ستاره بدهید.",
+        f"به کاستوم «{esc(e.title)}» از ۱ تا ۵ ستاره بدهید.",
         reply_markup=review_stars_kb(token),
     )
     await cb.answer()
@@ -786,6 +842,7 @@ async def review_star(cb: CallbackQuery, state: FSMContext):
     if rating not in {1, 2, 3, 4, 5}:
         await cb.answer("امتیاز باید ۱ تا ۵ باشد.", show_alert=True)
         return
+    await state.set_state(ReviewSG.prize)
     await state.update_data(review_token=token, review_rating=rating)
     await cb.message.answer(
         "جایزه این کاستوم را به برنده دادند؟\n"
@@ -811,6 +868,12 @@ async def review_prize(cb: CallbackQuery, state: FSMContext):
         reply_markup=review_comment_kb(token),
     )
     await cb.answer()
+
+
+@router.message(ReviewSG.rating)
+@router.message(ReviewSG.prize)
+async def review_use_buttons(message: Message):
+    await message.answer("از دکمه‌های زیر پیام قبلی استفاده کنید، یا /cancel برای انصراف.")
 
 
 @router.callback_query(F.data.startswith("rvn:"))
@@ -853,6 +916,7 @@ async def _finish_review(message, state: FSMContext, db: AsyncSession, db_user: 
 
 
 @router.callback_query(F.data == "menu:home")
-async def menu_home(cb: CallbackQuery, db: AsyncSession, db_user: User):
+async def menu_home(cb: CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
+    await state.clear()
     await cb.message.answer("منوی اصلی", reply_markup=await menu_for(db, db_user))
     await cb.answer()

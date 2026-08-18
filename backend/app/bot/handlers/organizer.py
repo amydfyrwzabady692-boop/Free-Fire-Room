@@ -4,7 +4,7 @@ from datetime import UTC, date, datetime as dt, timedelta
 from uuid import UUID
 
 from aiogram import F, Router
-from aiogram.filters import StateFilter
+from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import default_state
 from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardMarkup, Message
@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.bot.access import menu_for
-from app.bot.helpers import event_deep_link, extract_channel_ref
+from app.bot.helpers import event_deep_link, extract_channel_ref, esc
 from app.bot.keyboards.common import (
     DANGER,
     PRIMARY,
@@ -63,6 +63,7 @@ async def _blocked_organize(db: AsyncSession, user: User, target: Message | Call
     return True
 
 
+@router.message(Command("host"))
 @router.message(F.text.in_({"ثبت کاستوم", "ثبت کاستوم جایزه‌دار"}))
 @router.callback_query(F.data == "orgp:new")
 async def start_org(event: Message | CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
@@ -262,7 +263,7 @@ async def _attach_wizard_channel(
         await state.set_state(EventWizardSG.extra_channels)
         await bot.send_message(
             telegram_id,
-            f"کانال «{ch.title}» به‌عنوان جوین اجباری ثبت شد.\n"
+            f"کانال «{esc(ch.title)}» به‌عنوان جوین اجباری ثبت شد.\n"
             "اگر کانال دیگری هم می‌خواهید همان روش را تکرار کنید.\n"
             "اگر تمام شد دکمه «تمام شد» را بزنید یا «-» بفرستید.",
             reply_markup=await _channel_step_kb(db, db_user, ids, extra=True),
@@ -270,7 +271,7 @@ async def _attach_wizard_channel(
         return
     await bot.send_message(
         telegram_id,
-        f"کانال «{ch.title}» اضافه شد ({len(ids)}/{max_ch}).\n"
+        f"کانال «{esc(ch.title)}» اضافه شد ({len(ids)}/{max_ch}).\n"
         "کانال بعدی، یا «تمام شد» / «-».",
         reply_markup=await _channel_step_kb(db, db_user, ids, extra=True),
     )
@@ -502,6 +503,8 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
 
 @router.callback_query(F.data == "orgp:mine")
 async def org_mine(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    if await _blocked_organize(db, db_user, cb):
+        return
     org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
     if not org:
         await cb.answer("اول یک کاستوم بسازید.", show_alert=True)
@@ -536,7 +539,7 @@ async def org_mine(cb: CallbackQuery, db: AsyncSession, db_user: User):
             ]
         )
         await cb.message.answer(
-            f"<b>{e.title}</b>\n"
+            f"<b>{esc(e.title)}</b>\n"
             f"زمان (شمسی): {format_local(e.starts_at, e.timezone)}\n"
             f"وضعیت: {e.status}\n"
             f"{format_audience_stats(stats)}\n"
@@ -556,7 +559,7 @@ async def org_link(cb: CallbackQuery, db: AsyncSession, db_user: User):
         return
     link = event_deep_link(e.public_token)
     await cb.message.answer(
-        f"لینک اختصاصی «{e.title}»:\n{link}\n\n"
+        f"لینک اختصاصی «{esc(e.title)}»:\n{link}\n\n"
         "این لینک را در کانال بگذارید. مشخصات اتاق فقط به کسانی می‌رسد که شرایط را تا لحظه ارسال کامل کرده باشند."
     )
     await cb.answer()
@@ -564,6 +567,8 @@ async def org_link(cb: CallbackQuery, db: AsyncSession, db_user: User):
 
 @router.callback_query(F.data.startswith("orgp:cancel:"))
 async def org_cancel(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    if await _blocked_organize(db, db_user, cb):
+        return
     token = cb.data.split(":", 2)[-1]
     e = await db.scalar(select(Event).where(Event.public_token == token).options(selectinload(Event.organizer)))
     if not e or not e.organizer or e.organizer.user_id != db_user.id:
@@ -576,7 +581,10 @@ async def org_cancel(cb: CallbackQuery, db: AsyncSession, db_user: User):
     regs = (
         await db.scalars(
             select(Registration).where(
-                Registration.event_id == e.id, Registration.status == RegistrationStatus.CONFIRMED
+                Registration.event_id == e.id,
+                Registration.status.in_(
+                    [RegistrationStatus.CONFIRMED, RegistrationStatus.WAITLISTED, RegistrationStatus.PENDING]
+                ),
             )
         )
     ).all()
@@ -587,11 +595,11 @@ async def org_cancel(cb: CallbackQuery, db: AsyncSession, db_user: User):
         try:
             await cb.bot.send_message(
                 user.telegram_id,
-                f"کاستوم «{e.title}» لغو شد. آیدی و رمز ارسال نمی‌شود.",
+                f"کاستوم «{esc(e.title)}» لغو شد. آیدی و رمز ارسال نمی‌شود.",
             )
         except Exception:
             continue
-    await cb.message.answer(f"کاستوم «{e.title}» لغو شد. به ثبت‌نام‌شده‌ها خبر داده شد.")
+    await cb.message.answer(f"کاستوم «{esc(e.title)}» لغو شد. به ثبت‌نام‌شده‌ها خبر داده شد.")
     await cb.answer()
 
 
@@ -625,6 +633,8 @@ async def org_channels(cb: CallbackQuery, db: AsyncSession, db_user: User):
 
 @router.callback_query(F.data.startswith("orgp:creds:"))
 async def ask_live_creds(cb: CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
+    if await _blocked_organize(db, db_user, cb):
+        return
     token = cb.data.split(":", 2)[-1]
     e = await db.scalar(select(Event).where(Event.public_token == token).options(selectinload(Event.organizer)))
     if not e or not e.organizer or e.organizer.user_id != db_user.id:
@@ -640,7 +650,7 @@ async def ask_live_creds(cb: CallbackQuery, db: AsyncSession, db_user: User, sta
     deadline = credentials_deadline(e)
     remain = max(0, int((deadline - dt.now(UTC)).total_seconds() // 60))
     await cb.message.answer(
-        f"ساعت کاستوم «{e.title}»\n"
+        f"ساعت کاستوم «{esc(e.title)}»\n"
         "الان Room ID و Password را در یک خط بفرستید؛ مثال:\n"
         "<code>12345678 mypass</code>\n\n"
         f"فقط {grace} دقیقه بعد از ساعت شروع فرصت دارید (حدود {remain} دقیقه مانده).\n"
@@ -693,9 +703,12 @@ async def _save_and_dispatch_creds(
 
 @router.message(CredsWaitSG.waiting)
 async def receive_live_creds(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
+    if await _blocked_organize(db, db_user, message):
+        await state.clear()
+        return
     parsed = _looks_like_room_creds(message.text)
     if parsed is None:
-        await message.answer("فرمت نامعتبر است. Room ID و رمز را در یک خط بفرستید؛ نمونه:\n<code>12345678 mypass</code>")
+        await message.answer("فرمت نامعتبر است. Room ID و رمز را در یک خط بفرستید؛ نمونه:\n<code>12345678 mypass</code>\nبرای انصراف /cancel")
         return
     data = await state.get_data()
     token = data.get("event_token")
@@ -705,12 +718,15 @@ async def receive_live_creds(message: Message, state: FSMContext, db: AsyncSessi
         await message.answer("کاستوم یافت نشد.")
         return
     ok = await _save_and_dispatch_creds(message, db, db_user, e, parsed[0], parsed[1])
-    if ok:
-        await state.clear()
+    await state.clear()
+    if not ok:
+        return
 
 
 @router.message(StateFilter(default_state), F.text.regexp(r"^\d{4,16}\s+\S+"))
 async def maybe_live_creds(message: Message, db: AsyncSession, db_user: User):
+    if await is_banned(db, db_user, BanScope.ORGANIZE):
+        return
     parsed = _looks_like_room_creds(message.text)
     if parsed is None:
         return

@@ -5,7 +5,7 @@ import logging
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
-from app.bot.loader import get_bot, get_dispatcher
+from app.bot.loader import get_bot, get_dispatcher, setup_bot_profile
 
 log = get_logger("bot")
 
@@ -14,6 +14,7 @@ async def _run_polling() -> None:
     bot = get_bot()
     dp = get_dispatcher()
     await bot.delete_webhook(drop_pending_updates=False)
+    await setup_bot_profile(bot)
     log.info("bot_polling_start")
     await dp.start_polling(bot)
 
@@ -23,6 +24,7 @@ async def _set_webhook() -> None:
     bot = get_bot()
     url = settings.public_base_url.rstrip("/") + settings.webhook_path
     await bot.set_webhook(url, secret_token=settings.webhook_secret, drop_pending_updates=False)
+    await setup_bot_profile(bot)
     log.info("webhook_set", url=url)
 
 

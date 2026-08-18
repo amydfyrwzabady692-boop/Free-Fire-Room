@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.bot.access import is_active_admin, menu_for
-from app.bot.helpers import extract_channel_ref
+from app.bot.helpers import esc, extract_channel_ref
 from app.bot.keyboards.common import DANGER, PRIMARY, SUCCESS, add_required_channel_kb, ibtn
 from app.bot.states.groups import AdminSG
 from app.core.enums import BanScope, EventStatus, OrganizerStatus, RegistrationStatus, ReportStatus, UserStatus
@@ -470,9 +470,9 @@ async def admin_channel_add(message: Message, db: AsyncSession, db_user: User, s
     try:
         await channel_svc.add_global_required_channel(db, message.bot, db_user.id, ref, scope="all")
         await message.answer("کانال اجباری اضافه شد.", reply_markup=_back_kb())
+        await state.clear()
     except AppError as exc:
         await message.answer(exc.message)
-    await state.clear()
 
 
 @router.callback_query(F.data.startswith("adm:ct:"))
@@ -512,11 +512,11 @@ async def admin_reports(cb: CallbackQuery, db: AsyncSession, db_user: User):
         when = format_local(event.starts_at, event.timezone) if event else "-"
         text = (
             f"<b>{report_label(r.reason)}</b>\n"
-            f"کاستوم: {event.title if event else '-'}\n"
+            f"کاستوم: {esc(event.title) if event else '-'}\n"
             f"ساعت: {when}\n"
             f"برگزارکننده: {format_person(org_user)}\n"
             f"گزارش‌دهنده: {format_person(reporter)}\n\n"
-            f"{(r.body or '')[:400]}"
+            f"{esc((r.body or '')[:400])}"
         )
         kb = InlineKeyboardMarkup(
             inline_keyboard=[[ibtn("بسته شد", callback_data=f"adm:rok:{r.id}", style=SUCCESS)]]
@@ -586,7 +586,7 @@ async def admin_bc_body(message: Message, db: AsyncSession, db_user: User, state
             [ibtn("انصراف", callback_data="adm:home", style=DANGER)],
         ]
     )
-    await message.answer(f"پیش‌نویس آماده است:\n<b>{row.title}</b>\n{row.body}", reply_markup=kb)
+    await message.answer(f"پیش‌نویس آماده است:\n<b>{esc(row.title)}</b>\n{esc(row.body)}", reply_markup=kb)
 
 
 @router.callback_query(F.data.startswith("adm:bok:"))
@@ -645,7 +645,7 @@ async def admin_anns(cb: CallbackQuery, db: AsyncSession, db_user: User):
             inline_keyboard=[[InlineKeyboardButton(text="مخفی کردن", callback_data=f"adm:ah:{row.id}")]]
         )
         await cb.message.answer(
-            f"<b>{row.title}</b>\nکانال: {row.channel_name}\nزمان: {format_local(row.starts_at, row.timezone)}",
+            f"<b>{esc(row.title)}</b>\nکانال: {esc(row.channel_name)}\nزمان: {format_local(row.starts_at, row.timezone)}",
             reply_markup=kb,
         )
     await cb.message.answer("بازگشت:", reply_markup=_back_kb())
@@ -680,7 +680,7 @@ async def admin_recent_users(cb: CallbackQuery, db: AsyncSession, db_user: User)
         return
     text = "کاربران اخیر:\n"
     for u in rows:
-        text += f"• {u.first_name or '-'} | {u.telegram_id} | {u.status}\n"
+        text += f"• {esc(u.first_name or '-')} | {u.telegram_id} | {u.status}\n"
     await cb.message.answer(text + "\nبرای بن/رفع بن از «جستجوی کاربر» شناسه را بفرستید.", reply_markup=_back_kb())
     await cb.answer()
 
