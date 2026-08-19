@@ -29,4 +29,5 @@ def test_daily_digest_text_tells_users_to_join(db):
     assert "کاستوم‌های جایزه‌دار پیش‌رو" in text
     assert "عضو شدم" in text
     assert "۱۰۰۰ الماس" in text
-    assert "آیدی و رمز" in text
+    assert "ROOM ID" in text
+    assert "PASS" in text

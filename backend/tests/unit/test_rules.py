@@ -183,3 +183,24 @@ def test_requirement_capacity_helper():
     event = SimpleNamespace(confirmed_count=10, capacity=10)
     assert evaluate_capacity_only(event, already_confirmed=False) is False
     assert evaluate_capacity_only(event, already_confirmed=True) is True
+
+
+def test_credentials_message_uses_room_id_and_pass():
+    from types import SimpleNamespace
+
+    from app.services.credentials import _render_credentials_message
+
+    event = SimpleNamespace(
+        title="کاستوم الماس",
+        prize_summary="۱۰۰۰ الماس",
+        custom_credentials_message=None,
+        personalize_delivery=False,
+    )
+    user = SimpleNamespace(first_name="Ali", username="ali", telegram_id=1, id="abcd1234")
+    text = _render_credentials_message(event, user, "12345678", "pass99", 1)
+    assert "ROOM ID" in text
+    assert "PASS" in text
+    assert "12345678" in text
+    assert "pass99" in text
+    assert "آیدی اتاق" not in text
+    assert "رمز اتاق" not in text

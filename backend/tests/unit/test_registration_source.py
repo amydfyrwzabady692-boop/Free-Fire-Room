@@ -17,3 +17,12 @@ def test_recheck_does_not_wipe_existing_source():
 def test_first_real_source_is_kept():
     assert merge_registration_source(None, "bot") == "bot"
     assert merge_registration_source(None, "recheck") == "recheck"
+
+
+def test_audit_actor_telegram_id_is_bigint():
+    from sqlalchemy import BigInteger
+
+    from app.models.admin import AuditLog
+
+    col = AuditLog.__table__.c.actor_telegram_id
+    assert isinstance(col.type, BigInteger)

@@ -142,7 +142,7 @@ async def register_user(
             actor_id=user.id,
             actor_telegram_id=user.telegram_id,
             ip_address=actor_ip,
-            extra={"event_id": str(event.id)},
+            extra={"event_id": str(event.id), "telegram_id": user.telegram_id},
         )
         await db.flush()
         return RegisterResult(holder, checklist=checklist.items)

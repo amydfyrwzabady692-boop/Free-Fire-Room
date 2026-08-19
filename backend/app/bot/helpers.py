@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import html
 
+from aiogram.types import CallbackQuery
+
 from app.core.config import get_settings
+from app.core.logging import get_logger
+
+_log = get_logger(__name__)
 
 
 def esc(value: object) -> str:
@@ -79,3 +84,24 @@ def normalize_join_url(raw: str) -> tuple[str, str] | None:
     if not handle or " " in handle:
         return None
     return handle, f"https://t.me/{handle}"
+
+
+async def ack_callback(cb: CallbackQuery, text: str | None = None, **kwargs) -> None:
+    try:
+        await cb.answer("" if text is None else text, **kwargs)
+    except Exception:
+        _log.exception("callback_ack_failed")
+
+
+async def reply_callback(cb: CallbackQuery, text: str, **kwargs) -> None:
+    msg = cb.message
+    if msg is not None and hasattr(msg, "answer"):
+        try:
+            await msg.answer(text, **kwargs)
+            return
+        except Exception:
+            _log.exception("callback_message_reply_failed")
+    try:
+        await cb.bot.send_message(cb.from_user.id, text, **kwargs)
+    except Exception:
+        _log.exception("callback_dm_reply_failed")

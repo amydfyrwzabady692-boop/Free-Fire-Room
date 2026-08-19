@@ -52,6 +52,9 @@ async def write_audit(
     after: dict | None = None,
     extra: dict | None = None,
 ) -> None:
+    extra_data = dict(extra or {})
+    if actor_telegram_id is not None:
+        extra_data.setdefault("telegram_id", actor_telegram_id)
     row = AuditLog(
         actor_id=actor_id,
         actor_telegram_id=actor_telegram_id,
@@ -63,8 +66,13 @@ async def write_audit(
         correlation_id=correlation_id,
         before=_sanitize(before),
         after=_sanitize(after),
-        extra=_sanitize(extra),
+        extra=_sanitize(extra_data) or None,
     )
-    db.add(row)
-    await db.flush()
+    try:
+        async with db.begin_nested():
+            db.add(row)
+            await db.flush()
+    except Exception:
+        log.exception("audit_write_failed", action=action, entity_type=entity_type)
+        return
     log.info("audit", action=action, entity_type=entity_type, entity_id=str(entity_id))

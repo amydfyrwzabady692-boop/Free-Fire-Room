@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.bot.access import menu_for
-from app.bot.helpers import esc
+from app.bot.helpers import ack_callback, esc, reply_callback
 from app.bot.keyboards.common import (
     DANGER,
     PRIMARY,
@@ -35,6 +35,7 @@ from app.bot.states.groups import ReportSG, ReviewSG, SupportSG
 from app.core.config import get_settings
 from app.core.enums import EventStatus, EventVisibility, RegistrationStatus, ReportReason, RequirementType
 from app.core.errors import AppError
+from app.core.logging import get_logger
 from app.core.rate_limit import hit_rate_limit
 from app.core.time import format_local
 from app.locales import fa as T
@@ -66,6 +67,7 @@ from app.services.reviews import (
 )
 
 router = Router(name="player")
+log = get_logger(__name__)
 
 
 def _parse_start(payload: str | None) -> tuple[str, str | None]:
@@ -105,13 +107,13 @@ async def _welcome_after_onboarding(message: Message, db: AsyncSession, db_user:
     if kind == "event" and token:
         await message.answer(
             "از لینک اختصاصی این کاستوم آمدید.\n"
-            "جایزه، شرایط و کانال‌های جوین اجباری را ببینید؛ عضو شوید تا سر ساعت آیدی و رمز برایتان بیاید.",
+            "🎁 جایزه، شرایط و کانال‌های جوین اجباری را ببینید؛ عضو شوید تا سر ساعت ROOM ID و PASS برایتان بیاید.",
             reply_markup=await menu_for(db, db_user),
         )
         await _show_event(message, db, db_user, token)
         return
     await message.answer(
-        f"{T.INTRO}\n\nمنوی اصلی آماده است. جزئیات بیشتر در «راهنما و قوانین».",
+        f"{T.INTRO}\n\n✨ منوی اصلی آماده است. جزئیات بیشتر در «راهنما و قوانین».",
         reply_markup=await menu_for(db, db_user),
     )
 
@@ -215,17 +217,17 @@ async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> st
     left = max(0, int((e.starts_at - now).total_seconds() // 60))
     grace = get_settings().credentials_grace_minutes
     extra = (
-        f"سر همین ساعت برگزارکننده حداکثر {grace} دقیقه فرصت دارد آیدی و رمز را داخل ربات بفرستد؛ "
+        f"🆔 سر همین ساعت برگزارکننده حداکثر {grace} دقیقه فرصت دارد ROOM ID و PASS را داخل ربات بفرستد؛ "
         "فقط اگر کانال‌های همین کاستوم را جوین کرده باشید برایتان ارسال می‌شود."
     )
     if missed:
         extra = (
-            f"⚠️ برگزارکننده در مهلت {grace} دقیقه‌ای آیدی و رمز را نفرستاد.\n"
+            f"⚠️ برگزارکننده در مهلت {grace} دقیقه‌ای ROOM ID و PASS را نفرستاد.\n"
             "اگر ثبت‌نام کرده بودید، گزارش بدهید و نظر/امتیاز ثبت کنید."
         )
     elif e.starts_at <= now:
         extra = (
-            f"ساعت کاستوم رسیده. برگزارکننده تا {grace} دقیقه بعد از ساعت شروع فرصت ارسال رمز را دارد."
+            f"🕐 ساعت کاستوم رسیده. برگزارکننده تا {grace} دقیقه بعد از ساعت شروع فرصت ارسال ROOM ID / PASS را دارد."
         )
     org_line = format_rating_line(await review_summary_for_organizer(db, e.organizer_id), prefix="سابقه برگزارکننده")
     ev_line = format_rating_line(await review_summary_for_event(db, e.id), prefix="امتیاز این کاستوم")
@@ -238,7 +240,7 @@ async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> st
         "🎮 <b>کاستوم جایزه‌دار</b>\n"
         "━━━━━━━━━━━━━━\n"
         f"<b>{esc(e.title)}</b>\n\n"
-        f"🎁 <b>جایزه</b>\n{esc(prize)}\n"
+        f"💎 <b>جایزه</b>\n{esc(prize)}\n"
         "━━━━━━━━━━━━━━\n"
         f"🕐 {format_local(e.starts_at, e.timezone)}\n"
         f"⏳ {left_line}\n"
@@ -275,7 +277,7 @@ async def upcoming(event: Message | CallbackQuery, db: AsyncSession, db_user: Us
     await msg.answer(
         "🔥 <b>کاستوم‌های جایزه‌دار پیش‌رو</b>\n"
         "روی مورد بزنید تا بنر، جایزه، ساعت و کانال‌های جوین اجباری را ببینید.\n"
-        "بعد عضو شوید و «عضو شدم» را بزنید تا سر ساعت آیدی و رمز برایتان بیاید.\n"
+        "بعد عضو شوید و دکمه سبز «عضو شدم» را بزنید تا سر ساعت ROOM ID و PASS برایتان بیاید.\n"
         f"کاستوم‌های {hours} ساعت گذشته هم از دکمه پایین در دسترس است.",
         reply_markup=kb,
     )
@@ -379,7 +381,7 @@ async def _show_event(message: Message, db: AsyncSession, user: User, token: str
     summary = await review_summary_for_event(db, e.id)
     text = await _event_card(db, e, missed=missed)
     text += "\n━━━━━━━━━━━━━━\n✅ <b>شرایط شرکت</b>\n"
-    text += "باید در کانال‌های زیر عضو بمانید تا سر ساعت آیدی و رمز برایتان بیاید:\n"
+    text += "باید در کانال‌های زیر عضو بمانید تا سر ساعت ROOM ID و PASS برایتان بیاید:\n"
     if channel_items:
         for item in channel_items:
             mark = "✅" if item.status == "done" else "❌"
@@ -387,11 +389,11 @@ async def _show_event(message: Message, db: AsyncSession, user: User, token: str
     else:
         text += "کانال جوین اجباری ثبت نشده است.\n"
     if missed:
-        text += "\nرمز ارسال نشد. گزارش بدهید و اگر ثبت‌نام کرده بودید نظر/امتیاز بگذارید."
+        text += "\nROOM ID / PASS ارسال نشد. گزارش بدهید و اگر ثبت‌نام کرده بودید نظر/امتیاز بگذارید."
     elif not started:
         text += "\nبعد از جوین، دکمه سبز «عضو شدم» را بزنید."
     else:
-        text += "\nاگر رمز نیامد یا جایزه نداد: «گزارش به مالک ربات»."
+        text += "\nاگر ROOM ID / PASS نیامد یا جایزه نداد: «گزارش به مالک ربات»."
     kb = event_detail_kb(
         token,
         join_urls=_join_urls(channel_items),
@@ -426,83 +428,102 @@ async def _show_event(message: Message, db: AsyncSession, user: User, token: str
     await message.answer(text, reply_markup=kb)
 
 
-@router.callback_query(F.data.startswith("join:"))
-async def join_event(cb: CallbackQuery, db: AsyncSession, db_user: User):
-    await hit_rate_limit(f"rl:reg:{db_user.telegram_id}", get_settings().rate_limit_register_per_minute)
-    if not await _ensure_onboarding(cb.message, db_user, db):
-        await cb.answer()
-        return
-    token = cb.data.split(":", 1)[1]
-    e = await _event_by_token(db, token)
-    if not e:
-        await cb.answer("یافت نشد", show_alert=True)
-        return
-    source = "deep_link" if (db_user.start_payload or "") == f"event_{token}" else "bot"
-    try:
-        result = await register_user(db, user=db_user, event=e, bot=cb.bot, source=source, accept_rules=True)
-    except AppError as exc:
-        if exc.code == "already_registered":
-            await cb.message.answer(
-                "قبلاً ثبت‌نام شده‌اید. سر ساعت اگر هنوز در کانال‌های این کاستوم عضو باشید، رمز برایتان می‌آید."
-            )
-        else:
-            await cb.message.answer(exc.message)
-        await cb.answer()
-        return
+async def _send_join_result(cb: CallbackQuery, event: Event, token: str, result) -> None:
     if result.registration.status == RegistrationStatus.CONFIRMED:
-        await cb.message.answer(
-            f"ثبت‌نام شد. سر ساعت {format_local(e.credentials_send_at, e.timezone)} "
-            "برگزارکننده آیدی و رمز را در ربات می‌فرستد و اگر هنوز عضو کانال‌ها باشید برایتان می‌آید."
+        await reply_callback(
+            cb,
+            f"✅ ثبت‌نام شد. سر ساعت {format_local(event.credentials_send_at, event.timezone)} "
+            "برگزارکننده ROOM ID و PASS را در ربات می‌فرستد و اگر هنوز عضو کانال‌ها باشید برایتان می‌آید.",
         )
-    elif result.waitlisted:
-        await cb.message.answer("ظرفیت پر است. شما در لیست انتظار قرار گرفتید.")
-    else:
-        text = "هنوز در این کانال‌ها عضو نیستید:\n"
-        for item in result.checklist or []:
-            if item.requirement_type not in {
-                RequirementType.CHANNEL_MEMBERSHIP,
-                RequirementType.GLOBAL_CHANNEL_MEMBERSHIP,
-            }:
-                continue
-            mark = "✅" if item.status == "done" else "❌"
-            text += f"{mark} {item.label}\n"
-        await cb.message.answer(text, reply_markup=checklist_kb(token, join_urls=_join_urls(result.checklist)))
-    await cb.answer()
-
-
-@router.callback_query(F.data.startswith("req:"))
-async def recheck_req(cb: CallbackQuery, db: AsyncSession, db_user: User):
-    await hit_rate_limit(f"rl:mem:{db_user.telegram_id}", get_settings().rate_limit_membership_per_minute)
-    token = cb.data.split(":", 1)[1]
-    e = await _event_by_token(db, token)
-    if not e:
-        await cb.answer("یافت نشد", show_alert=True)
         return
-    reg = await db.scalar(
-        select(Registration).where(Registration.event_id == e.id, Registration.user_id == db_user.id)
-    )
-    checklist = await evaluate_requirements(db, user=db_user, event=e, bot=cb.bot, registration=reg)
-    text = "وضعیت عضویت:\n"
-    for item in checklist.items:
+    if result.waitlisted:
+        await reply_callback(cb, "ظرفیت پر است. شما در لیست انتظار قرار گرفتید.")
+        return
+    text = "هنوز در این کانال‌ها عضو نیستید:\n"
+    for item in result.checklist or []:
         if item.requirement_type not in {
             RequirementType.CHANNEL_MEMBERSHIP,
             RequirementType.GLOBAL_CHANNEL_MEMBERSHIP,
         }:
             continue
         mark = "✅" if item.status == "done" else "❌"
-        text += f"{mark} {item.label}\n"
-    await cb.message.answer(text, reply_markup=checklist_kb(token, join_urls=_join_urls(checklist.items)))
-    if checklist.all_ok:
-        try:
-            result = await register_user(db, user=db_user, event=e, bot=cb.bot, source="recheck", accept_rules=True)
-            if result.registration.status == RegistrationStatus.CONFIRMED:
-                await cb.message.answer("ثبت‌نام قطعی شد. سر ساعت اگر هنوز عضو کانال‌ها باشید رمز برایتان می‌آید.")
-            elif result.waitlisted:
-                await cb.message.answer("ظرفیت پر است. شما در لیست انتظار قرار گرفتید.")
-        except AppError as exc:
-            if exc.code != "already_registered":
-                await cb.message.answer(exc.message)
-    await cb.answer()
+        text += f"{mark} {esc(item.label)}\n"
+    await reply_callback(cb, text, reply_markup=checklist_kb(token, join_urls=_join_urls(result.checklist)))
+
+
+@router.callback_query(F.data.startswith("join:"))
+async def join_event(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    await ack_callback(cb)
+    try:
+        await hit_rate_limit(f"rl:reg:{db_user.telegram_id}", get_settings().rate_limit_register_per_minute)
+        msg = cb.message
+        if msg is not None and hasattr(msg, "answer"):
+            if not await _ensure_onboarding(msg, db_user, db):
+                return
+        elif not db_user.tos_accepted_at:
+            await reply_callback(cb, T.TOS)
+            return
+        token = cb.data.split(":", 1)[1]
+        e = await _event_by_token(db, token)
+        if not e:
+            await reply_callback(cb, "این کاستوم یافت نشد.")
+            return
+        source = "deep_link" if (db_user.start_payload or "") == f"event_{token}" else "bot"
+        result = await register_user(db, user=db_user, event=e, bot=cb.bot, source=source, accept_rules=True)
+    except AppError as exc:
+        if exc.code == "already_registered":
+            await reply_callback(
+                cb,
+                "قبلاً ثبت‌نام شده‌اید. سر ساعت اگر هنوز در کانال‌های این کاستوم عضو باشید، ROOM ID و PASS برایتان می‌آید.",
+            )
+        else:
+            await reply_callback(cb, exc.message)
+        return
+    except Exception:
+        log.exception("join_event_failed")
+        await db.rollback()
+        await reply_callback(cb, "ثبت‌نام الان انجام نشد. چند ثانیه بعد دوباره «عضو شدم» را بزنید.")
+        return
+    await _send_join_result(cb, e, token, result)
+
+
+@router.callback_query(F.data.startswith("req:"))
+async def recheck_req(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    await ack_callback(cb)
+    try:
+        await hit_rate_limit(f"rl:mem:{db_user.telegram_id}", get_settings().rate_limit_membership_per_minute)
+        token = cb.data.split(":", 1)[1]
+        e = await _event_by_token(db, token)
+        if not e:
+            await reply_callback(cb, "این کاستوم یافت نشد.")
+            return
+        reg = await db.scalar(
+            select(Registration).where(Registration.event_id == e.id, Registration.user_id == db_user.id)
+        )
+        checklist = await evaluate_requirements(db, user=db_user, event=e, bot=cb.bot, registration=reg)
+        text = "وضعیت عضویت:\n"
+        for item in checklist.items:
+            if item.requirement_type not in {
+                RequirementType.CHANNEL_MEMBERSHIP,
+                RequirementType.GLOBAL_CHANNEL_MEMBERSHIP,
+            }:
+                continue
+            mark = "✅" if item.status == "done" else "❌"
+            text += f"{mark} {esc(item.label)}\n"
+        await reply_callback(cb, text, reply_markup=checklist_kb(token, join_urls=_join_urls(checklist.items)))
+        if not checklist.all_ok:
+            return
+        result = await register_user(db, user=db_user, event=e, bot=cb.bot, source="recheck", accept_rules=True)
+    except AppError as exc:
+        if exc.code != "already_registered":
+            await reply_callback(cb, exc.message)
+        return
+    except Exception:
+        log.exception("recheck_req_failed")
+        await db.rollback()
+        await reply_callback(cb, "بررسی عضویت الان انجام نشد. چند ثانیه بعد دوباره تلاش کنید.")
+        return
+    await _send_join_result(cb, e, token, result)
 
 
 @router.callback_query(F.data.startswith("rules:"))
@@ -534,8 +555,8 @@ async def invite(cb: CallbackQuery, db: AsyncSession, db_user: User):
     bot_user = get_settings().bot_username
     url = f"https://t.me/{bot_user}?start=ref_{link.token}"
     await cb.message.answer(
-        f"لینک دعوت اختصاصی شما:\n<code>{esc(url)}</code>\n\n"
-        f"دعوت‌های معتبر: {link.valid_count}\n"
+        f"🔗 <b>لینک دعوت اختصاصی</b>\n<code>{esc(url)}</code>\n\n"
+        f"✅ دعوت‌های معتبر: {link.valid_count}\n"
         "دعوت وقتی معتبر است که فرد جدید ربات را استارت کند و عضویت اجباری را کامل کند.",
         parse_mode="HTML",
         reply_markup=share_link_kb(url, open_label="ورود با لینک دعوت", copy_label="کپی لینک دعوت"),
@@ -554,8 +575,8 @@ async def invite_global(event: Message | CallbackQuery, db: AsyncSession, db_use
     link = await get_or_create_link(db, db_user.id, None, campaign="global")
     url = f"https://t.me/{get_settings().bot_username}?start=ref_{link.token}"
     await msg.answer(
-        "لینک دعوتت را بفرست تا ورود دوستانت به نام تو ثبت شود.\n"
-        f"دعوت‌های معتبر: {link.valid_count}",
+        "🔗 لینک دعوتت را بفرست تا ورود دوستانت به نام تو ثبت شود.\n"
+        f"✅ دعوت‌های معتبر: {link.valid_count}",
         reply_markup=share_link_kb(url, open_label="ورود با لینک دعوت", copy_label="کپی لینک دعوت"),
     )
     if isinstance(event, CallbackQuery):
@@ -575,12 +596,12 @@ async def my_regs(message: Message, db: AsyncSession, db_user: User):
     ).all()
     if not rows:
         await message.answer(
-            "هنوز در کاستومی ثبت‌نام نکردی.\nاز «کاستوم‌های جایزه‌دار» یا لینک بنر وارد شو.",
+            "هنوز در کاستومی ثبت‌نام نکردی.\nاز «کاستوم‌های جایزه‌دار» یا لینک بنر وارد شو تا سر ساعت ROOM ID و PASS بگیری.",
             reply_markup=event_list_kb([], mode="mine"),
         )
         return
     items = []
-    text = "<b>ثبت‌نام‌های تو</b>\nبرای گزارش یا جزئیات، کاستوم را باز کن:\n"
+    text = "🎯 <b>ثبت‌نام‌های تو</b>\nبرای گزارش یا جزئیات، کاستوم را باز کن:\n"
     for r in rows:
         if not r.event:
             continue
@@ -654,7 +675,7 @@ async def help_section(cb: CallbackQuery):
 async def support(message: Message, state: FSMContext):
     await state.set_state(SupportSG.message)
     await message.answer(
-        "پیام خود را بنویسید. مستقیم به مالک ربات می‌رسد.",
+        "✉️ پیام خود را بنویسید. مستقیم به مالک ربات می‌رسد.",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[[ibtn("انصراف", callback_data="menu:home", style=DANGER)]]
         ),
@@ -686,13 +707,14 @@ async def profile(message: Message, db: AsyncSession, db_user: User):
     regs = await db.scalar(select(func.count()).select_from(Registration).where(Registration.user_id == db_user.id)) or 0
     link = await get_or_create_link(db, db_user.id, None, campaign="global")
     await message.answer(
-        f"<b>پروفایل تو</b>\n"
+        f"👤 <b>پروفایل تو</b>\n"
+        f"━━━━━━━━━━━━━━\n"
         f"شناسه تلگرام: <code>{db_user.telegram_id}</code>\n"
         f"نام: {esc(db_user.first_name)}\n"
-        f"Free Fire ID: {esc(ff)}\n"
-        f"منطقه زمانی: {esc(db_user.timezone)}\n"
-        f"کاستوم‌های ثبت‌شده: {regs}\n"
-        f"دعوت‌های معتبر: {link.valid_count}\n\n"
+        f"🎮 Free Fire ID: {esc(ff)}\n"
+        f"🕐 منطقه زمانی: {esc(db_user.timezone)}\n"
+        f"🎯 کاستوم‌های ثبت‌شده: {regs}\n"
+        f"🔗 دعوت‌های معتبر: {link.valid_count}\n\n"
         "برای تنظیم شناسه بازیکن بنویسید:\n<code>/setid شناسه</code>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(
@@ -748,7 +770,7 @@ async def notifs(event: Message | CallbackQuery, db: AsyncSession, db_user: User
 @router.callback_query(F.data.startswith("reveal:"))
 async def reveal(cb: CallbackQuery):
     await cb.answer(
-        "اطلاعات اتاق فقط در پیام خصوصی ارسال می‌شود. اگر پیام را دریافت نکرده‌اید واجد شرایط نبوده‌اید یا هنوز زمان ارسال نرسیده است.",
+        "ROOM ID و PASS فقط در پیام خصوصی ارسال می‌شود. اگر پیام را نگرفته‌اید واجد شرایط نبوده‌اید یا هنوز زمان ارسال نرسیده است.",
         show_alert=True,
     )
 
@@ -1047,7 +1069,7 @@ async def _finish_review(message, state: FSMContext, db: AsyncSession, db_user: 
 async def menu_home(cb: CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
     await state.clear()
     await cb.message.answer(
-        "منوی اصلی آماده است.\nکاستوم جایزه‌دار ببین، ثبت کن، یا از راهنما جزئیات را بخوان.",
+        "منوی اصلی آماده است.\n🎮 کاستوم جایزه‌دار ببین، ثبت کن، یا از راهنما جزئیات را بخوان.",
         reply_markup=await menu_for(db, db_user),
     )
     await cb.answer()

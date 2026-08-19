@@ -241,9 +241,9 @@ def report_reasons_kb(token: str, *, cheater_only: bool = False) -> InlineKeyboa
     if not cheater_only:
         rows.extend(
             [
-                [ibtn("آیدی و رمز را نفرستاد", callback_data=f"repr:{token}:no_credentials", style=DANGER)],
+                [ibtn("ROOM ID / PASS را نفرستاد", callback_data=f"repr:{token}:no_credentials", style=DANGER)],
                 [ibtn("بعد از کاستوم جایزه نداد", callback_data=f"repr:{token}:unpaid_prize", style=DANGER)],
-                [ibtn("رمز یا اتاق اشتباه بود", callback_data=f"repr:{token}:wrong_room", style=DANGER)],
+                [ibtn("ROOM ID یا PASS اشتباه بود", callback_data=f"repr:{token}:wrong_room", style=DANGER)],
                 [ibtn("جایزه دروغ / کاستوم جعلی", callback_data=f"repr:{token}:fake_prize", style=DANGER)],
             ]
         )
@@ -347,7 +347,7 @@ def organizer_home_kb() -> InlineKeyboardMarkup:
 
 def send_creds_kb(token: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[ibtn("۱) ارسال آیدی اتاق", callback_data=f"orgp:creds:{token}", style=SUCCESS)]]
+        inline_keyboard=[[ibtn("ارسال ROOM ID", callback_data=f"orgp:creds:{token}", style=SUCCESS)]]
     )
 
 

@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.bot.helpers import esc
 from app.bot.keyboards.common import membership_kb, tos_kb
 from app.locales import fa as T
 from app.models.channel import Channel
@@ -45,7 +46,7 @@ async def ensure_onboarding(message: Message, user: User, db: AsyncSession) -> b
         blocked = False
         for ch, result in missing:
             title = ch.title or "کانال"
-            names.append(title)
+            names.append(esc(title))
             if result.error == "bot_not_admin":
                 blocked = True
             url = f"https://t.me/{ch.username.lstrip('@')}" if ch.username else ch.invite_link
@@ -56,7 +57,7 @@ async def ensure_onboarding(message: Message, user: User, db: AsyncSession) -> b
             extra = "\nاگر لینک کانال نیست، از مالک ربات بخواهید ربات را ادمین کند و لینک دعوت بگذارد."
         listed = "\n".join(f"• {name}" for name in names)
         await message.answer(
-            "برای استارت و استفاده از ربات باید در کانال‌های مالک ربات عضو شوید، سپس «بررسی مجدد عضویت» را بزنید."
+            "برای استارت و استفاده از ربات باید در کانال‌های مالک ربات عضو شوید، سپس دکمه سبز «بررسی مجدد عضویت» را بزنید."
             f"\n{listed}{extra}",
             reply_markup=membership_kb(buttons),
         )

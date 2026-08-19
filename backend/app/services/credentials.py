@@ -136,22 +136,26 @@ def _upsert_delivery(db: Session, *, user, event, job, idem, status, error=None,
 def _render_credentials_message(event: Event, user: User, room_id: str, password: str, version: int) -> str:
     import html
 
+    from app.locales.style import GAME, GIFT, SEP, SHIELD, USER, room_pair
+
     def esc(value: str) -> str:
         return html.escape(str(value or ""), quote=False)
 
     name = user.first_name or user.username or str(user.telegram_id)
-    header = event.custom_credentials_message or "مشخصات اتاق کاستوم شما:"
-    personal = f"\nشرکت‌کننده: {esc(name)} | کد ثبت‌نام: {str(user.id)[:8]}" if event.personalize_delivery else ""
+    prize = esc((event.prize_summary or "").strip() or "—")
+    header = event.custom_credentials_message or "اتاق کاستوم آماده است"
+    personal = f"\n{USER} {esc(name)} | کد ثبت‌نام: {str(user.id)[:8]}" if event.personalize_delivery else ""
     ver = f"\nنسخه اطلاعات: {version}" if version > 1 else ""
     return (
-        f"{esc(header)}\n\n"
-        f"کاستوم: {esc(event.title)}\n"
-        f"جایزه: {esc((event.prize_summary or '').strip() or '—')}\n\n"
-        f"<b>آیدی اتاق</b>\n<code>{esc(room_id)}</code>\n\n"
-        f"<b>رمز اتاق</b>\n<code>{esc(password)}</code>"
-        f"{personal}{ver}\n\n"
-        "این پیام فقط برای شماست. اسکرین‌شات و بازنشر را کاملاً نمی‌توانیم مسدود کنیم؛"
-        " لطفاً اطلاعات را در اختیار دیگران نگذارید."
+        f"{GAME} <b>{esc(header)}</b>\n"
+        f"{SEP}\n"
+        f"{esc(event.title)}\n"
+        f"{GIFT} <b>جایزه</b>\n{prize}\n"
+        f"{SEP}\n"
+        f"{room_pair(esc(room_id), esc(password))}"
+        f"{personal}{ver}\n"
+        f"{SEP}\n"
+        f"{SHIELD} این پیام فقط برای شماست. ROOM ID و PASS را برای دیگران نفرستید."
     )
 
 

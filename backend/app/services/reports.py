@@ -17,9 +17,9 @@ from app.models.report import Report
 from app.models.user import User
 
 REPORT_LABELS = {
-    ReportReason.NO_CREDENTIALS: "آیدی و رمز را سر ساعت نفرستاد",
+    ReportReason.NO_CREDENTIALS: "ROOM ID / PASS را سر ساعت نفرستاد",
     ReportReason.UNPAID_PRIZE: "بعد از کاستوم جایزه را نداد",
-    ReportReason.WRONG_ROOM: "رمز یا اتاق اشتباه بود",
+    ReportReason.WRONG_ROOM: "ROOM ID یا PASS اشتباه بود",
     ReportReason.FAKE_PRIZE: "جایزه دروغ / کاستوم جعلی",
     ReportReason.FAKE_ORGANIZER: "برگزارکننده جعلی",
     ReportReason.SUDDEN_RULE_CHANGE: "قوانین را ناگهان عوض کرد",
@@ -183,13 +183,13 @@ async def create_player_report(
 
     if reason_enum == ReportReason.NO_CREDENTIALS:
         if credentials_window_open(event, now):
-            return None, "هنوز مهلت ۵ دقیقه‌ای برگزارکننده برای ارسال آیدی و رمز تمام نشده است."
+            return None, "هنوز مهلت ۵ دقیقه‌ای برگزارکننده برای ارسال ROOM ID و PASS تمام نشده است."
         if not await event_missed_credentials(db, event):
-            return None, "آیدی و رمز در ربات ثبت شده. اگر جایزه نگرفتید یا رمز اشتباه بود، همان گزینه را بزنید."
+            return None, "ROOM ID و PASS در ربات ثبت شده. اگر جایزه نگرفتید یا PASS اشتباه بود، همان گزینه را بزنید."
     if reason_enum == ReportReason.UNPAID_PRIZE and now < event.starts_at:
         return None, "کاستوم هنوز شروع نشده؛ بعد از پایان می‌توانید این مورد را گزارش کنید."
     if reason_enum == ReportReason.WRONG_ROOM and credentials_window_open(event, now):
-        return None, "هنوز زمان ارسال رمز نرسیده یا مهلت تمام نشده است."
+        return None, "هنوز زمان ارسال ROOM ID / PASS نرسیده یا مهلت تمام نشده است."
 
     text = (body or "").strip() or report_label(reason_enum)
     report = Report(

@@ -155,9 +155,9 @@ def render_event_poster(
             handle = ""
     footer = "این بنر را در کانال بگذارید · جوین از لینک ربات"
     if handle:
-        footer = f"t.me/{handle}  ·  جوین کن  ·  سر ساعت آیدی و رمز داخل ربات"
+        footer = f"t.me/{handle}  ·  جوین کن  ·  سر ساعت ROOM ID و PASS داخل ربات"
     _center(draw, 1185, footer, _reg(26), GOLD, max_w=W - 120)
-    _center(draw, 1240, "رمز در گروه نیست — فقط پیام خصوصی ربات", _reg(24), MUTED, max_w=W - 120)
+    _center(draw, 1240, "ROOM ID و PASS در گروه نیست — فقط پیام خصوصی ربات", _reg(24), MUTED, max_w=W - 120)
 
     buf = BytesIO()
     img.save(buf, format="PNG", optimize=True)

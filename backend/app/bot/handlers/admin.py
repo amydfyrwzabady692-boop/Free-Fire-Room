@@ -87,8 +87,8 @@ async def _ok(db: AsyncSession, user: User | None) -> bool:
 
 async def _show_home(message: Message) -> None:
     await message.answer(
-        "پنل مالک ربات — فقط برای صاحب همین ربات.\n"
-        "گزارش تخلف، بن، کانال اجباری ورود، تنظیمات. "
+        "👑 پنل مالک ربات — فقط برای صاحب همین ربات.\n"
+        "گزارش تخلف، بن، کانال اجباری ورود، تنظیمات.\n"
         "پنل برگزارکننده جداست و برای کاربرانی است که کاستوم جایزه‌دار می‌گذارند.",
         reply_markup=_admin_kb(),
     )

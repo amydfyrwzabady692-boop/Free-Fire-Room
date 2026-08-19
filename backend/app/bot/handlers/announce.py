@@ -280,7 +280,7 @@ async def ann_finish(event: Message | CallbackQuery, state: FSMContext, db: Asyn
     await state.clear()
     await msg.answer(
         "اطلاع‌رسانی ثبت شد و در بخش اطلاع‌رسانی دیده می‌شود.\n"
-        "اگر خودتان کانال دارید و می‌خواهید ربات سر ساعت رمز را بفرستد، از «ثبت کاستوم جایزه‌دار» استفاده کنید.",
+        "اگر خودتان کانال دارید و می‌خواهید ربات سر ساعت ROOM ID و PASS را بفرستد، از «ثبت کاستوم جایزه‌دار» استفاده کنید.",
         reply_markup=await menu_for(db, db_user),
     )
     await msg.answer(_card(row), reply_markup=_ann_kb(row, owner=True))

@@ -196,8 +196,8 @@ async def _send_reminders(db, job: ScheduledJob) -> None:
         return
     regs = db.scalars(select(Registration).where(Registration.event_id == event.id, Registration.status == "confirmed")).all()
     text = (
-        f"یادآوری: کاستوم «{html.escape(event.title)}» به‌زودی شروع می‌شود.\n"
-        "اگر کانال‌های جوین اجباری را عضو شده باشید، سر ساعت آیدی و رمز برایتان می‌آید."
+        f"🔔 یادآوری: کاستوم «{html.escape(event.title)}» به‌زودی شروع می‌شود.\n"
+        "اگر کانال‌های جوین اجباری را عضو شده باشید، سر ساعت ROOM ID و PASS برایتان می‌آید."
     )
     for reg in regs:
         user = db.get(User, reg.user_id)
@@ -225,11 +225,11 @@ async def _prompt_organizer_for_creds(bot, db, event: Event) -> None:
     try:
         await bot.send_message(
             user.telegram_id,
-            f"ساعت کاستوم «{html.escape(event.title)}» رسید ({format_local(event.starts_at, event.timezone)}).\n\n"
-            "اول <b>فقط آیدی اتاق</b> را بفرستید.\n"
-            "بعد ربات از شما رمز را جدا می‌پرسد.\n\n"
-            f"فقط {grace} دقیقه فرصت دارید. اگر نفرستید اخطار می‌گیرید و بازیکن‌ها می‌توانند گزارش بدهند.\n"
-            "دکمه سبز را بزنید و اول آیدی را بفرستید.\n"
+            f"🎮 ساعت کاستوم «{html.escape(event.title)}» رسید ({format_local(event.starts_at, event.timezone)}).\n\n"
+            "اول فقط <b>ROOM ID</b> را بفرستید.\n"
+            "بعد ربات از شما <b>PASS</b> را جدا می‌پرسد.\n\n"
+            f"⏳ فقط {grace} دقیقه فرصت دارید. اگر نفرستید اخطار می‌گیرید و بازیکن‌ها می‌توانند گزارش بدهند.\n"
+            "دکمه سبز را بزنید و اول ROOM ID را بفرستید.\n"
             "بعد فقط برای کسانی که کانال‌های این کاستوم را جوین کرده‌اند ارسال می‌شود.",
             reply_markup=send_creds_kb(event.public_token),
         )
@@ -256,8 +256,8 @@ async def _expire_missing_credentials(bot, db, event: Event, job: ScheduledJob) 
         try:
             await bot.send_message(
                 org_user.telegram_id,
-                f"اخطار: مهلت {grace} دقیقه‌ای ارسال آیدی و رمز کاستوم «{html.escape(event.title)}» تمام شد.\n"
-                "رمز برای بازیکن‌ها ارسال نشد و ممکن است گزارش تخلف دریافت کنید.",
+                f"⚠️ اخطار: مهلت {grace} دقیقه‌ای ارسال ROOM ID و PASS کاستوم «{html.escape(event.title)}» تمام شد.\n"
+                "مشخصات برای بازیکن‌ها ارسال نشد و ممکن است گزارش تخلف دریافت کنید.",
             )
         except Exception:
             log.exception("organizer_missed_creds_warn_failed", event_id=str(event.id))
@@ -266,7 +266,7 @@ async def _expire_missing_credentials(bot, db, event: Event, job: ScheduledJob) 
         select(Registration).where(Registration.event_id == event.id, Registration.status == "confirmed")
     ).all()
     player_text = (
-        f"برگزارکننده کاستوم «{html.escape(event.title)}» در مهلت {grace} دقیقه‌ای آیدی و رمز را نفرستاد.\n"
+        f"برگزارکننده کاستوم «{html.escape(event.title)}» در مهلت {grace} دقیقه‌ای ROOM ID و PASS را نفرستاد.\n"
         "اگر ثبت‌نام کرده بودید، از دکمه زیر به مالک ربات گزارش بدهید."
     )
     for reg in regs:
@@ -284,7 +284,7 @@ async def _expire_missing_credentials(bot, db, event: Event, job: ScheduledJob) 
         await asyncio.sleep(0.04)
 
     admin_text = (
-        f"مهلت ارسال رمز تمام شد ({grace} دقیقه).\n\n"
+        f"مهلت ارسال ROOM ID / PASS تمام شد ({grace} دقیقه).\n\n"
         f"کاستوم: {html.escape(event.title)}\n"
         f"برگزارکننده: {format_person(org_user)}\n"
         f"ثبت‌نام قطعی: {event.confirmed_count}"

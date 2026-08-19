@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
 from aiogram.enums import ChatMemberStatus
 
 ADMIN_STATUSES = {
@@ -47,6 +47,10 @@ async def get_membership(bot: Bot, chat_id: int, user_id: int) -> MembershipResu
     except TelegramForbiddenError:
         return MembershipResult(False, None, "bot_not_admin")
     except TelegramBadRequest as exc:
+        return MembershipResult(False, None, str(exc))
+    except TelegramAPIError as exc:
+        return MembershipResult(False, None, str(exc))
+    except Exception as exc:  # noqa: BLE001
         return MembershipResult(False, None, str(exc))
 
 
