@@ -470,6 +470,14 @@ async def _send_daily_custom_digest(db) -> None:
 
     text = format_daily_digest(events)
     markup = event_list_kb(digest_button_items(events), mode="digest")
+    png = None
+    try:
+        from app.services.posters import as_input_file, digest_poster_bytes
+
+        png = digest_poster_bytes(events)
+    except Exception:
+        log.exception("daily_digest_poster_failed")
+        png = None
     users = db.scalars(
         select(User).where(
             User.deleted_at.is_(None),
@@ -485,7 +493,16 @@ async def _send_daily_custom_digest(db) -> None:
             skipped += 1
             continue
         try:
-            await bot.send_message(user.telegram_id, text, reply_markup=markup)
+            if png is not None:
+                caption = text if len(text) <= 1024 else text[:1000] + "…"
+                await bot.send_photo(
+                    user.telegram_id,
+                    as_input_file(png, "digest-banner.png"),
+                    caption=caption,
+                    reply_markup=markup,
+                )
+            else:
+                await bot.send_message(user.telegram_id, text, reply_markup=markup)
             sent += 1
         except TelegramRetryAfter as exc:
             await asyncio.sleep(exc.retry_after + 0.5)

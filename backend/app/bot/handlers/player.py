@@ -266,9 +266,10 @@ async def upcoming(event: Message | CallbackQuery, db: AsyncSession, db_user: Us
         return
     kb = event_list_kb([(e.public_token, _list_title(e)) for e in rows], mode="upcoming")
     await msg.answer(
-        "کاستوم‌های جایزه‌دار پیش‌رو:\n"
-        "وارد مورد شوید، کانال‌ها را جوین کنید و «عضو شدم» را بزنید.\n"
-        f"کاستوم‌های {hours} ساعت گذشته را هم از دکمه پایین ببینید (نظرات و امتیاز برگزارکننده).",
+        "🔥 <b>کاستوم‌های جایزه‌دار پیش‌رو</b>\n"
+        "روی مورد بزنید تا بنر، جایزه، ساعت و کانال‌های جوین اجباری را ببینید.\n"
+        "بعد عضو شوید و «عضو شدم» را بزنید تا سر ساعت آیدی و رمز برایتان بیاید.\n"
+        f"کاستوم‌های {hours} ساعت گذشته هم از دکمه پایین در دسترس است.",
         reply_markup=kb,
     )
     if isinstance(event, CallbackQuery):
@@ -331,7 +332,12 @@ async def _event_by_token(db: AsyncSession, token: str | None) -> Event | None:
     return await db.scalar(
         select(Event)
         .where(Event.public_token == token, Event.deleted_at.is_(None))
-        .options(selectinload(Event.organizer), selectinload(Event.channel), selectinload(Event.prizes))
+        .options(
+            selectinload(Event.organizer),
+            selectinload(Event.channel),
+            selectinload(Event.prizes),
+            selectinload(Event.required_channels),
+        )
     )
 
 
@@ -374,10 +380,20 @@ async def _show_event(message: Message, db: AsyncSession, user: User, token: str
         can_review=allowed,
         show_reviews=summary["count"] > 0 or started,
     )
-    if e.banner_file_id:
+    photo = e.banner_file_id
+    generated = None
+    if not photo:
+        try:
+            from app.services.posters import as_input_file, event_poster_bytes
+
+            n_ch = len([c for c in (e.required_channels or []) if getattr(c, "is_active", True)])
+            generated = as_input_file(event_poster_bytes(e, channels=n_ch))
+        except Exception:
+            generated = None
+    if photo or generated:
         try:
             if len(text) <= 1024:
-                await message.answer_photo(e.banner_file_id, caption=text, reply_markup=kb)
+                await message.answer_photo(photo or generated, caption=text, reply_markup=kb)
                 return
             prize = (e.prize_summary or "").strip() or "—"
             short = (
@@ -385,7 +401,7 @@ async def _show_event(message: Message, db: AsyncSession, user: User, token: str
                 f"🎁 {esc(prize)}\n"
                 f"🕐 {format_local(e.starts_at, e.timezone)}"
             )
-            await message.answer_photo(e.banner_file_id, caption=short[:1024])
+            await message.answer_photo(photo or generated, caption=short[:1024])
         except Exception:
             pass
     await message.answer(text, reply_markup=kb)

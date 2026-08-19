@@ -20,6 +20,7 @@ from app.bot.keyboards.common import (
     PRIMARY,
     SUCCESS,
     add_required_channel_kb,
+    event_share_kb,
     ibtn,
     organizer_home_kb,
     pick_date_kb,
@@ -541,23 +542,39 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
         event = await create_event(db, org, payload, db_user.id)
         await submit_for_publish(db, event, db_user.id)
         link = event_deep_link(event.public_token)
+        n_ch = len(payload["required_channel_ids"])
+        caption = (
+            f"🎁 <b>{esc(prize)}</b>\n"
+            f"🕐 {format_local(event.starts_at, event.timezone)}\n"
+            f"📢 کانال جوین اجباری: {n_ch} مورد\n\n"
+            f"<b>لینک این کاستوم:</b>\n{link}\n\n"
+            "همین بنر را در کانال بگذارید. با باز کردن لینک، جایزه و شرایط دیده می‌شود.\n"
+            "سر ساعت اول آیدی اتاق را می‌فرستید، بعد رمز را جدا."
+        )
+        try:
+            from app.services.posters import as_input_file, render_event_poster
+
+            png = render_event_poster(
+                prize=prize,
+                when=format_local(event.starts_at, event.timezone),
+                host=db_user.first_name or "برگزارکننده",
+                channels=n_ch,
+            )
+            await message.answer_photo(
+                as_input_file(png),
+                caption=caption[:1024],
+                reply_markup=event_share_kb(link),
+            )
+        except Exception:
+            await message.answer(caption, reply_markup=event_share_kb(link))
         if event.status == EventStatus.PUBLISHED:
             await message.answer(
-                "کاستوم در فهرست همه کاربران قرار گرفت.\n\n"
-                f"ساعت کاستوم (شمسی): {format_local(event.starts_at, event.timezone)}\n"
-                f"جایزه: {esc(prize)}\n"
-                f"کانال جوین اجباری: {len(payload['required_channel_ids'])} مورد\n\n"
-                f"<b>لینک این کاستوم:</b>\n{link}\n\n"
-                "وقتی کسی این لینک را باز کند، جایزه و جزئیات کاستوم را می‌بیند.\n"
-                "سر همین ساعت ربات از شما آیدی و رمز را می‌گیرد. "
-                "بعد فقط برای کسانی که کانال‌ها را جوین کرده‌اند ارسال می‌شود.",
+                "کاستوم در فهرست همه قرار گرفت. بنر بالا را در کانال فوروارد کنید.",
                 reply_markup=await menu_for(db, db_user),
             )
         else:
             await message.answer(
-                "کاستوم ثبت شد و منتظر تأیید مدیر است.\n"
-                f"جایزه: {esc(prize)}\n"
-                f"پس از تأیید در فهرست می‌آید:\n{link}",
+                "کاستوم ثبت شد و منتظر تأیید مدیر است. بعد از تأیید همین بنر را در کانال بگذارید.",
                 reply_markup=await menu_for(db, db_user),
             )
     except AppError as exc:
@@ -622,17 +639,34 @@ async def org_mine(cb: CallbackQuery, db: AsyncSession, db_user: User):
 @router.callback_query(F.data.startswith("orgp:link:"))
 async def org_link(cb: CallbackQuery, db: AsyncSession, db_user: User):
     token = cb.data.split(":", 2)[-1]
-    e = await db.scalar(select(Event).where(Event.public_token == token).options(selectinload(Event.organizer)))
+    e = await db.scalar(
+        select(Event)
+        .where(Event.public_token == token)
+        .options(selectinload(Event.organizer), selectinload(Event.required_channels))
+    )
     if not e or not e.organizer or e.organizer.user_id != db_user.id:
         await cb.answer("یافت نشد", show_alert=True)
         return
     link = event_deep_link(e.public_token)
-    await cb.message.answer(
-        f"لینک اختصاصی «{esc(e.title)}»:\n{link}\n\n"
-        f"جایزه: {esc(e.prize_summary or '—')}\n\n"
-        "این لینک را در کانال بگذارید. وقتی باز شود جایزه و جزئیات کاستوم دیده می‌شود. "
-        "مشخصات اتاق فقط به کسانی می‌رسد که شرایط را تا لحظه ارسال کامل کرده باشند."
+    n_ch = len([c for c in (e.required_channels or []) if c.is_active])
+    caption = (
+        f"🎁 <b>{esc(e.prize_summary or e.title)}</b>\n"
+        f"🕐 {format_local(e.starts_at, e.timezone)}\n"
+        f"📢 کانال جوین اجباری: {n_ch} مورد\n\n"
+        f"<b>لینک اختصاصی:</b>\n{link}\n\n"
+        "همین بنر را در کانال بگذارید."
     )
+    try:
+        from app.services.posters import as_input_file, event_poster_bytes
+
+        png = event_poster_bytes(e, channels=n_ch)
+        await cb.message.answer_photo(
+            as_input_file(png),
+            caption=caption[:1024],
+            reply_markup=event_share_kb(link),
+        )
+    except Exception:
+        await cb.message.answer(caption, reply_markup=event_share_kb(link))
     await cb.answer()
 
 

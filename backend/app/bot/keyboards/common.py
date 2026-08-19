@@ -257,6 +257,12 @@ def confirm_kb(action: str) -> InlineKeyboardMarkup:
     )
 
 
+def event_share_kb(link: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[ibtn("ورود به کاستوم از لینک", url=link, style=SUCCESS)]]
+    )
+
+
 def organizer_home_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

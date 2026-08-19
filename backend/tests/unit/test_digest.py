@@ -28,6 +28,5 @@ def test_daily_digest_text_tells_users_to_join(db):
     text = format_daily_digest(upcoming_prize_customs_sync(db))
     assert "کاستوم‌های جایزه‌دار پیش‌رو" in text
     assert "عضو شدم" in text
-    assert "کاستوم الماس" in text
     assert "۱۰۰۰ الماس" in text
     assert "آیدی و رمز" in text

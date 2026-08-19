@@ -34,23 +34,23 @@ def upcoming_prize_customs_sync(db: Session, *, limit: int = DIGEST_LIMIT) -> li
 
 def format_daily_digest(events: list[Event]) -> str:
     lines = [
-        "کاستوم‌های جایزه‌دار پیش‌رو",
+        "🔥 <b>کاستوم‌های جایزه‌دار پیش‌رو</b>",
         "",
-        "اگر می‌خواهید شرکت کنید، یکی را باز کنید، کانال‌های جوین اجباری را عضو شوید و «عضو شدم» را بزنید.",
-        "سر ساعت همان کاستوم، آیدی و رمز فقط برای کسانی می‌آید که شرایط را انجام داده باشند.",
+        "یکی را باز کنید، کانال‌های جوین اجباری را عضو شوید و دکمه سبز «عضو شدم» را بزنید.",
+        "سر ساعت، آیدی و رمز فقط برای کسانی می‌آید که شرایط را انجام داده باشند.",
         "",
     ]
     for i, event in enumerate(events, start=1):
         when = format_local(event.starts_at, event.timezone)
-        org = html.escape(event.organizer.display_name) if event.organizer and event.organizer.display_name else "برگزارکننده"
-        lines.append(f"{i}) {when}")
-        lines.append(html.escape(event.title))
-        prize = (event.prize_summary or "").strip()
-        if prize and prize != event.title:
-            lines.append(f"جایزه: {html.escape(prize)}")
-        lines.append(f"برگزارکننده: {org}")
+        org = html.escape(
+            event.organizer.display_name if event.organizer and event.organizer.display_name else "برگزارکننده"
+        )
+        prize = html.escape((event.prize_summary or event.title or "کاستوم").strip())
+        lines.append(f"{i}) 🎁 <b>{prize}</b>")
+        lines.append(f"🕐 {when}")
+        lines.append(f"👤 {org}")
         lines.append("")
-    lines.append("دکمه‌های زیر را بزنید تا وارد همان کاستوم شوید.")
+    lines.append("از دکمه‌های رنگی زیر وارد همان کاستوم شوید.")
     return "\n".join(lines).strip()
 
 
