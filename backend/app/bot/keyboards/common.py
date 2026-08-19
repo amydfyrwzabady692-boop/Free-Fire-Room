@@ -2,11 +2,20 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 
 from app.bot.helpers import add_bot_to_channel_url
 
-PRIMARY = "primary"
-SUCCESS = "success"
-DANGER = "danger"
+try:
+    from aiogram.enums import ButtonStyle
 
-MENU_BUTTON_TEXTS = {
+    PRIMARY = ButtonStyle.PRIMARY
+    SUCCESS = ButtonStyle.SUCCESS
+    DANGER = ButtonStyle.DANGER
+except Exception:  # pragma: no cover
+    PRIMARY = "primary"
+    SUCCESS = "success"
+    DANGER = "danger"
+
+_MARK = {str(SUCCESS): "🟢", str(PRIMARY): "🔵", str(DANGER): "🔴", "success": "🟢", "primary": "🔵", "danger": "🔴"}
+
+_MENU_LABELS = (
     "کاستوم‌های جایزه‌دار",
     "کاستوم‌های آینده",
     "کاستوم‌های امروز",
@@ -22,10 +31,31 @@ MENU_BUTTON_TEXTS = {
     "پشتیبانی",
     "شروع مجدد",
     "پنل مالک ربات",
+    "پنل ادمین",
     "دعوت دوستان",
     "نتایج و تاریخچه",
     "اعلان‌های من",
-}
+)
+
+
+def labeled(*items: str) -> set[str]:
+    out: set[str] = set()
+    for item in items:
+        out.add(item)
+        for mark in ("🟢 ", "🔵 ", "🔴 "):
+            out.add(f"{mark}{item}")
+    return out
+
+
+MENU_BUTTON_TEXTS = labeled(*_MENU_LABELS)
+
+
+def _paint(text: str, style) -> str:
+    raw = (text or "").strip()
+    if raw.startswith(("🟢", "🔵", "🔴")):
+        return raw[:64]
+    mark = _MARK.get(str(style), "🔵")
+    return f"{mark} {raw}"[:64]
 
 
 def ibtn(
@@ -33,42 +63,62 @@ def ibtn(
     *,
     callback_data: str | None = None,
     url: str | None = None,
-    style: str | None = None,
+    copy_text: str | None = None,
+    style=None,
 ) -> InlineKeyboardButton:
-    data: dict = {"text": text}
+    style = style or PRIMARY
+    data: dict = {"text": _paint(text, style), "style": style}
     if callback_data:
         data["callback_data"] = callback_data
     if url:
         data["url"] = url
-    if style:
-        data["style"] = style
+    if copy_text:
+        from aiogram.types import CopyTextButton
+
+        data["copy_text"] = CopyTextButton(text=copy_text)
     try:
         return InlineKeyboardButton(**data)
     except Exception:
-        data.pop("style", None)
-        return InlineKeyboardButton(**data)
+        data.pop("copy_text", None)
+        try:
+            return InlineKeyboardButton(**data)
+        except Exception:
+            data.pop("style", None)
+            return InlineKeyboardButton(**data)
 
 
-def kbtn(text: str, style: str | None = None) -> KeyboardButton:
+def kbtn(text: str, style=None) -> KeyboardButton:
+    style = style or PRIMARY
+    painted = _paint(text, style)
     try:
-        if style:
-            return KeyboardButton(text=text, style=style)
-        return KeyboardButton(text=text)
+        return KeyboardButton(text=painted, style=style)
     except Exception:
-        return KeyboardButton(text=text)
+        return KeyboardButton(text=painted)
 
 
 def main_menu(*, admin: bool = False) -> ReplyKeyboardMarkup:
     rows = [
-        [kbtn("کاستوم‌های جایزه‌دار", PRIMARY)],
+        [kbtn("کاستوم‌های جایزه‌دار", SUCCESS), kbtn("کاستوم‌های امروز", PRIMARY)],
         [kbtn("ثبت کاستوم", SUCCESS), kbtn("پنل برگزارکننده", PRIMARY)],
-        [kbtn("ثبت‌نام‌های من", PRIMARY), kbtn("راهنما و قوانین", PRIMARY)],
-        [kbtn("پروفایل", PRIMARY), kbtn("پشتیبانی", SUCCESS)],
+        [kbtn("ثبت‌نام‌های من", PRIMARY), kbtn("دعوت دوستان", SUCCESS)],
+        [kbtn("راهنما و قوانین", PRIMARY), kbtn("پروفایل", PRIMARY)],
+        [kbtn("پشتیبانی", SUCCESS), kbtn("نتایج و تاریخچه", PRIMARY)],
         [kbtn("شروع مجدد", DANGER)],
     ]
     if admin:
         rows.append([kbtn("پنل مالک ربات", PRIMARY)])
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+    return ReplyKeyboardMarkup(
+        keyboard=rows,
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="کاستوم جایزه‌دار Free Fire",
+    )
+
+
+def home_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[ibtn("بازگشت به منو", callback_data="menu:home", style=DANGER)]]
+    )
 
 
 def tos_kb() -> InlineKeyboardMarkup:
@@ -87,10 +137,17 @@ def membership_kb(buttons: list[tuple[str, str]]) -> InlineKeyboardMarkup:
 
 
 def event_list_kb(items: list[tuple[str, str]], *, mode: str | None = None) -> InlineKeyboardMarkup:
-    rows = [[ibtn(title[:60], callback_data=f"ev:{token}", style=PRIMARY)] for token, title in items]
+    rows = []
+    for i, (token, title) in enumerate(items):
+        rows.append([ibtn(title, callback_data=f"ev:{token}", style=SUCCESS if i == 0 else PRIMARY)])
     if mode == "upcoming":
+        rows.append([ibtn("کاستوم‌های امروز", callback_data="list:today", style=SUCCESS)])
         rows.append([ibtn("کاستوم‌های ۴۸ ساعت گذشته", callback_data="list:past", style=PRIMARY)])
     elif mode == "past":
+        rows.append([ibtn("کاستوم‌های پیش‌رو", callback_data="list:upcoming", style=SUCCESS)])
+    elif mode == "today":
+        rows.append([ibtn("همه کاستوم‌های پیش‌رو", callback_data="list:upcoming", style=SUCCESS)])
+    elif mode == "mine":
         rows.append([ibtn("کاستوم‌های پیش‌رو", callback_data="list:upcoming", style=SUCCESS)])
     elif mode == "digest":
         rows.append([ibtn("همه کاستوم‌های جایزه‌دار", callback_data="list:upcoming", style=SUCCESS)])
@@ -170,6 +227,7 @@ def help_kb() -> InlineKeyboardMarkup:
             [ibtn("قوانین، گزارش و امتیاز", callback_data="help:rules", style=DANGER)],
             [ibtn("دو پنل: مالک و برگزارکننده", callback_data="help:panels", style=PRIMARY)],
             [ibtn("سؤالات رایج", callback_data="help:faq", style=PRIMARY)],
+            [ibtn("بازگشت به منو", callback_data="menu:home", style=DANGER)],
         ]
     )
 
@@ -257,10 +315,22 @@ def confirm_kb(action: str) -> InlineKeyboardMarkup:
     )
 
 
-def event_share_kb(link: str) -> InlineKeyboardMarkup:
+def share_link_kb(
+    link: str,
+    *,
+    open_label: str = "باز کردن لینک",
+    copy_label: str = "کپی لینک",
+) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[ibtn("ورود به کاستوم از لینک", url=link, style=SUCCESS)]]
+        inline_keyboard=[
+            [ibtn(open_label, url=link, style=SUCCESS)],
+            [ibtn(copy_label, copy_text=link, style=PRIMARY)],
+        ]
     )
+
+
+def event_share_kb(link: str) -> InlineKeyboardMarkup:
+    return share_link_kb(link, open_label="ورود به کاستوم از لینک", copy_label="کپی لینک بنر")
 
 
 def organizer_home_kb() -> InlineKeyboardMarkup:

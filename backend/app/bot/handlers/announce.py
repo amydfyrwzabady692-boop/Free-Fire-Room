@@ -13,8 +13,10 @@ from app.bot.helpers import esc, normalize_join_url
 from app.bot.keyboards.common import (
     DANGER,
     PRIMARY,
+    SUCCESS,
     announcement_list_kb,
     ibtn,
+    labeled,
     pick_date_kb,
     wizard_nav,
 )
@@ -227,17 +229,33 @@ async def ann_extra(message: Message, state: FSMContext):
         f"زمان: {format_local(dt.fromisoformat(data['starts_at']))}\n"
         f"جایزه: {data.get('prize_summary') or '—'}\n"
         f"لینک‌های جوین: {len(links) + (1 if data.get('channel_url') else 0)}\n\n"
-        "برای ثبت: تأیید\nبرای انصراف: /cancel"
+        "اگر درست است تأیید کنید.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [ibtn("تأیید و ثبت", callback_data="ann:ok", style=SUCCESS)],
+                [ibtn("انصراف", callback_data="wiz:cancel", style=DANGER)],
+            ]
+        ),
     )
 
 
-@router.message(AnnounceSG.preview, ~F.text.in_({"تأیید", "انتشار"}))
+@router.message(AnnounceSG.preview, ~F.text.in_(labeled("تأیید", "انتشار")))
 async def ann_preview_hint(message: Message):
-    await message.answer("برای ثبت، «تأیید» را بفرستید. برای انصراف /cancel")
+    await message.answer(
+        "برای ثبت، دکمه سبز «تأیید و ثبت» را بزنید. برای انصراف دکمه قرمز.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [ibtn("تأیید و ثبت", callback_data="ann:ok", style=SUCCESS)],
+                [ibtn("انصراف", callback_data="wiz:cancel", style=DANGER)],
+            ]
+        ),
+    )
 
 
-@router.message(AnnounceSG.preview, F.text.in_({"تأیید", "انتشار"}))
-async def ann_finish(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
+@router.message(AnnounceSG.preview, F.text.in_(labeled("تأیید", "انتشار")))
+@router.callback_query(AnnounceSG.preview, F.data == "ann:ok")
+async def ann_finish(event: Message | CallbackQuery, state: FSMContext, db: AsyncSession, db_user: User):
+    msg = event.message if isinstance(event, CallbackQuery) else event
     data = await state.get_data()
     try:
         row = await create_announcement(
@@ -249,15 +267,25 @@ async def ann_finish(message: Message, state: FSMContext, db: AsyncSession, db_u
             },
         )
     except AppError as exc:
-        await message.answer(exc.message)
+        await msg.answer(exc.message)
+        if isinstance(event, CallbackQuery):
+            await event.answer()
+        return
+    except Exception:
+        await msg.answer("اطلاع‌رسانی ناقص است. از اول ثبت کنید.")
+        await state.clear()
+        if isinstance(event, CallbackQuery):
+            await event.answer()
         return
     await state.clear()
-    await message.answer(
+    await msg.answer(
         "اطلاع‌رسانی ثبت شد و در بخش اطلاع‌رسانی دیده می‌شود.\n"
         "اگر خودتان کانال دارید و می‌خواهید ربات سر ساعت رمز را بفرستد، از «ثبت کاستوم جایزه‌دار» استفاده کنید.",
         reply_markup=await menu_for(db, db_user),
     )
-    await message.answer(_card(row), reply_markup=_ann_kb(row, owner=True))
+    await msg.answer(_card(row), reply_markup=_ann_kb(row, owner=True))
+    if isinstance(event, CallbackQuery):
+        await event.answer()
 
 
 @router.callback_query(F.data.startswith("ann:del:"))

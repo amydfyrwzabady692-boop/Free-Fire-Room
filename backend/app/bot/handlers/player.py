@@ -5,23 +5,30 @@ from datetime import UTC, datetime, timedelta
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
-from sqlalchemy import select
+from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.bot.access import menu_for
 from app.bot.helpers import esc
 from app.bot.keyboards.common import (
+    DANGER,
+    PRIMARY,
+    SUCCESS,
     checklist_kb,
     event_detail_kb,
     event_list_kb,
     help_back_kb,
     help_kb,
+    home_kb,
+    ibtn,
+    labeled,
     report_reasons_kb,
     review_comment_kb,
     review_prize_kb,
     review_stars_kb,
+    share_link_kb,
 )
 from app.bot.onboarding import ensure_onboarding
 from app.bot.states.groups import ReportSG, ReviewSG, SupportSG
@@ -109,7 +116,7 @@ async def _welcome_after_onboarding(message: Message, db: AsyncSession, db_user:
     )
 
 
-@router.message(F.text == "شروع مجدد")
+@router.message(F.text.in_(labeled("شروع مجدد")))
 async def restart_menu(message: Message, db: AsyncSession, db_user: User, state: FSMContext):
     await state.clear()
     db_user.start_payload = None
@@ -120,7 +127,7 @@ async def restart_menu(message: Message, db: AsyncSession, db_user: User, state:
 
 
 @router.message(Command("cancel"))
-@router.message(F.text.in_({"/cancel", "لغو", "انصراف"}))
+@router.message(F.text.in_(labeled("لغو", "انصراف") | {"/cancel"}))
 async def cancel_flow(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
     await state.clear()
     await message.answer("لغو شد.", reply_markup=await menu_for(db, db_user))
@@ -244,7 +251,7 @@ async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> st
 
 
 @router.message(Command("customs"))
-@router.message(F.text.in_({"کاستوم‌های آینده", "کاستوم‌های جایزه‌دار"}))
+@router.message(F.text.in_(labeled("کاستوم‌های آینده", "کاستوم‌های جایزه‌دار")))
 @router.callback_query(F.data == "list:upcoming")
 async def upcoming(event: Message | CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
     await state.clear()
@@ -299,18 +306,30 @@ async def past_customs(cb: CallbackQuery, db: AsyncSession, db_user: User, state
     await cb.answer()
 
 
-@router.message(F.text == "کاستوم‌های امروز")
-async def today(message: Message, db: AsyncSession, db_user: User):
-    if not await _ensure_onboarding(message, db_user, db):
+@router.message(F.text.in_(labeled("کاستوم‌های امروز")))
+@router.callback_query(F.data == "list:today")
+async def today(event: Message | CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
+    await state.clear()
+    msg = event.message if isinstance(event, CallbackQuery) else event
+    if not await _ensure_onboarding(msg, db_user, db):
+        if isinstance(event, CallbackQuery):
+            await event.answer()
         return
     rows = await _list_events(db, mode="today")
     if not rows:
-        await message.answer("برای امروز کاستومی نیست.")
+        await msg.answer(
+            "برای امروز کاستومی نیست. از دکمه پایین همه پیش‌روها را ببینید.",
+            reply_markup=event_list_kb([], mode="today"),
+        )
+        if isinstance(event, CallbackQuery):
+            await event.answer()
         return
-    await message.answer(
-        "کاستوم‌های امروز:",
-        reply_markup=event_list_kb([(e.public_token, _list_title(e)) for e in rows]),
+    await msg.answer(
+        "🔥 <b>کاستوم‌های امروز</b>\nروی مورد بزنید تا بنر، جایزه و کانال‌های جوین را ببینید.",
+        reply_markup=event_list_kb([(e.public_token, _list_title(e)) for e in rows], mode="today"),
     )
+    if isinstance(event, CallbackQuery):
+        await event.answer()
 
 
 @router.callback_query(F.data.startswith("ev:"))
@@ -515,24 +534,35 @@ async def invite(cb: CallbackQuery, db: AsyncSession, db_user: User):
     bot_user = get_settings().bot_username
     url = f"https://t.me/{bot_user}?start=ref_{link.token}"
     await cb.message.answer(
-        f"لینک دعوت اختصاصی شما:\n{url}\n\n"
+        f"لینک دعوت اختصاصی شما:\n<code>{esc(url)}</code>\n\n"
         f"دعوت‌های معتبر: {link.valid_count}\n"
-        "دعوت وقتی معتبر است که فرد جدید ربات را استارت کند و عضویت اجباری را کامل کند.\n"
-        "فوروارد بنر به‌تنهایی قابل اثبات نیست و تأیید قطعی محسوب نمی‌شود."
+        "دعوت وقتی معتبر است که فرد جدید ربات را استارت کند و عضویت اجباری را کامل کند.",
+        parse_mode="HTML",
+        reply_markup=share_link_kb(url, open_label="ورود با لینک دعوت", copy_label="کپی لینک دعوت"),
     )
     await cb.answer()
 
 
-@router.message(F.text == "دعوت دوستان")
-async def invite_global(message: Message, db: AsyncSession, db_user: User):
-    if not await _ensure_onboarding(message, db_user, db):
+@router.message(F.text.in_(labeled("دعوت دوستان", "دعوت")))
+@router.callback_query(F.data == "menu:invite")
+async def invite_global(event: Message | CallbackQuery, db: AsyncSession, db_user: User):
+    msg = event.message if isinstance(event, CallbackQuery) else event
+    if not await _ensure_onboarding(msg, db_user, db):
+        if isinstance(event, CallbackQuery):
+            await event.answer()
         return
     link = await get_or_create_link(db, db_user.id, None, campaign="global")
     url = f"https://t.me/{get_settings().bot_username}?start=ref_{link.token}"
-    await message.answer(f"لینک دعوت شما:\n{url}\nدعوت‌های معتبر: {link.valid_count}")
+    await msg.answer(
+        "لینک دعوتت را بفرست تا ورود دوستانت به نام تو ثبت شود.\n"
+        f"دعوت‌های معتبر: {link.valid_count}",
+        reply_markup=share_link_kb(url, open_label="ورود با لینک دعوت", copy_label="کپی لینک دعوت"),
+    )
+    if isinstance(event, CallbackQuery):
+        await event.answer()
 
 
-@router.message(F.text == "ثبت‌نام‌های من")
+@router.message(F.text.in_(labeled("ثبت‌نام‌های من", "ثبت نام های من")))
 async def my_regs(message: Message, db: AsyncSession, db_user: User):
     rows = (
         await db.scalars(
@@ -544,10 +574,13 @@ async def my_regs(message: Message, db: AsyncSession, db_user: User):
         )
     ).all()
     if not rows:
-        await message.answer("ثبت‌نامی ندارید.")
+        await message.answer(
+            "هنوز در کاستومی ثبت‌نام نکردی.\nاز «کاستوم‌های جایزه‌دار» یا لینک بنر وارد شو.",
+            reply_markup=event_list_kb([], mode="mine"),
+        )
         return
     items = []
-    text = "ثبت‌نام‌های شما — برای گزارش، کاستوم را باز کنید:\n"
+    text = "<b>ثبت‌نام‌های تو</b>\nبرای گزارش یا جزئیات، کاستوم را باز کن:\n"
     for r in rows:
         if not r.event:
             continue
@@ -555,11 +588,13 @@ async def my_regs(message: Message, db: AsyncSession, db_user: User):
         label = prize[:40] if prize else r.event.title
         text += f"• {esc(label)} — {r.status}\n"
         items.append((r.event.public_token, _list_title(r.event)))
-    await message.answer(text, reply_markup=event_list_kb(items) if items else None)
+    await message.answer(text, reply_markup=event_list_kb(items, mode="mine") if items else home_kb())
 
 
-@router.message(F.text == "نتایج و تاریخچه")
-async def history(message: Message, db: AsyncSession, db_user: User):
+@router.message(F.text.in_(labeled("نتایج و تاریخچه", "تاریخچه")))
+@router.callback_query(F.data == "menu:history")
+async def history(event: Message | CallbackQuery, db: AsyncSession, db_user: User):
+    msg = event.message if isinstance(event, CallbackQuery) else event
     rows = (
         await db.scalars(
             select(Event)
@@ -569,18 +604,27 @@ async def history(message: Message, db: AsyncSession, db_user: User):
         )
     ).all()
     if not rows:
-        await message.answer("تاریخچه‌ای موجود نیست.")
+        await msg.answer(
+            "هنوز کاستوم تمام‌شده‌ای نداری.",
+            reply_markup=event_list_kb([], mode="past"),
+        )
+        if isinstance(event, CallbackQuery):
+            await event.answer()
         return
-    lines = []
+    items = []
+    lines = ["<b>نتایج و تاریخچه</b>"]
     for e in rows:
         prize = (e.prize_summary or "").strip().replace("\n", " ")
         label = prize[:40] if prize else e.title
         lines.append(f"• {esc(label)} ({e.status})")
-    await message.answer("\n".join(lines))
+        items.append((e.public_token, _list_title(e)))
+    await msg.answer("\n".join(lines), reply_markup=event_list_kb(items, mode="past"))
+    if isinstance(event, CallbackQuery):
+        await event.answer()
 
 
 @router.message(Command("help"))
-@router.message(F.text.in_({"راهنما و قوانین", "راهنما"}))
+@router.message(F.text.in_(labeled("راهنما و قوانین", "راهنما")))
 async def help_msg(message: Message):
     await message.answer(T.HELP + "\n\n" + T.DISCLAIMER, reply_markup=help_kb())
 
@@ -606,16 +650,21 @@ async def help_section(cb: CallbackQuery):
     await cb.answer()
 
 
-@router.message(F.text == "پشتیبانی")
+@router.message(F.text.in_(labeled("پشتیبانی")))
 async def support(message: Message, state: FSMContext):
     await state.set_state(SupportSG.message)
-    await message.answer("پیام خود را بنویسید. مستقیم به مالک ربات می‌رسد.\nبرای انصراف /cancel")
+    await message.answer(
+        "پیام خود را بنویسید. مستقیم به مالک ربات می‌رسد.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[ibtn("انصراف", callback_data="menu:home", style=DANGER)]]
+        ),
+    )
 
 
 @router.message(SupportSG.message)
 async def support_body(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
     body = (message.text or "").strip()
-    if body in {"/cancel", "لغو", "انصراف"}:
+    if body in labeled("لغو", "انصراف") | {"/cancel"}:
         await state.clear()
         await message.answer("لغو شد.", reply_markup=await menu_for(db, db_user))
         return
@@ -631,15 +680,28 @@ async def support_body(message: Message, state: FSMContext, db: AsyncSession, db
     await message.answer("پیام برای مالک ربات ارسال شد.", reply_markup=await menu_for(db, db_user))
 
 
-@router.message(F.text == "پروفایل")
-async def profile(message: Message, db_user: User):
+@router.message(F.text.in_(labeled("پروفایل")))
+async def profile(message: Message, db: AsyncSession, db_user: User):
     ff = db_user.profile.ff_player_id if db_user.profile else "—"
+    regs = await db.scalar(select(func.count()).select_from(Registration).where(Registration.user_id == db_user.id)) or 0
+    link = await get_or_create_link(db, db_user.id, None, campaign="global")
     await message.answer(
-        f"شناسه تلگرام: {db_user.telegram_id}\n"
+        f"<b>پروفایل تو</b>\n"
+        f"شناسه تلگرام: <code>{db_user.telegram_id}</code>\n"
         f"نام: {esc(db_user.first_name)}\n"
-        f"Free Fire ID: {ff}\n"
-        f"منطقه زمانی: {db_user.timezone}\n"
-        "برای تنظیم شناسه بازیکن بنویسید:\n/setid شناسه"
+        f"Free Fire ID: {esc(ff)}\n"
+        f"منطقه زمانی: {esc(db_user.timezone)}\n"
+        f"کاستوم‌های ثبت‌شده: {regs}\n"
+        f"دعوت‌های معتبر: {link.valid_count}\n\n"
+        "برای تنظیم شناسه بازیکن بنویسید:\n<code>/setid شناسه</code>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [ibtn("دعوت دوستان", callback_data="menu:invite", style=SUCCESS)],
+                [ibtn("اعلان‌های من", callback_data="menu:notifs", style=PRIMARY)],
+                [ibtn("بازگشت به منو", callback_data="menu:home", style=DANGER)],
+            ]
+        ),
     )
 
 
@@ -656,10 +718,12 @@ async def set_id(message: Message, db_user: User, db: AsyncSession):
     await message.answer("شناسه Free Fire ذخیره شد.")
 
 
-@router.message(F.text == "اعلان‌های من")
-async def notifs(message: Message, db: AsyncSession, db_user: User):
+@router.message(F.text.in_(labeled("اعلان‌های من", "اعلان ها")))
+@router.callback_query(F.data == "menu:notifs")
+async def notifs(event: Message | CallbackQuery, db: AsyncSession, db_user: User):
     from app.models.jobs import Notification
 
+    msg = event.message if isinstance(event, CallbackQuery) else event
     rows = (
         await db.scalars(
             select(Notification)
@@ -669,9 +733,16 @@ async def notifs(message: Message, db: AsyncSession, db_user: User):
         )
     ).all()
     if not rows:
-        await message.answer("اعلانی ندارید.")
+        await msg.answer("اعلانی نداری.", reply_markup=home_kb())
+        if isinstance(event, CallbackQuery):
+            await event.answer()
         return
-    await message.answer("\n\n".join(f"<b>{esc(n.title)}</b>\n{esc(n.body)}" for n in rows))
+    await msg.answer(
+        "\n\n".join(f"<b>{esc(n.title)}</b>\n{esc(n.body)}" for n in rows),
+        reply_markup=home_kb(),
+    )
+    if isinstance(event, CallbackQuery):
+        await event.answer()
 
 
 @router.callback_query(F.data.startswith("reveal:"))
@@ -749,7 +820,7 @@ async def report_reason_chosen(cb: CallbackQuery, db: AsyncSession, db_user: Use
 @router.message(ReportSG.body)
 async def report_other_body(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
     body = (message.text or "").strip()
-    if body in {"/cancel", "لغو", "انصراف"}:
+    if body in labeled("لغو", "انصراف") | {"/cancel"}:
         await state.clear()
         await message.answer("لغو شد.", reply_markup=await menu_for(db, db_user))
         return
@@ -852,7 +923,12 @@ async def list_reviews(cb: CallbackQuery, db: AsyncSession):
         text += "\nهنوز نظری نیست. اگر در این کاستوم بودید، «نظر و امتیاز» را بزنید."
     else:
         text += "\n" + "\n\n".join(format_review_item(r) for r in rows)
-    await cb.message.answer(text)
+    await cb.message.answer(
+        text,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[ibtn("بازگشت به کاستوم", callback_data=f"ev:{token}", style=PRIMARY)]]
+        ),
+    )
     await cb.answer()
 
 
@@ -970,5 +1046,8 @@ async def _finish_review(message, state: FSMContext, db: AsyncSession, db_user: 
 @router.callback_query(F.data == "menu:home")
 async def menu_home(cb: CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
     await state.clear()
-    await cb.message.answer("منوی اصلی", reply_markup=await menu_for(db, db_user))
+    await cb.message.answer(
+        "منوی اصلی آماده است.\nکاستوم جایزه‌دار ببین، ثبت کن، یا از راهنما جزئیات را بخوان.",
+        reply_markup=await menu_for(db, db_user),
+    )
     await cb.answer()

@@ -22,6 +22,7 @@ from app.bot.keyboards.common import (
     add_required_channel_kb,
     event_share_kb,
     ibtn,
+    labeled,
     organizer_home_kb,
     pick_date_kb,
     wizard_nav,
@@ -65,7 +66,7 @@ async def _blocked_organize(db: AsyncSession, user: User, target: Message | Call
 
 
 @router.message(Command("host"))
-@router.message(F.text.in_({"ثبت کاستوم", "ثبت کاستوم جایزه‌دار"}))
+@router.message(F.text.in_(labeled("ثبت کاستوم", "ثبت کاستوم جایزه‌دار")))
 @router.callback_query(F.data == "orgp:new")
 async def start_org(event: Message | CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
     msg = target_message(event)
@@ -98,7 +99,7 @@ async def start_org(event: Message | CallbackQuery, db: AsyncSession, db_user: U
         await event.answer()
 
 
-@router.message(F.text.in_({"پنل برگزارکننده", "کاستوم‌های من", "پنل برگزار کننده"}))
+@router.message(F.text.in_(labeled("پنل برگزارکننده", "کاستوم‌های من", "پنل برگزار کننده")))
 @router.callback_query(F.data == "orgp:home")
 async def org_home(event: Message | CallbackQuery, db: AsyncSession, db_user: User):
     msg = target_message(event)
@@ -312,7 +313,7 @@ async def wiz_extra(message: Message, state: FSMContext, db: AsyncSession, db_us
     text = (message.text or "").strip()
     data = await state.get_data()
     ids: list[str] = list(data.get("required_channel_ids") or [])
-    if text in {"-", "تمام شد", "ادامه"}:
+    if text in labeled("-", "تمام شد", "ادامه"):
         if not ids:
             await message.answer("حداقل یک کانال لازم است.", reply_markup=await _channel_step_kb(db, db_user, [], extra=False))
             return
@@ -718,10 +719,13 @@ async def org_channels(cb: CallbackQuery, db: AsyncSession, db_user: User):
         )
     ).all()
     if not rows:
+        kb = add_required_channel_kb(cancel=False)
+        rows = list(kb.inline_keyboard)
+        rows.append([ibtn("بازگشت به پنل", callback_data="orgp:home", style=DANGER)])
         await cb.message.answer(
             "هنوز کانالی وصل نشده.\n"
             "دکمه زیر را بزنید تا ربات ادمین کانال شود؛ بعد موقع ثبت کاستوم همان کانال را انتخاب می‌کنید.",
-            reply_markup=add_required_channel_kb(cancel=False),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
         )
         await cb.answer()
         return

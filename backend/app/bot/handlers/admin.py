@@ -13,7 +13,7 @@ from sqlalchemy.orm import selectinload
 
 from app.bot.access import is_active_admin, menu_for
 from app.bot.helpers import esc, extract_channel_ref
-from app.bot.keyboards.common import DANGER, PRIMARY, SUCCESS, add_required_channel_kb, ibtn
+from app.bot.keyboards.common import DANGER, PRIMARY, SUCCESS, add_required_channel_kb, ibtn, labeled
 from app.bot.states.groups import AdminSG
 from app.core.enums import BanScope, EventStatus, OrganizerStatus, RegistrationStatus, ReportStatus, UserStatus
 from app.core.errors import AppError
@@ -95,7 +95,7 @@ async def _show_home(message: Message) -> None:
 
 
 @router.message(Command("admin"))
-@router.message(F.text.in_({"پنل ادمین", "پنل مالک ربات"}))
+@router.message(F.text.in_(labeled("پنل ادمین", "پنل مالک ربات")))
 async def admin_home(message: Message, db: AsyncSession, db_user: User, state: FSMContext):
     if not await _ok(db, db_user):
         await _deny(message)
