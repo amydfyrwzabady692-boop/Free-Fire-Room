@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.bot.access import menu_for
-from app.bot.helpers import event_deep_link, extract_channel_ref, esc
+from app.bot.helpers import event_deep_link, extract_channel_ref, esc, replace_callback_view
 from app.bot.keyboards.common import (
     DANGER,
     PRIMARY,
@@ -27,6 +27,7 @@ from app.bot.keyboards.common import (
     pick_date_kb,
     wizard_nav,
 )
+from app.locales.labels import event_status_fa, org_status_fa
 from app.locales.style import room_pair
 from app.bot.onboarding import ensure_onboarding, target_message
 from app.bot.states.groups import CredsWaitSG, EventWizardSG
@@ -66,6 +67,22 @@ async def _blocked_organize(db: AsyncSession, user: User, target: Message | Call
     return True
 
 
+async def _organizer_ready(db: AsyncSession, user: User, msg: Message) -> Organizer | None:
+    org = await get_or_apply(db, user, user.first_name)
+    if org.status == OrganizerStatus.PENDING:
+        await msg.answer(
+            "درخواست برگزارکننده شما ثبت شد و منتظر تأیید مدیریت است.\n"
+            "بعد از تأیید، از همین «پنل برگزارکننده» کاستوم می‌گذارید."
+        )
+        return None
+    if org.status in {OrganizerStatus.REJECTED, OrganizerStatus.SUSPENDED}:
+        await msg.answer(
+            f"حساب برگزارکننده شما {org_status_fa(org.status)} است. از «پشتیبانی» به مالک ربات پیام بدهید."
+        )
+        return None
+    return org
+
+
 @router.message(Command("host"))
 @router.message(F.text.in_(labeled("ثبت کاستوم", "ثبت کاستوم جایزه‌دار")))
 @router.callback_query(F.data == "orgp:new")
@@ -78,14 +95,7 @@ async def start_org(event: Message | CallbackQuery, db: AsyncSession, db_user: U
     if await _blocked_organize(db, db_user, event):
         return
     await state.clear()
-    org = await get_or_apply(db, db_user, db_user.first_name)
-    if org.status == OrganizerStatus.PENDING:
-        await msg.answer("درخواست برگزارکننده شما ثبت شد و منتظر تأیید مدیریت است.")
-        if isinstance(event, CallbackQuery):
-            await event.answer()
-        return
-    if org.status in {OrganizerStatus.REJECTED, OrganizerStatus.SUSPENDED}:
-        await msg.answer("حساب برگزارکننده شما فعال نیست. با پشتیبانی تماس بگیرید.")
+    if await _organizer_ready(db, db_user, msg) is None:
         if isinstance(event, CallbackQuery):
             await event.answer()
         return
@@ -104,31 +114,35 @@ async def start_org(event: Message | CallbackQuery, db: AsyncSession, db_user: U
 @router.callback_query(F.data == "orgp:home")
 async def org_home(event: Message | CallbackQuery, db: AsyncSession, db_user: User):
     msg = target_message(event)
-    if not await ensure_onboarding(msg, db_user, db):
+    if not await ensure_onboarding(msg, db_user, db, recheck_channels=not isinstance(event, CallbackQuery)):
         if isinstance(event, CallbackQuery):
             await event.answer()
         return
     if await _blocked_organize(db, db_user, event):
         return
-    await get_or_apply(db, db_user, db_user.first_name)
+    if await _organizer_ready(db, db_user, msg) is None:
+        if isinstance(event, CallbackQuery):
+            await event.answer()
+        return
     from app.services.reviews import format_rating_line, review_summary_for_organizer
 
     org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
     rating = ""
     if org:
         rating = "\n" + format_rating_line(await review_summary_for_organizer(db, org.id), prefix="امتیاز شما از بازیکن‌ها")
-    await msg.answer(
+    text = (
         "👑 <b>پنل برگزارکننده</b>\n"
         "این پنل مالک ربات نیست.\n\n"
         "اینجا کاستوم جایزه‌دار خودتان را می‌گذارید: ساعت + جایزه + کانال جوین اجباری. "
         "در فهرست همه دیده می‌شود.\n"
         "سر ساعت اول <b>ROOM ID</b> را می‌فرستید، بعد <b>PASS</b> را جدا.\n"
         "می‌بینید چند نفر از لینک اختصاصی آمدند، چند نفر جوین کردند و چند نفر ROOM ID / PASS گرفتند."
-        f"{rating}",
-        reply_markup=organizer_home_kb(),
+        f"{rating}"
     )
     if isinstance(event, CallbackQuery):
-        await event.answer()
+        await replace_callback_view(event, text, inline=organizer_home_kb())
+        return
+    await msg.answer(text, reply_markup=organizer_home_kb())
 
 
 @router.message(F.text == "/cancel")
@@ -416,7 +430,7 @@ async def bot_added_as_channel_admin(event: ChatMemberUpdated, db: AsyncSession,
         try:
             await event.bot.send_message(
                 event.from_user.id,
-                f"ربات به کانال «{event.chat.title}» اضافه شد، ولی ثبت نشد:\n{getattr(exc, 'message', exc)}",
+                f"ربات به کانال «{esc(event.chat.title)}» اضافه شد، ولی ثبت نشد. دوباره از پنل برگزارکننده وصل کنید.",
             )
         except Exception:
             return
@@ -442,15 +456,17 @@ async def bot_added_as_channel_admin(event: ChatMemberUpdated, db: AsyncSession,
 
         try:
             await add_global_required_channel(db, event.bot, db_user.id, event.chat.id, scope="all")
-            await event.bot.send_message(event.from_user.id, f"کانال اجباری ورود «{ch.title}» ثبت شد.")
-        except Exception as exc:  # noqa: BLE001
-            await event.bot.send_message(event.from_user.id, str(getattr(exc, "message", exc)))
+            await event.bot.send_message(event.from_user.id, f"کانال اجباری ورود «{esc(ch.title)}» ثبت شد.")
+        except AppError as exc:
+            await event.bot.send_message(event.from_user.id, exc.message)
+        except Exception:
+            await event.bot.send_message(event.from_user.id, "کانال ثبت نشد. دوباره تلاش کنید.")
         await state.clear()
         return
     try:
         await event.bot.send_message(
             event.from_user.id,
-            f"ربات ادمین کانال «{ch.title}» شد و ذخیره گردید.\n"
+            f"ربات ادمین کانال «{esc(ch.title)}» شد و ذخیره گردید.\n"
             "موقع ثبت کاستوم از دکمه «استفاده از …» انتخابش کنید.",
         )
     except Exception:
@@ -584,8 +600,8 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
     except AppError as exc:
         await message.answer(exc.message)
         return
-    except Exception as exc:  # noqa: BLE001
-        await message.answer(f"خطا: {getattr(exc, 'message', exc)}")
+    except Exception:
+        await message.answer("ثبت کاستوم الان انجام نشد. چند ثانیه بعد دوباره تلاش کنید.")
         return
     await state.clear()
 
@@ -620,18 +636,23 @@ async def org_mine(cb: CallbackQuery, db: AsyncSession, db_user: User):
     for e in rows:
         stats = await event_audience_stats(db, e.id)
         rating = format_rating_line(await review_summary_for_event(db, e.id), prefix="امتیاز این کاستوم")
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [ibtn("ارسال ROOM ID", callback_data=f"orgp:creds:{e.public_token}", style=SUCCESS)],
-                [ibtn("لینک اختصاصی", callback_data=f"orgp:link:{e.public_token}", style=PRIMARY)],
-                [ibtn("لغو کاستوم", callback_data=f"orgp:cancel:{e.public_token}", style=DANGER)],
-            ]
+        creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == e.id))
+        can_send = (
+            e.status not in {EventStatus.CANCELLED, EventStatus.FINISHED, EventStatus.REJECTED}
+            and (credentials_window_open(e) or creds_were_provided(creds))
         )
+        buttons = []
+        if can_send:
+            buttons.append([ibtn("ارسال ROOM ID", callback_data=f"orgp:creds:{e.public_token}", style=SUCCESS)])
+        buttons.append([ibtn("لینک اختصاصی", callback_data=f"orgp:link:{e.public_token}", style=PRIMARY)])
+        if e.status not in {EventStatus.CANCELLED, EventStatus.FINISHED}:
+            buttons.append([ibtn("لغو کاستوم", callback_data=f"orgp:cancel:{e.public_token}", style=DANGER)])
+        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         await cb.message.answer(
             f"<b>{esc(e.title)}</b>\n"
             f"جایزه: {esc(e.prize_summary or '—')}\n"
             f"زمان (شمسی): {format_local(e.starts_at, e.timezone)}\n"
-            f"وضعیت: {e.status}\n"
+            f"وضعیت: {event_status_fa(e.status)}\n"
             f"{format_audience_stats(stats)}\n"
             f"{rating}",
             reply_markup=kb,
@@ -738,7 +759,7 @@ async def org_channels(cb: CallbackQuery, db: AsyncSession, db_user: User):
         if not ch:
             continue
         admin = "ادمین ربات: بله" if ch.bot_is_admin else "ادمین ربات: خیر — عضویت قابل بررسی نیست"
-        text += f"• {ch.title} (@{ch.username or '-'}) — {admin}\n"
+        text += f"• {esc(ch.title)} (@{esc(ch.username or '-')}) — {admin}\n"
     await cb.message.answer(text, reply_markup=organizer_home_kb())
     await cb.answer()
 
@@ -754,7 +775,7 @@ async def ask_live_creds(cb: CallbackQuery, db: AsyncSession, db_user: User, sta
         return
     creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == e.id))
     if not credentials_window_open(e) and not creds_were_provided(creds):
-        await cb.answer("فرصت ۵ دقیقه‌ای تمام شد.", show_alert=True)
+        await cb.answer(f"مهلت {get_settings().credentials_grace_minutes} دقیقه‌ای تمام شد.", show_alert=True)
         return
     await state.set_state(CredsWaitSG.room_id)
     await state.update_data(event_token=token, room_id=None)

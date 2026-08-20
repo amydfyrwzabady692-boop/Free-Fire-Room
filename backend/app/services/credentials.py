@@ -143,7 +143,7 @@ def _render_credentials_message(event: Event, user: User, room_id: str, password
 
     name = user.first_name or user.username or str(user.telegram_id)
     prize = esc((event.prize_summary or "").strip() or "—")
-    header = event.custom_credentials_message or "اتاق کاستوم آماده است"
+    header = event.custom_credentials_message or "کاستوم آماده است"
     personal = f"\n{USER} {esc(name)} | کد ثبت‌نام: {str(user.id)[:8]}" if event.personalize_delivery else ""
     ver = f"\nنسخه اطلاعات: {version}" if version > 1 else ""
     return (

@@ -171,7 +171,7 @@ async def _send_credentials(db, job: ScheduledJob) -> None:
                 try:
                     await bot.send_message(
                         org_user.telegram_id,
-                        f"رمز کاستوم «{html.escape(event.title)}» ارسال نشد چون ربات دیگر ادمین کانال جوین اجباری نیست.\n"
+                        f"ROOM ID / PASS کاستوم «{html.escape(event.title)}» ارسال نشد چون ربات دیگر ادمین کانال جوین اجباری نیست.\n"
                         "ربات را دوباره ادمین کنید تا ارسال تکرار شود.",
                     )
                 except Exception:

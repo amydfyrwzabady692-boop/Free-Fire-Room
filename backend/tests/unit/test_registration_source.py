@@ -26,3 +26,14 @@ def test_audit_actor_telegram_id_is_bigint():
 
     col = AuditLog.__table__.c.actor_telegram_id
     assert isinstance(col.type, BigInteger)
+
+
+def test_menu_labels_match_with_or_without_icons():
+    from app.bot.keyboards.common import labeled, unpaint
+
+    names = labeled("کاستوم‌های جایزه‌دار", "بازگشت")
+    assert "کاستوم‌های جایزه‌دار" in names
+    assert "🟢 کاستوم‌های جایزه‌دار" in names
+    assert "🟢کاستوم‌های جایزه‌دار" in names
+    assert unpaint("🔵 پنل برگزارکننده") == "پنل برگزارکننده"
+    assert unpaint("کاستوم‌های امروز") == "کاستوم‌های امروز"

@@ -105,3 +105,39 @@ async def reply_callback(cb: CallbackQuery, text: str, **kwargs) -> None:
         await cb.bot.send_message(cb.from_user.id, text, **kwargs)
     except Exception:
         _log.exception("callback_dm_reply_failed")
+
+
+async def replace_callback_view(cb: CallbackQuery, text: str, *, inline=None, menu=None) -> None:
+    await ack_callback(cb)
+    msg = cb.message
+    if menu is not None:
+        if msg is not None and hasattr(msg, "edit_reply_markup"):
+            try:
+                await msg.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+        await reply_callback(cb, text, reply_markup=menu)
+        return
+    if msg is not None and getattr(msg, "text", None) is not None and hasattr(msg, "edit_text"):
+        try:
+            await msg.edit_text(text, reply_markup=inline)
+            return
+        except Exception:
+            pass
+    if (
+        msg is not None
+        and hasattr(msg, "edit_caption")
+        and len(text) <= 1024
+        and (getattr(msg, "caption", None) is not None or getattr(msg, "photo", None))
+    ):
+        try:
+            await msg.edit_caption(caption=text, reply_markup=inline)
+            return
+        except Exception:
+            pass
+    if msg is not None and hasattr(msg, "edit_reply_markup"):
+        try:
+            await msg.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+    await reply_callback(cb, text, reply_markup=inline)

@@ -61,13 +61,13 @@ class MenuResetMiddleware(BaseMiddleware):
     async def __call__(self, handler: Callable, event: TelegramObject, data: dict[str, Any]) -> Any:
         from aiogram.types import Message
 
-        from app.bot.keyboards.common import MENU_BUTTON_TEXTS, labeled
+        from app.bot.keyboards.common import MENU_BUTTON_TEXTS, labeled, unpaint
 
         state = data.get("state")
         if isinstance(event, Message) and state is not None:
             text = (event.text or "").strip()
             current = await state.get_state()
-            if text in labeled("لغو", "انصراف") | {"/cancel"} or text.startswith("/cancel"):
+            if unpaint(text) in labeled("لغو", "انصراف") or text.startswith("/cancel"):
                 await state.clear()
                 db = data.get("db")
                 db_user = data.get("db_user")
@@ -78,7 +78,7 @@ class MenuResetMiddleware(BaseMiddleware):
                     markup = await menu_for(db, db_user)
                 await event.answer("لغو شد.", reply_markup=markup)
                 return None
-            if text in MENU_BUTTON_TEXTS:
+            if text in MENU_BUTTON_TEXTS or unpaint(text) in MENU_BUTTON_TEXTS:
                 if current and str(current).startswith("CredsWaitSG"):
                     return await handler(event, data)
                 await state.clear()

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.config import get_settings
-from app.core.enums import DeliveryStatus, PrizePaidVote, RegistrationStatus, TrustEventType
+from app.core.enums import DeliveryStatus, EventStatus, PrizePaidVote, RegistrationStatus, TrustEventType
 from app.models.event import Event
 from app.models.jobs import Delivery
 from app.models.organizer import Organizer
@@ -112,13 +112,15 @@ def review_window_open(event: Event, now: datetime | None = None) -> bool:
 
 
 async def can_review(db: AsyncSession, user: User, event: Event) -> tuple[bool, str | None]:
-    if event.deleted_at is not None or not event.deep_link_active:
+    if event.deleted_at is not None:
+        return False, "این کاستوم در دسترس نیست."
+    if not event.deep_link_active and event.status != EventStatus.CANCELLED:
         return False, "این کاستوم در دسترس نیست."
     org = event.organizer
     if org and org.user_id == user.id:
         return False, "نمی‌توانید برای کاستوم خودتان نظر بگذارید."
     if not review_window_open(event):
-        return False, "فقط تا ۴۸ ساعت بعد از ساعت کاستوم می‌توان نظر ثبت کرد."
+        return False, f"فقط تا {hours} ساعت بعد از ساعت کاستوم می‌توان نظر ثبت کرد."
     if await existing_review(db, user.id, event.id):
         return False, "قبلاً برای این کاستوم نظر ثبت کرده‌اید."
     reg = await db.scalar(
@@ -167,9 +169,9 @@ async def create_review(
     )
     db.add(row)
     try:
-        await db.flush()
+        async with db.begin_nested():
+            await db.flush()
     except IntegrityError:
-        await db.rollback()
         return None, "قبلاً برای این کاستوم نظر ثبت کرده‌اید."
     org = event.organizer or await db.get(Organizer, event.organizer_id)
     if org:
@@ -239,7 +241,7 @@ def format_audience_stats(stats: dict) -> str:
         f"هنوز جوین نکرده‌اند: {stats['pending']}\n"
         f"لیست انتظار: {stats['waitlisted']}\n"
         f"واجد شرایط نشدند: {stats['ineligible']}\n"
-        f"رمز برایشان ارسال شد: {stats['delivered']}"
+        f"ROOM ID / PASS برایشان ارسال شد: {stats['delivered']}"
     )
 
 

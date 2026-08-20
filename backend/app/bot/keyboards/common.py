@@ -14,6 +14,26 @@ except Exception:  # pragma: no cover
     DANGER = "danger"
 
 _MARK = {str(SUCCESS): "🟢", str(PRIMARY): "🔵", str(DANGER): "🔴", "success": "🟢", "primary": "🔵", "danger": "🔴"}
+_ICON_MARKS = ("🟢", "🔵", "🔴")
+
+
+def unpaint(text: str) -> str:
+    raw = (text or "").strip()
+    for mark in _ICON_MARKS:
+        if raw.startswith(mark):
+            return raw[len(mark) :].lstrip(" \u00a0")
+    return raw
+
+
+def _style_candidates(style) -> list:
+    out = []
+    for item in (style, getattr(style, "value", None)):
+        if item is not None and item not in out:
+            out.append(item)
+    name = str(style).rsplit(".", 1)[-1].lower()
+    if name and name not in {str(x).lower() for x in out}:
+        out.append(name)
+    return out
 
 _MENU_LABELS = (
     "کاستوم‌های جایزه‌دار",
@@ -35,15 +55,20 @@ _MENU_LABELS = (
     "دعوت دوستان",
     "نتایج و تاریخچه",
     "اعلان‌های من",
+    "اطلاع‌رسانی",
+    "ثبت اطلاع‌رسانی",
 )
 
 
 def labeled(*items: str) -> set[str]:
     out: set[str] = set()
     for item in items:
+        clean = unpaint(item)
+        out.add(clean)
         out.add(item)
-        for mark in ("🟢 ", "🔵 ", "🔴 "):
-            out.add(f"{mark}{item}")
+        for mark in _ICON_MARKS:
+            out.add(f"{mark} {clean}")
+            out.add(f"{mark}{clean}")
     return out
 
 
@@ -51,10 +76,14 @@ MENU_BUTTON_TEXTS = labeled(*_MENU_LABELS)
 
 
 def _paint(text: str, style) -> str:
-    raw = (text or "").strip()
-    if raw.startswith(("🟢", "🔵", "🔴")):
-        return raw[:64]
+    raw = unpaint(text)
     mark = _MARK.get(str(style), "🔵")
+    if str(style).lower().endswith("success") or str(style) == str(SUCCESS):
+        mark = "🟢"
+    elif str(style).lower().endswith("danger") or str(style) == str(DANGER):
+        mark = "🔴"
+    elif str(style).lower().endswith("primary") or str(style) == str(PRIMARY):
+        mark = "🔵"
     return f"{mark} {raw}"[:64]
 
 
@@ -67,33 +96,39 @@ def ibtn(
     style=None,
 ) -> InlineKeyboardButton:
     style = style or PRIMARY
-    data: dict = {"text": _paint(text, style), "style": style}
+    raw = unpaint(text)[:64]
+    extra: dict = {}
     if callback_data:
-        data["callback_data"] = callback_data
+        extra["callback_data"] = callback_data
     if url:
-        data["url"] = url
+        extra["url"] = url
     if copy_text:
         from aiogram.types import CopyTextButton
 
-        data["copy_text"] = CopyTextButton(text=copy_text)
-    try:
-        return InlineKeyboardButton(**data)
-    except Exception:
-        data.pop("copy_text", None)
+        extra["copy_text"] = CopyTextButton(text=copy_text)
+    for candidate in _style_candidates(style):
         try:
-            return InlineKeyboardButton(**data)
+            return InlineKeyboardButton(text=raw, style=candidate, **extra)
         except Exception:
-            data.pop("style", None)
-            return InlineKeyboardButton(**data)
+            continue
+    extra.pop("copy_text", None)
+    for candidate in _style_candidates(style):
+        try:
+            return InlineKeyboardButton(text=raw, style=candidate, **extra)
+        except Exception:
+            continue
+    return InlineKeyboardButton(text=_paint(raw, style), **extra)
 
 
 def kbtn(text: str, style=None) -> KeyboardButton:
     style = style or PRIMARY
-    painted = _paint(text, style)
-    try:
-        return KeyboardButton(text=painted, style=style)
-    except Exception:
-        return KeyboardButton(text=painted)
+    raw = unpaint(text)[:64]
+    for candidate in _style_candidates(style):
+        try:
+            return KeyboardButton(text=raw, style=candidate)
+        except Exception:
+            continue
+    return KeyboardButton(text=_paint(raw, style))
 
 
 def main_menu(*, admin: bool = False) -> ReplyKeyboardMarkup:
@@ -103,6 +138,7 @@ def main_menu(*, admin: bool = False) -> ReplyKeyboardMarkup:
         [kbtn("ثبت‌نام‌های من", PRIMARY), kbtn("دعوت دوستان", SUCCESS)],
         [kbtn("راهنما و قوانین", PRIMARY), kbtn("پروفایل", PRIMARY)],
         [kbtn("پشتیبانی", SUCCESS), kbtn("نتایج و تاریخچه", PRIMARY)],
+        [kbtn("اعلان‌های من", PRIMARY), kbtn("اطلاع‌رسانی", SUCCESS)],
         [kbtn("شروع مجدد", DANGER)],
     ]
     if admin:
@@ -137,12 +173,15 @@ def membership_kb(buttons: list[tuple[str, str]]) -> InlineKeyboardMarkup:
 
 
 def event_list_kb(items: list[tuple[str, str]], *, mode: str | None = None) -> InlineKeyboardMarkup:
+    from app.core.config import get_settings
+
+    hours = get_settings().past_events_hours
     rows = []
     for i, (token, title) in enumerate(items):
         rows.append([ibtn(title, callback_data=f"ev:{token}", style=SUCCESS if i == 0 else PRIMARY)])
     if mode == "upcoming":
         rows.append([ibtn("کاستوم‌های امروز", callback_data="list:today", style=SUCCESS)])
-        rows.append([ibtn("کاستوم‌های ۴۸ ساعت گذشته", callback_data="list:past", style=PRIMARY)])
+        rows.append([ibtn(f"کاستوم‌های {hours} ساعت گذشته", callback_data="list:past", style=PRIMARY)])
     elif mode == "past":
         rows.append([ibtn("کاستوم‌های پیش‌رو", callback_data="list:upcoming", style=SUCCESS)])
     elif mode == "today":
@@ -162,6 +201,7 @@ def event_detail_kb(
     can_join: bool = True,
     can_review: bool = False,
     show_reviews: bool = False,
+    back: str = "upcoming",
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     seen: set[str] = set()
@@ -177,7 +217,9 @@ def event_detail_kb(
     if show_reviews:
         rows.append([ibtn("نظرات بازیکن‌ها", callback_data=f"rvl:{token}", style=PRIMARY)])
     rows.append([ibtn("گزارش به مالک ربات", callback_data=f"rep:{token}", style=DANGER)])
-    rows.append([ibtn("بازگشت به فهرست", callback_data="list:upcoming", style=PRIMARY)])
+    if back not in {"upcoming", "today", "past"}:
+        back = "upcoming"
+    rows.append([ibtn("بازگشت به فهرست", callback_data=f"list:{back}", style=PRIMARY)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

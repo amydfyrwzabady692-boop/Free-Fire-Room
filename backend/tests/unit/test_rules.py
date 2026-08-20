@@ -204,3 +204,15 @@ def test_credentials_message_uses_room_id_and_pass():
     assert "pass99" in text
     assert "آیدی اتاق" not in text
     assert "رمز اتاق" not in text
+    assert "اتاق کاستوم" not in text
+    assert "کاستوم آماده است" in text
+
+
+def test_status_labels_are_persian():
+    from app.core.enums import EventStatus, RegistrationStatus
+    from app.locales.labels import event_status_fa, reg_status_fa
+
+    assert event_status_fa(EventStatus.CANCELLED) == "لغو شده"
+    assert event_status_fa("published") == "منتشرشده"
+    assert reg_status_fa(RegistrationStatus.CONFIRMED) == "ثبت‌نام قطعی"
+    assert "confirmed" not in reg_status_fa(RegistrationStatus.CONFIRMED)

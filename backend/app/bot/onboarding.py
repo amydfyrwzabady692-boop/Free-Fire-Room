@@ -35,10 +35,14 @@ async def missing_global_memberships(db: AsyncSession, bot, user: User):
     return missing
 
 
-async def ensure_onboarding(message: Message, user: User, db: AsyncSession) -> bool:
+async def ensure_onboarding(
+    message: Message, user: User, db: AsyncSession, *, recheck_channels: bool = True
+) -> bool:
     if not user.tos_accepted_at:
         await message.answer(T.TOS, reply_markup=tos_kb())
         return False
+    if not recheck_channels and user.onboarding_completed_at:
+        return True
     missing = await missing_global_memberships(db, message.bot, user)
     if missing:
         buttons = []

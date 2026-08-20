@@ -9,7 +9,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.access import menu_for
-from app.bot.helpers import esc, normalize_join_url
+from app.bot.helpers import esc, normalize_join_url, replace_callback_view
 from app.bot.keyboards.common import (
     DANGER,
     PRIMARY,
@@ -42,7 +42,9 @@ def _card(row: CustomAnnouncement) -> str:
     extra = ""
     links = row.extra_join_links or []
     if links:
-        extra = "\nکانال‌های پیشنهادی: " + "، ".join(str(x.get("label") or x.get("url")) for x in links[:6])
+        extra = "\nکانال‌های پیشنهادی: " + "، ".join(
+            esc(str(x.get("label") or x.get("url"))) for x in links[:6]
+        )
     return (
         f"<b>{esc(row.title)}</b>\n"
         f"کانال: {esc(row.channel_name)}\n"
@@ -50,7 +52,7 @@ def _card(row: CustomAnnouncement) -> str:
         f"جایزه: {esc(row.prize_summary or '—')}\n"
         f"{esc(row.description or '')}"
         f"{extra}\n\n"
-        "این مورد اطلاع‌رسانی است. مشخصات اتاق را ربات ارسال نمی‌کند مگر برگزارکننده کاستوم رسمی ثبت کرده باشد."
+        "این مورد اطلاع‌رسانی است. ROOM ID و PASS را ربات ارسال نمی‌کند مگر برگزارکننده کاستوم رسمی ثبت کرده باشد."
     )
 
 
@@ -72,26 +74,30 @@ def _ann_kb(row: CustomAnnouncement, *, owner: bool = False) -> InlineKeyboardMa
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+@router.message(F.text.in_(labeled("اطلاع‌رسانی", "ثبت اطلاع‌رسانی")))
 @router.callback_query(F.data == "ann:list")
 async def list_ann(event: Message | CallbackQuery, db: AsyncSession, db_user: User):
     msg = target_message(event)
-    if not await ensure_onboarding(msg, db_user, db):
+    if not await ensure_onboarding(msg, db_user, db, recheck_channels=not isinstance(event, CallbackQuery)):
         if isinstance(event, CallbackQuery):
             await event.answer()
         return
     rows = await list_upcoming_announcements(db)
     if not rows:
-        await msg.answer(
-            "اطلاع‌رسانی فعالی نیست.\nاگر از کاستوم جایزه‌داری خبر دارید «ثبت اطلاع‌رسانی» را بزنید.",
-            reply_markup=announcement_list_kb([]),
+        text = (
+            "اطلاع‌رسانی فعالی نیست.\n"
+            "اگر از کاستوم جایزه‌داری خبر دارید، دکمه «ثبت اطلاع‌رسانی» را بزنید. "
+            "این بخش فقط خبر است؛ ROOM ID و PASS نمی‌فرستد."
         )
-        if isinstance(event, CallbackQuery):
-            await event.answer()
-        return
-    items = [(str(r.id), f"{format_local(r.starts_at, r.timezone)} | {r.channel_name}") for r in rows]
-    await msg.answer("اطلاع‌رسانی کاستوم‌های جایزه‌دار:", reply_markup=announcement_list_kb(items))
+        kb = announcement_list_kb([])
+    else:
+        items = [(str(r.id), f"{format_local(r.starts_at, r.timezone)} | {r.channel_name}") for r in rows]
+        text = "اطلاع‌رسانی کاستوم‌های جایزه‌دار:"
+        kb = announcement_list_kb(items)
     if isinstance(event, CallbackQuery):
-        await event.answer()
+        await replace_callback_view(event, text, inline=kb)
+        return
+    await msg.answer(text, reply_markup=kb)
 
 
 @router.callback_query(F.data == "ann:new")
@@ -225,9 +231,9 @@ async def ann_extra(message: Message, state: FSMContext):
     await state.set_state(AnnounceSG.preview)
     await message.answer(
         "پیش‌نمایش:\n"
-        f"کانال: {data.get('channel_name')}\n"
+        f"کانال: {esc(data.get('channel_name'))}\n"
         f"زمان: {format_local(dt.fromisoformat(data['starts_at']))}\n"
-        f"جایزه: {data.get('prize_summary') or '—'}\n"
+        f"جایزه: {esc(data.get('prize_summary') or '—')}\n"
         f"لینک‌های جوین: {len(links) + (1 if data.get('channel_url') else 0)}\n\n"
         "اگر درست است تأیید کنید.",
         reply_markup=InlineKeyboardMarkup(

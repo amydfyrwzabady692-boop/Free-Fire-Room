@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.bot.access import is_active_admin, menu_for
-from app.bot.helpers import esc, extract_channel_ref
+from app.bot.helpers import esc, extract_channel_ref, replace_callback_view
 from app.bot.keyboards.common import DANGER, PRIMARY, SUCCESS, add_required_channel_kb, ibtn, labeled
 from app.bot.states.groups import AdminSG
 from app.core.enums import BanScope, EventStatus, OrganizerStatus, RegistrationStatus, ReportStatus, UserStatus
@@ -34,6 +34,7 @@ from app.services import settings as settings_svc
 from app.services.announcements import hide_announcement
 from app.services.audit import write_audit
 from app.services.reports import format_person, report_label
+from app.locales.labels import ban_scope_fa, event_status_fa, setting_fa
 from app.services.users import get_by_telegram
 
 router = Router(name="admin")
@@ -69,7 +70,7 @@ def _admin_kb() -> InlineKeyboardMarkup:
 
 def _back_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[ibtn("بازگشت به پنل ادمین", callback_data="adm:home", style=PRIMARY)]]
+        inline_keyboard=[[ibtn("بازگشت به پنل مالک ربات", callback_data="adm:home", style=PRIMARY)]]
     )
 
 
@@ -110,14 +111,12 @@ async def admin_home_cb(cb: CallbackQuery, db: AsyncSession, db_user: User, stat
         await _deny(cb)
         return
     await state.clear()
-    await cb.message.answer("پنل مدیریت ربات", reply_markup=_admin_kb())
-    await cb.answer()
+    await replace_callback_view(cb, "👑 پنل مالک ربات — فقط برای صاحب همین ربات.", inline=_admin_kb())
 
 
 @router.callback_query(F.data == "adm:player")
 async def admin_to_player(cb: CallbackQuery, db: AsyncSession, db_user: User):
-    await cb.message.answer("منوی بازیکن", reply_markup=await menu_for(db, db_user))
-    await cb.answer()
+    await replace_callback_view(cb, "منوی بازیکن", menu=await menu_for(db, db_user))
 
 
 @router.callback_query(F.data == "adm:dash")
@@ -199,7 +198,7 @@ async def admin_all_events(cb: CallbackQuery, db: AsyncSession, db_user: User):
             f"🎁 جایزه: {esc(prize)}\n"
             f"🕐 {format_local(e.starts_at, e.timezone)}\n"
             f"برگزارکننده: {esc(org)}\n"
-            f"وضعیت: {e.status}\n"
+            f"وضعیت: {event_status_fa(e.status)}\n"
             f"{format_audience_stats(stats)}",
             reply_markup=_back_kb() if i == len(rows) - 1 else None,
         )
@@ -240,7 +239,7 @@ async def admin_events(cb: CallbackQuery, db: AsyncSession, db_user: User):
             f"🎁 جایزه: {esc((e.prize_summary or '').strip() or '—')}\n"
             f"برگزارکننده: {esc(org)}\n"
             f"ساعت: {format_local(e.starts_at, e.timezone)}\n"
-            f"وضعیت: {e.status}",
+            f"وضعیت: {event_status_fa(e.status)}",
             reply_markup=kb,
         )
     await cb.answer()
@@ -257,7 +256,7 @@ async def admin_event_approve(cb: CallbackQuery, db: AsyncSession, db_user: User
         return
     try:
         await event_svc.approve_event(db, event, db_user.id)
-        await cb.message.answer(f"کاستوم «{event.title}» منتشر شد.", reply_markup=_back_kb())
+        await cb.message.answer(f"کاستوم «{esc(event.title)}» منتشر شد.", reply_markup=_back_kb())
     except AppError as exc:
         await cb.message.answer(exc.message, reply_markup=_back_kb())
     await cb.answer()
@@ -274,7 +273,7 @@ async def admin_event_reject(cb: CallbackQuery, db: AsyncSession, db_user: User)
         return
     try:
         await event_svc.reject_event(db, event, db_user.id, "رد از پنل ربات")
-        await cb.message.answer(f"کاستوم «{event.title}» رد شد.", reply_markup=_back_kb())
+        await cb.message.answer(f"کاستوم «{esc(event.title)}» رد شد.", reply_markup=_back_kb())
     except AppError as exc:
         await cb.message.answer(exc.message, reply_markup=_back_kb())
     await cb.answer()
@@ -454,7 +453,7 @@ async def admin_user_show(message: Message, db: AsyncSession, db_user: User, sta
         extra += (
             f"\n• {format_local(e.starts_at, e.timezone, compact=True)}"
             f" | {esc((e.prize_summary or e.title or '—')[:50])}"
-            f" | {e.status}"
+            f" | {event_status_fa(e.status)}"
         )
     await message.answer(
         f"نام: {esc(target.first_name or '-')}\n"
@@ -515,7 +514,10 @@ async def admin_ban_do(message: Message, db: AsyncSession, db_user: User, state:
         db, action="user_banned", entity_type="user", entity_id=target.id, actor_id=db_user.id, extra={"reason": reason, "scope": scope}
     )
     await state.clear()
-    await message.answer(f"کاربر {target.telegram_id} بن شد ({scope}).", reply_markup=_back_kb())
+    await message.answer(
+        f"کاربر {target.telegram_id} بن شد ({ban_scope_fa(scope)}).",
+        reply_markup=_back_kb(),
+    )
 
 
 @router.callback_query(F.data.startswith("adm:ub:"))
@@ -886,6 +888,9 @@ async def admin_toggle_setting(cb: CallbackQuery, db: AsyncSession, db_user: Use
     current = bool(await settings_svc.get_setting(db, key, False))
     await settings_svc.set_setting(db, key, not current, updated_by=db_user.id)
     await write_audit(db, action="setting_toggled", entity_type="setting", actor_id=db_user.id, extra={"key": key, "value": not current})
-    await cb.message.answer(f"{key} = {'روشن' if not current else 'خاموش'}", reply_markup=_back_kb())
+    await cb.message.answer(
+        f"{setting_fa(key)} = {'روشن' if not current else 'خاموش'}",
+        reply_markup=_back_kb(),
+    )
     await cb.answer()
 

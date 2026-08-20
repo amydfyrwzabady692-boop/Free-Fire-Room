@@ -93,9 +93,9 @@ async def register_user(
         )
         db.add(holder)
         try:
-            await db.flush()
+            async with db.begin_nested():
+                await db.flush()
         except IntegrityError as exc:
-            await db.rollback()
             raise ConflictError("already_registered", "شما قبلاً در این کاستوم ثبت‌نام کرده‌اید.") from exc
     else:
         holder.source = merge_registration_source(holder.source, source)
