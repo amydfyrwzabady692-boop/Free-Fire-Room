@@ -148,7 +148,7 @@ def main_menu(*, admin: bool = False) -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=rows,
         resize_keyboard=True,
-        is_persistent=True,
+        is_persistent=False,
         input_field_placeholder="کاستوم جایزه‌دار Free Fire",
     )
 

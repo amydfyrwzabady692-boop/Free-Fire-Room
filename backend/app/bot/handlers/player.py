@@ -1143,6 +1143,5 @@ async def menu_home(cb: CallbackQuery, db: AsyncSession, db_user: User, state: F
     await state.clear()
     await replace_callback_view(
         cb,
-        "منوی اصلی آماده است.\n🎮 کاستوم جایزه‌دار ببین، ثبت کن، یا از راهنما جزئیات را بخوان.",
-        menu=await menu_for(db, db_user),
+        "منوی اصلی آماده است.\nاز دکمه‌های پایین استفاده کنید. اگر منو باز است، با فلش کنار کادر پیام جمعش کنید.",
     )
