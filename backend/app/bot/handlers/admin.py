@@ -54,8 +54,9 @@ def _admin_kb() -> InlineKeyboardMarkup:
             ],
             [
                 ibtn("گزارش تخلف", callback_data="adm:rep", style=DANGER),
-                ibtn("ارسال همگانی", callback_data="adm:bc", style=PRIMARY),
+                ibtn("برنده‌ها", callback_data="adm:win", style=SUCCESS),
             ],
+            [ibtn("ارسال همگانی", callback_data="adm:bc", style=PRIMARY)],
             [
                 ibtn("اطلاع‌رسانی‌ها", callback_data="adm:ann", style=PRIMARY),
                 ibtn("کاربران اخیر", callback_data="adm:lu", style=PRIMARY),
@@ -625,6 +626,37 @@ async def admin_channel_toggle(cb: CallbackQuery, db: AsyncSession, db_user: Use
         db, action="global_channel_toggled", entity_type="global_required_channel", entity_id=row.id, actor_id=db_user.id
     )
     await cb.message.answer(f"وضعیت کانال: {'فعال' if row.is_active else 'خاموش'}", reply_markup=_back_kb())
+    await cb.answer()
+
+
+@router.callback_query(F.data == "adm:win")
+async def admin_winners(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    if not await _ok(db, db_user):
+        await _deny(cb)
+        return
+    from app.services.winners import list_winner_claims
+
+    rows = await list_winner_claims(db)
+    if not rows:
+        await cb.message.answer("ادعای برنده‌ای ثبت نشده.", reply_markup=_back_kb())
+        await cb.answer()
+        return
+    await cb.message.answer(f"آخرین {len(rows)} ادعای برنده:")
+    for claim in rows:
+        e = claim.event
+        player = claim.user
+        prize = (e.prize_summary if e else "") or "—"
+        text = (
+            f"🏆 <b>{esc(e.title) if e else 'کاستوم'}</b>\n"
+            f"جایزه: {esc(prize)}\n"
+            f"بازیکن: {format_person(player)}\n"
+            f"وضعیت: {esc(claim.status)}"
+        )
+        try:
+            await cb.message.answer_photo(claim.screenshot_file_id, caption=text[:1024])
+        except Exception:
+            await cb.message.answer(text)
+    await cb.message.answer("بازگشت:", reply_markup=_back_kb())
     await cb.answer()
 
 

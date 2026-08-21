@@ -57,6 +57,8 @@ _MENU_LABELS = (
     "اعلان‌های من",
     "اطلاع‌رسانی",
     "ثبت اطلاع‌رسانی",
+    "برنده",
+    "برنده شدم",
 )
 
 
@@ -134,12 +136,12 @@ def kbtn(text: str, style=None) -> KeyboardButton:
 def main_menu(*, admin: bool = False) -> ReplyKeyboardMarkup:
     rows = [
         [kbtn("کاستوم‌های جایزه‌دار", SUCCESS), kbtn("کاستوم‌های امروز", PRIMARY)],
-        [kbtn("ثبت کاستوم", SUCCESS), kbtn("پنل برگزارکننده", PRIMARY)],
-        [kbtn("ثبت‌نام‌های من", PRIMARY), kbtn("دعوت دوستان", SUCCESS)],
-        [kbtn("راهنما و قوانین", PRIMARY), kbtn("پروفایل", PRIMARY)],
-        [kbtn("پشتیبانی", SUCCESS), kbtn("نتایج و تاریخچه", PRIMARY)],
-        [kbtn("اعلان‌های من", PRIMARY), kbtn("اطلاع‌رسانی", SUCCESS)],
-        [kbtn("شروع مجدد", DANGER)],
+        [kbtn("برنده", SUCCESS), kbtn("ثبت کاستوم", SUCCESS)],
+        [kbtn("پنل برگزارکننده", PRIMARY), kbtn("ثبت‌نام‌های من", PRIMARY)],
+        [kbtn("دعوت دوستان", SUCCESS), kbtn("راهنما و قوانین", PRIMARY)],
+        [kbtn("پروفایل", PRIMARY), kbtn("پشتیبانی", SUCCESS)],
+        [kbtn("نتایج و تاریخچه", PRIMARY), kbtn("اعلان‌های من", PRIMARY)],
+        [kbtn("اطلاع‌رسانی", SUCCESS), kbtn("شروع مجدد", DANGER)],
     ]
     if admin:
         rows.append([kbtn("پنل مالک ربات", PRIMARY)])
@@ -201,6 +203,7 @@ def event_detail_kb(
     can_join: bool = True,
     can_review: bool = False,
     show_reviews: bool = False,
+    can_claim_win: bool = False,
     back: str = "upcoming",
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
@@ -212,6 +215,8 @@ def event_detail_kb(
         rows.append([ibtn(f"عضویت در {title[:28]}", url=url, style=PRIMARY)])
     if can_join:
         rows.append([ibtn("عضو شدم — بررسی و ثبت‌نام", callback_data=f"join:{token}", style=SUCCESS)])
+    if can_claim_win:
+        rows.append([ibtn("برنده شدم", callback_data=f"win:{token}", style=SUCCESS)])
     if can_review:
         rows.append([ibtn("نظر و امتیاز", callback_data=f"rev:{token}", style=PRIMARY)])
     if show_reviews:
@@ -372,7 +377,7 @@ def share_link_kb(
 
 
 def event_share_kb(link: str) -> InlineKeyboardMarkup:
-    return share_link_kb(link, open_label="ورود به کاستوم از لینک", copy_label="کپی لینک بنر")
+    return share_link_kb(link, open_label="ورود به کاستوم از لینک", copy_label="کپی لینک کاستوم")
 
 
 def organizer_home_kb() -> InlineKeyboardMarkup:
@@ -391,6 +396,15 @@ def send_creds_kb(token: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[[ibtn("ارسال ROOM ID", callback_data=f"orgp:creds:{token}", style=SUCCESS)]]
     )
+
+
+def winner_list_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    rows = [
+        [ibtn(title, callback_data=f"win:{token}", style=SUCCESS if i == 0 else PRIMARY)]
+        for i, (token, title) in enumerate(items)
+    ]
+    rows.append([ibtn("بازگشت", callback_data="menu:home", style=DANGER)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def announcement_list_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:

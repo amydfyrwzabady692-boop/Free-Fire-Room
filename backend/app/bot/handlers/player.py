@@ -40,7 +40,7 @@ from app.core.rate_limit import hit_rate_limit
 from app.core.time import format_local
 from app.locales import fa as T
 from app.locales.labels import event_status_fa, reg_status_fa
-from app.models.event import Event
+from app.models.event import Event, RoomCredential
 from app.models.organizer import Organizer
 from app.models.registration import Registration
 from app.models.user import User, UserProfile
@@ -48,11 +48,13 @@ from app.services.referrals import apply_start_referral, get_or_create_link
 from app.services.registration import register_user
 from app.services.reports import (
     create_player_report,
+    creds_were_provided,
     event_missed_credentials,
     format_cheater_alert_for_organizer,
     format_person,
     format_prize_vote_alert,
     format_report_alert,
+    join_window_open,
     notify_active_admins,
     notify_telegram_user,
 )
@@ -173,30 +175,37 @@ async def membership_recheck(cb: CallbackQuery, db: AsyncSession, db_user: User)
 async def _list_events(db: AsyncSession, *, mode: str = "upcoming") -> list[Event]:
     now = datetime.now(UTC)
     hours = get_settings().past_events_hours
+    fill = get_settings().custom_fill_minutes + get_settings().credentials_grace_minutes
+    live = [EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED]
+    listed = live + [EventStatus.FINISHED]
     stmt = (
         select(Event)
         .where(
             Event.deleted_at.is_(None),
             Event.visibility == EventVisibility.PUBLIC,
-            Event.status.in_(
-                [EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED, EventStatus.FINISHED]
-            ),
             Event.deep_link_active.is_(True),
         )
         .options(selectinload(Event.organizer), selectinload(Event.channel))
         .limit(20)
     )
     if mode == "past":
-        stmt = stmt.where(Event.starts_at < now, Event.starts_at >= now - timedelta(hours=hours)).order_by(
-            Event.starts_at.desc()
-        )
+        stmt = stmt.where(
+            Event.status.in_(listed),
+            Event.starts_at < now,
+            Event.starts_at >= now - timedelta(hours=hours),
+        ).order_by(Event.starts_at.desc())
     elif mode == "today":
         from app.core.time import local_day_bounds
 
         start, end = local_day_bounds()
-        stmt = stmt.where(Event.starts_at >= start, Event.starts_at < end).order_by(Event.starts_at.asc())
+        stmt = stmt.where(Event.status.in_(listed), Event.starts_at >= start, Event.starts_at < end).order_by(
+            Event.starts_at.asc()
+        )
     else:
-        stmt = stmt.where(Event.starts_at >= now).order_by(Event.starts_at.asc())
+        stmt = stmt.where(
+            Event.status.in_(live),
+            Event.starts_at >= now - timedelta(minutes=fill),
+        ).order_by(Event.starts_at.asc())
     return list((await db.scalars(stmt)).all())
 
 
@@ -226,9 +235,11 @@ async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> st
     now = datetime.now(UTC)
     left = max(0, int((e.starts_at - now).total_seconds() // 60))
     grace = get_settings().credentials_grace_minutes
+    fill = get_settings().custom_fill_minutes
     extra = (
-        f"🆔 سر همین ساعت برگزارکننده حداکثر {grace} دقیقه فرصت دارد ROOM ID و PASS را داخل ربات بفرستد؛ "
-        "فقط اگر کانال‌های همین کاستوم را جوین کرده باشید برایتان ارسال می‌شود."
+        f"🆔 سر همین ساعت برگزارکننده حداکثر {grace} دقیقه فرصت دارد ROOM ID و PASS را داخل ربات بفرستد.\n"
+        f"بعد از ساعت شروع، {fill} دقیقه هم برای پر شدن کاستوم فرصت هست؛ "
+        "اگر در این مدت شرایط را کامل کنید مشخصات برایتان می‌آید."
     )
     if missed:
         extra = (
@@ -242,19 +253,22 @@ async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> st
         )
     elif e.starts_at <= now:
         extra = (
-            f"🕐 ساعت کاستوم رسیده. برگزارکننده تا {grace} دقیقه بعد از ساعت شروع فرصت ارسال ROOM ID / PASS را دارد."
+            f"🕐 ساعت کاستوم رسیده. برگزارکننده {grace} دقیقه برای ارسال ROOM ID / PASS فرصت دارد "
+            f"و {fill} دقیقه برای پر شدن کاستوم. اگر الان جوین را کامل کنید مشخصات برایتان می‌آید."
         )
     org_line = format_rating_line(await review_summary_for_organizer(db, e.organizer_id), prefix="سابقه برگزارکننده")
     ev_line = format_rating_line(await review_summary_for_event(db, e.id), prefix="امتیاز این کاستوم")
     prize = (e.prize_summary or "").strip()
     if not prize and e.prizes:
         prize = "\n".join(f"{p.place}. {p.title}" for p in e.prizes if p.title)
+    heading = (e.title or "").strip()
     prize = prize or "اعلام نشده"
+    heading_html = f"<b>{esc(heading)}</b>\n\n" if heading and heading != prize else ""
     left_line = f"مانده: {left} دقیقه" if left else "ساعت کاستوم رسیده"
     return (
         "🎮 <b>کاستوم جایزه‌دار</b>\n"
         "━━━━━━━━━━━━━━\n"
-        f"<b>{esc(e.title)}</b>\n\n"
+        f"{heading_html}"
         f"💎 <b>جایزه</b>\n{esc(prize)}\n"
         "━━━━━━━━━━━━━━\n"
         f"🕐 {format_local(e.starts_at, e.timezone)}\n"
@@ -290,7 +304,7 @@ async def upcoming(event: Message | CallbackQuery, db: AsyncSession, db_user: Us
     kb = event_list_kb([(e.public_token, _list_title(e)) for e in rows], mode="upcoming")
     text = (
         "🔥 <b>کاستوم‌های جایزه‌دار پیش‌رو</b>\n"
-        "روی مورد بزنید تا بنر، جایزه، ساعت و کانال‌های جوین اجباری را ببینید.\n"
+        "روی مورد بزنید تا جایزه، ساعت و کانال‌های جوین اجباری را ببینید. اگر عکس باشد جدا می‌آید.\n"
         "بعد عضو شوید و دکمه سبز «عضو شدم» را بزنید تا سر ساعت ROOM ID و PASS برایتان بیاید.\n"
         f"کاستوم‌های {hours} ساعت گذشته هم از دکمه پایین در دسترس است."
     )
@@ -341,7 +355,7 @@ async def today(event: Message | CallbackQuery, db: AsyncSession, db_user: User,
         return
     await _show_panel(
         event,
-        "🔥 <b>کاستوم‌های امروز</b>\nروی مورد بزنید تا بنر، جایزه و کانال‌های جوین را ببینید.",
+        "🔥 <b>کاستوم‌های امروز</b>\nروی مورد بزنید تا جایزه و کانال‌های جوین را ببینید. اگر عکس باشد جدا می‌آید.",
         event_list_kb([(e.public_token, _list_title(e)) for e in rows], mode="today"),
     )
 
@@ -394,6 +408,7 @@ async def _show_event(message: Message, db: AsyncSession, user: User, token: str
     ]
     missed = await event_missed_credentials(db, e)
     started = datetime.now(UTC) >= e.starts_at
+    filling = join_window_open(e)
     allowed, _ = await can_review(db, user, e)
     summary = await review_summary_for_event(db, e.id)
     text = await _event_card(db, e, missed=missed)
@@ -409,48 +424,52 @@ async def _show_event(message: Message, db: AsyncSession, user: User, token: str
         text += "\nROOM ID / PASS ارسال نشد. گزارش بدهید و اگر ثبت‌نام کرده بودید نظر/امتیاز بگذارید."
     elif cancelled:
         text += "\nاین کاستوم لغو شده است."
+    elif filling:
+        text += "\nبعد از جوین، دکمه سبز «عضو شدم» را بزنید. تا پر شدن کاستوم اگر شرایط را کامل کنید مشخصات برایتان می‌آید."
     elif not started:
         text += "\nبعد از جوین، دکمه سبز «عضو شدم» را بزنید."
     else:
         text += "\nاگر ROOM ID / PASS نیامد یا جایزه نداد: «گزارش به مالک ربات»."
-    open_for_join = e.status in {EventStatus.PUBLISHED, EventStatus.FULL}
+    open_for_join = e.status in {EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED} and filling
     kb = event_detail_kb(
         token,
         join_urls=_join_urls(channel_items),
-        can_join=open_for_join and not started and not missed,
+        can_join=open_for_join and not missed,
         can_review=allowed,
         show_reviews=summary["count"] > 0 or started or cancelled,
+        can_claim_win=started and not cancelled,
         back=back,
     )
     photo = e.banner_file_id
-    generated = None
-    if not photo:
+    if photo:
         try:
-            from app.services.posters import as_input_file, event_poster_bytes
-
-            n_ch = len([c for c in (e.required_channels or []) if getattr(c, "is_active", True)])
-            generated = as_input_file(event_poster_bytes(e, channels=n_ch))
-        except Exception:
-            generated = None
-    if photo or generated:
-        try:
-            if len(text) <= 1024:
-                await message.answer_photo(photo or generated, caption=text, reply_markup=kb)
-                return
-            prize = (e.prize_summary or "").strip() or "—"
-            short = (
-                f"🎮 {esc(e.title)}\n"
-                f"🎁 {esc(prize)}\n"
-                f"🕐 {format_local(e.starts_at, e.timezone)}"
-            )
-            await message.answer_photo(photo or generated, caption=short[:1024])
+            await message.answer_photo(photo)
         except Exception:
             pass
     await message.answer(text, reply_markup=kb)
 
 
-async def _send_join_result(cb: CallbackQuery, event: Event, token: str, result) -> None:
+async def _queue_late_credentials(db: AsyncSession, event: Event) -> None:
+    if not join_window_open(event):
+        return
+    creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == event.id))
+    if not creds_were_provided(creds):
+        return
+    await db.commit()
+    from app.workers.tasks import send_event_credentials
+
+    send_event_credentials.delay(str(event.id))
+
+
+async def _send_join_result(cb: CallbackQuery, event: Event, token: str, result, db: AsyncSession) -> None:
     if result.registration.status == RegistrationStatus.CONFIRMED:
+        await _queue_late_credentials(db, event)
+        if datetime.now(UTC) >= event.starts_at:
+            await reply_callback(
+                cb,
+                "✅ ثبت‌نام شد. اگر ROOM ID ارسال شده باشد و هنوز در کانال‌ها باشید، الان برایتان می‌آید.",
+            )
+            return
         await reply_callback(
             cb,
             f"✅ ثبت‌نام شد. سر ساعت {format_local(event.credentials_send_at, event.timezone)} "
@@ -493,9 +512,11 @@ async def join_event(cb: CallbackQuery, db: AsyncSession, db_user: User):
         result = await register_user(db, user=db_user, event=e, bot=cb.bot, source=source, accept_rules=True)
     except AppError as exc:
         if exc.code == "already_registered":
+            if "e" in locals() and e is not None:
+                await _queue_late_credentials(db, e)
             await reply_callback(
                 cb,
-                "قبلاً ثبت‌نام شده‌اید. سر ساعت اگر هنوز در کانال‌های این کاستوم عضو باشید، ROOM ID و PASS برایتان می‌آید.",
+                "قبلاً ثبت‌نام شده‌اید. اگر ROOM ID ارسال شده و هنوز عضو کانال‌ها باشید، الان برایتان می‌آید.",
             )
         else:
             await reply_callback(cb, exc.message)
@@ -505,7 +526,7 @@ async def join_event(cb: CallbackQuery, db: AsyncSession, db_user: User):
         await db.rollback()
         await reply_callback(cb, "ثبت‌نام الان انجام نشد. چند ثانیه بعد دوباره «عضو شدم» را بزنید.")
         return
-    await _send_join_result(cb, e, token, result)
+    await _send_join_result(cb, e, token, result, db)
 
 
 @router.callback_query(F.data.startswith("req:"))
@@ -536,15 +557,18 @@ async def recheck_req(cb: CallbackQuery, db: AsyncSession, db_user: User):
             return
         result = await register_user(db, user=db_user, event=e, bot=cb.bot, source="recheck", accept_rules=True)
     except AppError as exc:
-        if exc.code != "already_registered":
-            await reply_callback(cb, exc.message)
+        if exc.code == "already_registered":
+            if "e" in locals() and e is not None:
+                await _queue_late_credentials(db, e)
+            return
+        await reply_callback(cb, exc.message)
         return
     except Exception:
         log.exception("recheck_req_failed")
         await db.rollback()
         await reply_callback(cb, "بررسی عضویت الان انجام نشد. چند ثانیه بعد دوباره تلاش کنید.")
         return
-    await _send_join_result(cb, e, token, result)
+    await _send_join_result(cb, e, token, result, db)
 
 
 @router.callback_query(F.data.startswith("rules:"))
@@ -561,6 +585,7 @@ async def accept_rules(cb: CallbackQuery, db: AsyncSession, db_user: User):
         await cb.answer()
         return
     if result.registration.status == RegistrationStatus.CONFIRMED:
+        await _queue_late_credentials(db, e)
         await cb.message.answer("قوانین پذیرفته شد و ثبت‌نام قطعی شد.")
     else:
         await cb.message.answer("قوانین پذیرفته شد. سایر شرایط را کامل کنید.")
@@ -621,7 +646,7 @@ async def my_regs(message: Message, db: AsyncSession, db_user: User, state: FSMC
     ).all()
     if not rows:
         await message.answer(
-            "هنوز در کاستومی ثبت‌نام نکرده‌اید.\nاز «کاستوم‌های جایزه‌دار» یا لینک بنر وارد شوید تا سر ساعت ROOM ID و PASS بگیرید.",
+            "هنوز در کاستومی ثبت‌نام نکرده‌اید.\nاز «کاستوم‌های جایزه‌دار» یا لینک کاستوم وارد شوید تا سر ساعت ROOM ID و PASS بگیرید.",
             reply_markup=event_list_kb([], mode="mine"),
         )
         return

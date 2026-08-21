@@ -10,6 +10,7 @@ from app.models.registration import Registration, RegistrationRequirementStatus,
 from app.models.report import Report
 from app.models.review import EventReview
 from app.models.user import Ban, Permission, Role, RolePermission, User, UserNote, UserProfile, UserRole
+from app.models.winner import WinnerClaim
 
 __all__ = [
     "User",
@@ -49,4 +50,5 @@ __all__ = [
     "BroadcastCampaign",
     "BroadcastDelivery",
     "CustomAnnouncement",
+    "WinnerClaim",
 ]

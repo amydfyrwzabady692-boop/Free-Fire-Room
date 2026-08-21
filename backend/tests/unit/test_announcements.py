@@ -13,10 +13,15 @@ def test_equal_event_times_allowed():
     _validate_times(when, when, when)
 
 
-def test_event_times_still_reject_late_registration():
+def test_event_times_allow_fill_window_after_start():
+    start = datetime.now(UTC) + timedelta(hours=2)
+    _validate_times(start, start + timedelta(minutes=25), start)
+
+
+def test_event_times_reject_registration_before_creds():
     start = datetime.now(UTC) + timedelta(hours=2)
     with pytest.raises(ValidationAppError):
-        _validate_times(start, start + timedelta(minutes=1), start)
+        _validate_times(start, start - timedelta(minutes=10), start)
 
 
 def test_announcement_row(db):

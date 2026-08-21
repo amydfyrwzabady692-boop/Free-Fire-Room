@@ -174,6 +174,12 @@ class PrizePaidVote(StrEnum):
     UNKNOWN = "unknown"
 
 
+class WinnerClaimStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
 class DeepLinkKind(StrEnum):
     EVENT = "event"
     REFERRAL = "ref"

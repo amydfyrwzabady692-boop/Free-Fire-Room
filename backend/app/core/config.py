@@ -76,6 +76,7 @@ class Settings(BaseSettings):
     max_required_channels_per_event: int = 5
     max_required_referrals: int = 20
     credentials_grace_minutes: int = 5
+    custom_fill_minutes: int = 20
     past_events_hours: int = 48
     maintenance_mode: bool = False
     openapi_enabled: bool = True

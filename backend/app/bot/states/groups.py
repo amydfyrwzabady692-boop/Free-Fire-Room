@@ -56,6 +56,10 @@ class ReviewSG(StatesGroup):
     comment = State()
 
 
+class WinnerSG(StatesGroup):
+    screenshot = State()
+
+
 class AdminSG(StatesGroup):
     user_query = State()
     ban_reason = State()

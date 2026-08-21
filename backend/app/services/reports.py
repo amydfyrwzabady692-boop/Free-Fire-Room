@@ -8,7 +8,7 @@ from sqlalchemy.orm import selectinload
 
 from app.bot.helpers import esc
 from app.core.config import get_settings
-from app.core.enums import ReportReason, ReportStatus
+from app.core.enums import EventStatus, ReportReason, ReportStatus
 from app.core.time import format_local
 from app.models.admin import Admin
 from app.models.event import Event, RoomCredential
@@ -58,9 +58,26 @@ def credentials_deadline(event: Event) -> datetime:
     return event.starts_at + timedelta(minutes=get_settings().credentials_grace_minutes)
 
 
+def fill_deadline(event: Event) -> datetime:
+    settings = get_settings()
+    return event.starts_at + timedelta(minutes=settings.custom_fill_minutes + settings.credentials_grace_minutes)
+
+
 def credentials_window_open(event: Event, now: datetime | None = None) -> bool:
     now = now or datetime.now(UTC)
     return now <= credentials_deadline(event)
+
+
+def join_window_open(event: Event, now: datetime | None = None) -> bool:
+    now = now or datetime.now(UTC)
+    if event.status in {
+        EventStatus.CANCELLED,
+        EventStatus.REJECTED,
+        EventStatus.DRAFT,
+        EventStatus.FINISHED,
+    }:
+        return False
+    return now <= fill_deadline(event)
 
 
 def creds_were_provided(creds: RoomCredential | None) -> bool:

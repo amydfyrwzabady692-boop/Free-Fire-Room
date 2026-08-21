@@ -499,8 +499,8 @@ async def wiz_prize(message: Message, state: FSMContext, db: AsyncSession, db_us
     await state.update_data(prize_summary=text)
     await state.set_state(EventWizardSG.banner)
     await message.answer(
-        "اگر بنر یا عکس کاستوم دارید همین‌جا بفرستید تا روی کارت دیده شود.\n"
-        "اگر عکس ندارید «رد کردن» را بزنید.",
+        "اگر عکس یا بنر خودتان را دارید همین‌جا بفرستید — جدا از جایزه روی کارت دیده می‌شود.\n"
+        "اگر عکس نمی‌خواهید «رد کردن» را بزنید. ربات عکس نمی‌سازد.",
         reply_markup=wizard_nav(include_skip=True),
     )
 
@@ -538,11 +538,16 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
         await _ask_prize(message, state)
         return
     org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
+    title = (data.get("title") or "").strip() or "کاستوم جایزه‌دار"
+    starts_at = dt.fromisoformat(data["starts_at"])
+    fill_end = starts_at + timedelta(
+        minutes=get_settings().custom_fill_minutes + get_settings().credentials_grace_minutes
+    )
     payload = {
-        "title": prize[:160],
-        "starts_at": dt.fromisoformat(data["starts_at"]),
-        "registration_ends_at": dt.fromisoformat(data["registration_ends_at"]),
-        "credentials_send_at": dt.fromisoformat(data["credentials_send_at"]),
+        "title": title[:160],
+        "starts_at": starts_at,
+        "registration_ends_at": fill_end,
+        "credentials_send_at": starts_at,
         "channel_id": UUID(data["channel_id"]),
         "required_channel_ids": [UUID(x) for x in data.get("required_channel_ids") or []],
         "capacity": 100,
@@ -563,38 +568,32 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
         await submit_for_publish(db, event, db_user.id)
         link = event_deep_link(event.public_token)
         n_ch = len(payload["required_channel_ids"])
-        caption = (
-            f"🎁 <b>{esc(prize)}</b>\n"
+        details = (
+            f"🎁 <b>جایزه</b>\n{esc(prize)}\n"
             f"🕐 {format_local(event.starts_at, event.timezone)}\n"
             f"📢 کانال جوین اجباری: {n_ch} مورد\n\n"
             f"<b>لینک این کاستوم:</b>\n{link}\n\n"
-            "همین بنر را در کانال بگذارید. با باز کردن لینک، جایزه و شرایط دیده می‌شود.\n"
-            "سر ساعت اول ROOM ID را می‌فرستید، بعد PASS را جدا."
+            "جایزه همین متن است. اگر عکس فرستاده باشید جدا بالای همین پیام است.\n"
+            f"سر ساعت اول ROOM ID را می‌فرستید (۵ دقیقه مهلت). "
+            f"{get_settings().custom_fill_minutes} دقیقه هم برای پر شدن کاستوم فرصت هست؛ "
+            "هر کس در این مدت شرایط را کامل کند مشخصات برایش می‌آید.\n"
+            "لینک را در کانال بگذارید."
         )
-        try:
-            from app.services.posters import as_input_file, render_event_poster
-
-            png = render_event_poster(
-                prize=prize,
-                when=format_local(event.starts_at, event.timezone),
-                host=db_user.first_name or "برگزارکننده",
-                channels=n_ch,
-            )
-            await message.answer_photo(
-                as_input_file(png),
-                caption=caption[:1024],
-                reply_markup=event_share_kb(link),
-            )
-        except Exception:
-            await message.answer(caption, reply_markup=event_share_kb(link))
+        banner = data.get("banner_file_id")
+        if banner:
+            try:
+                await message.answer_photo(banner)
+            except Exception:
+                pass
+        await message.answer(details, reply_markup=event_share_kb(link))
         if event.status == EventStatus.PUBLISHED:
             await message.answer(
-                "کاستوم در فهرست همه قرار گرفت. بنر بالا را در کانال فوروارد کنید.",
+                "کاستوم در فهرست همه قرار گرفت.",
                 reply_markup=await menu_for(db, db_user),
             )
         else:
             await message.answer(
-                "کاستوم ثبت شد و منتظر تأیید مدیر است. بعد از تأیید همین بنر را در کانال بگذارید.",
+                "کاستوم ثبت شد و منتظر تأیید مدیر است.",
                 reply_markup=await menu_for(db, db_user),
             )
     except AppError as exc:
@@ -674,24 +673,19 @@ async def org_link(cb: CallbackQuery, db: AsyncSession, db_user: User):
         return
     link = event_deep_link(e.public_token)
     n_ch = len([c for c in (e.required_channels or []) if c.is_active])
-    caption = (
-        f"🎁 <b>{esc(e.prize_summary or e.title)}</b>\n"
+    details = (
+        f"🎁 <b>جایزه</b>\n{esc(e.prize_summary or e.title)}\n"
         f"🕐 {format_local(e.starts_at, e.timezone)}\n"
         f"📢 کانال جوین اجباری: {n_ch} مورد\n\n"
         f"<b>لینک اختصاصی:</b>\n{link}\n\n"
-        "همین بنر را در کانال بگذارید."
+        "جایزه متن جداست. اگر عکس داشته باشید جدا فرستاده می‌شود."
     )
-    try:
-        from app.services.posters import as_input_file, event_poster_bytes
-
-        png = event_poster_bytes(e, channels=n_ch)
-        await cb.message.answer_photo(
-            as_input_file(png),
-            caption=caption[:1024],
-            reply_markup=event_share_kb(link),
-        )
-    except Exception:
-        await cb.message.answer(caption, reply_markup=event_share_kb(link))
+    if e.banner_file_id:
+        try:
+            await cb.message.answer_photo(e.banner_file_id)
+        except Exception:
+            pass
+    await cb.message.answer(details, reply_markup=event_share_kb(link))
     await cb.answer()
 
 
@@ -787,7 +781,8 @@ async def ask_live_creds(cb: CallbackQuery, db: AsyncSession, db_user: User, sta
         "اول فقط <b>ROOM ID</b> را بفرستید.\n"
         "نمونه: <code>12345678</code>\n\n"
         "بعد ربات از شما <b>PASS</b> را جدا می‌پرسد.\n"
-        f"⏳ مهلت: {grace} دقیقه (حدود {remain} دقیقه مانده).",
+        f"⏳ مهلت ارسال: {grace} دقیقه (حدود {remain} دقیقه مانده).\n"
+        f"⏳ پر شدن کاستوم: {get_settings().custom_fill_minutes} دقیقه بعد از ساعت شروع.",
         reply_markup=wizard_nav(),
     )
     await cb.answer()
@@ -836,8 +831,9 @@ async def _save_and_dispatch_creds(
 
     send_event_credentials.delay(str(event.id))
     await message.answer(
-        "✅ گرفته شد. در حال ارسال برای کسانی که جوین را کامل کرده‌اند.\n\n"
-        f"{room_pair(esc(room_id), esc(password))}",
+            "✅ گرفته شد. در حال ارسال برای کسانی که جوین را کامل کرده‌اند.\n"
+            f"تا {get_settings().custom_fill_minutes} دقیقه بعد هم اگر کسی شرایط را کامل کند، مشخصات برایش می‌آید.\n\n"
+            f"{room_pair(esc(room_id), esc(password))}",
         reply_markup=await menu_for(db, db_user),
     )
     return True

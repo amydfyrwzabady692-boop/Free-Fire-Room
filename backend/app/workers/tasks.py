@@ -180,8 +180,19 @@ async def _send_credentials(db, job: ScheduledJob) -> None:
             return
         creds.sent_at = datetime.now(UTC)
         event.status = EventStatus.STARTED
-        job.status = JobStatus.DONE
-        job.completed_at = datetime.now(UTC)
+        from app.services.reports import fill_deadline
+
+        now = datetime.now(UTC)
+        if now < fill_deadline(event):
+            job.status = JobStatus.PENDING
+            job.run_at = now + timedelta(minutes=2)
+            job.attempts = 0
+            job.max_attempts = 40
+            job.last_error = None
+            job.completed_at = None
+        else:
+            job.status = JobStatus.DONE
+            job.completed_at = now
         log.info("credentials_sent", event_id=str(event.id), sent=sent, failed=failed, skipped=skipped)
     finally:
         redis.delete(lock_key)
@@ -229,8 +240,9 @@ async def _prompt_organizer_for_creds(bot, db, event: Event) -> None:
             "اول فقط <b>ROOM ID</b> را بفرستید.\n"
             "بعد ربات از شما <b>PASS</b> را جدا می‌پرسد.\n\n"
             f"⏳ فقط {grace} دقیقه فرصت دارید. اگر نفرستید اخطار می‌گیرید و بازیکن‌ها می‌توانند گزارش بدهند.\n"
-            "دکمه سبز را بزنید و اول ROOM ID را بفرستید.\n"
-            "بعد فقط برای کسانی که کانال‌های این کاستوم را جوین کرده‌اند ارسال می‌شود.",
+            f"بعد از ارسال، {get_settings().custom_fill_minutes} دقیقه برای پر شدن کاستوم فرصت هست؛ "
+            "هر کس در این مدت شرایط را کامل کند ROOM ID و PASS برایش ارسال می‌شود.\n"
+            "دکمه سبز را بزنید و اول ROOM ID را بفرستید.",
             reply_markup=send_creds_kb(event.public_token),
         )
     except Exception:
@@ -470,14 +482,6 @@ async def _send_daily_custom_digest(db) -> None:
 
     text = format_daily_digest(events)
     markup = event_list_kb(digest_button_items(events), mode="digest")
-    png = None
-    try:
-        from app.services.posters import as_input_file, digest_poster_bytes
-
-        png = digest_poster_bytes(events)
-    except Exception:
-        log.exception("daily_digest_poster_failed")
-        png = None
     users = db.scalars(
         select(User).where(
             User.deleted_at.is_(None),
@@ -493,16 +497,7 @@ async def _send_daily_custom_digest(db) -> None:
             skipped += 1
             continue
         try:
-            if png is not None:
-                caption = text if len(text) <= 1024 else text[:1000] + "…"
-                await bot.send_photo(
-                    user.telegram_id,
-                    as_input_file(png, "digest-banner.png"),
-                    caption=caption,
-                    reply_markup=markup,
-                )
-            else:
-                await bot.send_message(user.telegram_id, text, reply_markup=markup)
+            await bot.send_message(user.telegram_id, text, reply_markup=markup)
             sent += 1
         except TelegramRetryAfter as exc:
             await asyncio.sleep(exc.retry_after + 0.5)

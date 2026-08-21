@@ -32,12 +32,10 @@ def _validate_times(starts_at, registration_ends_at, credentials_send_at) -> Non
             "starts_too_soon",
             f"زمان برگزاری باید حداقل {MIN_START_LEAD_MINUTES} دقیقه بعد باشد تا بازیکن‌ها وقت جوین داشته باشند.",
         )
-    if registration_ends_at > starts_at:
-        raise ValidationAppError("reg_after_start", "پایان ثبت‌نام نمی‌تواند بعد از شروع بازی باشد.")
     if credentials_send_at > starts_at:
         raise ValidationAppError("creds_after_start", "ارسال ROOM ID / PASS نمی‌تواند بعد از شروع بازی باشد.")
-    if credentials_send_at < registration_ends_at:
-        raise ValidationAppError("creds_before_reg_end", "ارسال ROOM ID / PASS باید هم‌زمان یا بعد از پایان ثبت‌نام باشد.")
+    if registration_ends_at < credentials_send_at:
+        raise ValidationAppError("reg_before_creds", "مهلت جوین باید تا بعد از ارسال ROOM ID / PASS باز بماند.")
 
 
 async def create_event(db: AsyncSession, organizer: Organizer, data: dict, actor_id) -> Event:

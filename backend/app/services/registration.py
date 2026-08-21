@@ -18,6 +18,7 @@ from app.models.user import User
 from app.services.audit import write_audit
 from app.services.bans import assert_not_banned
 from app.core.enums import BanScope
+from app.services.reports import join_window_open
 from app.services.requirements import evaluate_requirements
 
 log = get_logger(__name__)
@@ -63,14 +64,12 @@ async def register_user(
     if event.deleted_at is not None or not event.deep_link_active:
         raise NotFoundError("event_not_found", "این کاستوم در دسترس نیست یا لغو شده است.")
 
-    if event.status not in {EventStatus.PUBLISHED, EventStatus.FULL}:
+    if event.status not in {EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED}:
         raise ValidationAppError("event_not_open", "این کاستوم در حال حاضر برای ثبت‌نام باز نیست.")
 
     now = datetime.now(UTC)
-    if now > event.registration_ends_at:
-        raise ValidationAppError("registration_closed", "مهلت ثبت‌نام به پایان رسیده است.")
-    if now >= event.starts_at:
-        raise ValidationAppError("event_started", "این کاستوم شروع شده و ثبت‌نام جدید ممکن نیست.")
+    if not join_window_open(event, now):
+        raise ValidationAppError("registration_closed", "مهلت جوین و پر شدن این کاستوم تمام شده است.")
 
     existing = await db.scalar(
         select(Registration).where(Registration.event_id == event.id, Registration.user_id == user.id)
@@ -132,7 +131,7 @@ async def register_user(
         holder.confirmed_at = now
         holder.conditions_met_at = now
         locked.confirmed_count += 1
-        if locked.confirmed_count >= locked.capacity:
+        if locked.confirmed_count >= locked.capacity and locked.status == EventStatus.PUBLISHED:
             locked.status = EventStatus.FULL
         await write_audit(
             db,
@@ -221,7 +220,8 @@ async def promote_waitlist(db: AsyncSession, event_id: UUID) -> Registration | N
     entry.is_active = False
     entry.promoted_at = now
     if event.confirmed_count >= event.capacity:
-        event.status = EventStatus.FULL
+        if event.status == EventStatus.PUBLISHED:
+            event.status = EventStatus.FULL
     elif event.status == EventStatus.FULL:
         event.status = EventStatus.PUBLISHED
     await db.flush()
