@@ -157,7 +157,7 @@ def main_menu(*, admin: bool = False) -> ReplyKeyboardMarkup:
 
 
 def hide_menu_kb() -> ReplyKeyboardRemove:
-    return ReplyKeyboardRemove(remove_keyboard=True)
+    return ReplyKeyboardRemove()
 
 
 def home_kb() -> InlineKeyboardMarkup:

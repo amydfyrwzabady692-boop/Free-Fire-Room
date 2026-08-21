@@ -23,18 +23,30 @@ def get_bot() -> Bot:
 
 
 async def setup_bot_profile(bot: Bot) -> None:
-    await bot.set_my_commands(
-        [
-            BotCommand(command="start", description="شروع مجدد"),
-            BotCommand(command="customs", description="کاستوم‌های جایزه‌دار"),
-            BotCommand(command="host", description="ثبت کاستوم"),
-            BotCommand(command="winner", description="اعلام برنده"),
-            BotCommand(command="help", description="راهنما و قوانین"),
-            BotCommand(command="cancel", description="لغو عملیات جاری"),
-        ]
-    )
-    await bot.set_my_description(T.INTRO)
-    await bot.set_my_short_description(T.BOT_ABOUT)
+    from app.core.logging import get_logger
+
+    log = get_logger("bot")
+    try:
+        await bot.set_my_commands(
+            [
+                BotCommand(command="start", description="شروع مجدد"),
+                BotCommand(command="customs", description="کاستوم‌های جایزه‌دار"),
+                BotCommand(command="host", description="ثبت کاستوم"),
+                BotCommand(command="winner", description="اعلام برنده"),
+                BotCommand(command="help", description="راهنما و قوانین"),
+                BotCommand(command="cancel", description="لغو عملیات جاری"),
+            ]
+        )
+    except Exception:
+        log.exception("bot_set_commands_failed")
+    try:
+        await bot.set_my_description(T.BOT_DESCRIPTION[:512])
+    except Exception:
+        log.exception("bot_set_description_failed")
+    try:
+        await bot.set_my_short_description(T.BOT_ABOUT[:120])
+    except Exception:
+        log.exception("bot_set_short_description_failed")
 
 
 def get_dispatcher() -> Dispatcher:

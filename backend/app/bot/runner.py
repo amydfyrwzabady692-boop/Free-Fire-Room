@@ -14,7 +14,10 @@ async def _run_polling() -> None:
     bot = get_bot()
     dp = get_dispatcher()
     await bot.delete_webhook(drop_pending_updates=False)
-    await setup_bot_profile(bot)
+    try:
+        await setup_bot_profile(bot)
+    except Exception:
+        log.exception("bot_profile_setup_failed")
     log.info("bot_polling_start")
     await dp.start_polling(bot)
 

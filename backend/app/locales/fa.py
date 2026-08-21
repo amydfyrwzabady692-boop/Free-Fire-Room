@@ -37,6 +37,13 @@ INTRO = (
     f"{CROWN} خودتان هم می‌توانید کاستوم جایزه‌دار بگذارید. جایزه بر عهده برگزارکننده است، نه ربات."
 )
 
+# BotFather description — Telegram max 512 chars
+BOT_DESCRIPTION = (
+    "ربات کاستوم جایزه‌دار Free Fire. وابسته به Garena نیست.\n"
+    "کاستوم را باز کنید، کانال‌های جوین اجباری را عضو شوید و «عضو شدم» را بزنید.\n"
+    "ROOM ID و PASS داخل ربات می‌آید (۵ دقیقه ارسال + ۲۰ دقیقه پر شدن کاستوم)."
+)
+
 # BotFather /setabouttext — max 120 chars
 BOT_ABOUT = "🎮 کاستوم جایزه‌دار Free Fire. جوین کن؛ سر ساعت ROOM ID و PASS داخل ربات می‌آید."
 
