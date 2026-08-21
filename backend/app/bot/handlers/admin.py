@@ -813,7 +813,9 @@ async def admin_anns(cb: CallbackQuery, db: AsyncSession, db_user: User):
             inline_keyboard=[[ibtn("مخفی کردن", callback_data=f"adm:ah:{row.id}", style=DANGER)]]
         )
         await cb.message.answer(
-            f"<b>{esc(row.title)}</b>\nکانال: {esc(row.channel_name)}\nزمان: {format_local(row.starts_at, row.timezone)}",
+            f"کانال: {esc(row.channel_name)}\n"
+            f"لینک: {esc(row.channel_url or '—')}\n"
+            f"ساعت: {format_local(row.starts_at, row.timezone)}",
             reply_markup=kb,
         )
     await cb.message.answer("بازگشت:", reply_markup=_back_kb())

@@ -9,7 +9,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.access import menu_for
-from app.bot.helpers import esc, normalize_join_url, replace_callback_view
+from app.bot.helpers import esc, replace_callback_view
 from app.bot.keyboards.common import (
     DANGER,
     PRIMARY,
@@ -28,6 +28,7 @@ from app.core.time import combine_local_date_and_clock, format_jalali_date, form
 from app.models.announcement import CustomAnnouncement
 from app.models.user import User
 from app.services.announcements import (
+    channel_from_link,
     create_announcement,
     delete_own_announcement,
     list_upcoming_announcements,
@@ -37,41 +38,49 @@ from app.services.events import MIN_START_LEAD_MINUTES
 
 router = Router(name="announce")
 
+NEWS_NOTE = (
+    "این فقط اطلاع‌رسانی است. ROOM ID و PASS داخل ربات نمی‌آید "
+    "مگر خود برگزارکننده کاستوم را از «ثبت کاستوم» ثبت کرده باشد."
+)
+
+
+def _ann_url(row: CustomAnnouncement) -> str | None:
+    if row.channel_url:
+        return row.channel_url
+    if row.channel_username:
+        return f"https://t.me/{row.channel_username.lstrip('@')}"
+    return None
+
 
 def _card(row: CustomAnnouncement) -> str:
-    extra = ""
-    links = row.extra_join_links or []
-    if links:
-        extra = "\nکانال‌های پیشنهادی: " + "، ".join(
-            esc(str(x.get("label") or x.get("url"))) for x in links[:6]
-        )
+    when = format_local(row.starts_at, row.timezone)
+    channel = row.channel_name or row.channel_url or "کانال کاستوم"
     return (
-        f"<b>{esc(row.title)}</b>\n"
-        f"کانال: {esc(row.channel_name)}\n"
-        f"زمان (شمسی): {format_local(row.starts_at, row.timezone)}\n"
-        f"جایزه: {esc(row.prize_summary or '—')}\n"
-        f"{esc(row.description or '')}"
-        f"{extra}\n\n"
-        "این مورد اطلاع‌رسانی است. ROOM ID و PASS را ربات ارسال نمی‌کند مگر برگزارکننده کاستوم رسمی ثبت کرده باشد."
+        f"خبر کاستوم\n"
+        f"کانال: {esc(channel)}\n"
+        f"ساعت (شمسی): {when}\n\n"
+        f"{NEWS_NOTE}"
     )
 
 
 def _ann_kb(row: CustomAnnouncement, *, owner: bool = False) -> InlineKeyboardMarkup:
     buttons: list[list[InlineKeyboardButton]] = []
-    url = row.channel_url
-    if not url and row.channel_username:
-        url = f"https://t.me/{row.channel_username.lstrip('@')}"
+    url = _ann_url(row)
     if url:
-        buttons.append([ibtn(f"عضویت در {row.channel_name[:24]}", url=url, style=PRIMARY)])
-    for item in row.extra_join_links or []:
-        if item.get("url"):
-            buttons.append(
-                [ibtn(f"عضویت در {str(item.get('label') or 'کانال')[:24]}", url=item["url"], style=PRIMARY)]
-            )
+        buttons.append([ibtn("ورود به کانال", url=url, style=PRIMARY)])
     if owner:
         buttons.append([ibtn("حذف اطلاع‌رسانی من", callback_data=f"ann:del:{row.id}", style=DANGER)])
     buttons.append([ibtn("بازگشت", callback_data="ann:list", style=PRIMARY)])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [ibtn("تأیید و ثبت", callback_data="ann:ok", style=SUCCESS)],
+            [ibtn("انصراف", callback_data="wiz:cancel", style=DANGER)],
+        ]
+    )
 
 
 @router.message(F.text.in_(labeled("اطلاع‌رسانی", "ثبت اطلاع‌رسانی")))
@@ -86,13 +95,13 @@ async def list_ann(event: Message | CallbackQuery, db: AsyncSession, db_user: Us
     if not rows:
         text = (
             "اطلاع‌رسانی فعالی نیست.\n"
-            "اگر از کاستوم جایزه‌داری خبر دارید، دکمه «ثبت اطلاع‌رسانی» را بزنید. "
-            "این بخش فقط خبر است؛ ROOM ID و PASS نمی‌فرستد."
+            "اگر از کاستومی خبر دارید، فقط لینک کانال و ساعت را ثبت کنید. "
+            "شرایط جوین و ROOM ID / PASS در این بخش نیست؛ کاربران فقط خبردار می‌شوند."
         )
         kb = announcement_list_kb([])
     else:
         items = [(str(r.id), f"{format_local(r.starts_at, r.timezone)} | {r.channel_name}") for r in rows]
-        text = "اطلاع‌رسانی کاستوم‌های جایزه‌دار:"
+        text = "خبر کاستوم‌ها (فقط لینک کانال و ساعت):"
         kb = announcement_list_kb(items)
     if isinstance(event, CallbackQuery):
         await replace_callback_view(event, text, inline=kb)
@@ -114,25 +123,29 @@ async def start_ann(event: Message | CallbackQuery, db: AsyncSession, db_user: U
         else:
             await msg.answer(text)
         return
-    await state.set_state(AnnounceSG.channel_name)
+    await state.set_state(AnnounceSG.channel_link)
     await msg.answer(
-        "نام کانال برگزارکننده را بفرستید.\nمثال: FF Diamond Room\nبرای انصراف /cancel",
+        "فقط لینک یا @username کانال را بفرستید.\n"
+        "نمونه: https://t.me/example یا @example\n"
+        f"{NEWS_NOTE}\n"
+        "برای انصراف /cancel",
         reply_markup=wizard_nav(),
     )
     if isinstance(event, CallbackQuery):
         await event.answer()
 
 
-@router.message(AnnounceSG.channel_name)
-async def ann_name(message: Message, state: FSMContext):
-    name = (message.text or "").strip()
-    if len(name) < 2:
-        await message.answer("نام کانال خیلی کوتاه است.")
+@router.message(AnnounceSG.channel_link)
+async def ann_link(message: Message, state: FSMContext):
+    try:
+        parsed = channel_from_link(message.text or "")
+    except AppError as exc:
+        await message.answer(exc.message)
         return
-    await state.update_data(channel_name=name, title=f"کاستوم {name}")
+    await state.update_data(**parsed)
     await state.set_state(AnnounceSG.starts_at)
     await message.answer(
-        "روز کاستوم را انتخاب کنید (شمسی، تهران).",
+        "ساعت کاستوم را مشخص کنید. اول روز را انتخاب کنید (شمسی، تهران).",
         reply_markup=pick_date_kb("and"),
     )
 
@@ -178,84 +191,22 @@ async def ann_time(message: Message, state: FSMContext):
         await message.answer("ساعت نامعتبر است. نمونه: 22:00 یا 22")
         return
     if when <= dt.now(UTC) + timedelta(minutes=MIN_START_LEAD_MINUTES):
-        await message.answer(
-            f"ساعت باید حداقل {MIN_START_LEAD_MINUTES} دقیقه بعد باشد."
-        )
+        await message.answer(f"ساعت باید حداقل {MIN_START_LEAD_MINUTES} دقیقه بعد باشد.")
         return
     await state.update_data(starts_at=when.isoformat())
-    await state.set_state(AnnounceSG.channel_link)
-    await message.answer(
-        f"زمان: {format_local(when)}\nلینک یا @username کانال را بفرستید. اگر ندارید «-» بفرستید."
-    )
-
-
-@router.message(AnnounceSG.channel_link)
-async def ann_link(message: Message, state: FSMContext):
-    parsed = normalize_join_url(message.text or "")
-    if parsed:
-        label, url = parsed
-        username = label if not url.startswith("http") or "t.me/" in url else None
-        if url.startswith("https://t.me/"):
-            username = url.rsplit("/", 1)[-1]
-        await state.update_data(channel_url=url, channel_username=username)
-    await state.set_state(AnnounceSG.prize)
-    await message.answer("خلاصه جایزه را بفرستید یا «-» برای رد.")
-
-
-@router.message(AnnounceSG.prize)
-async def ann_prize(message: Message, state: FSMContext):
-    text = None if (message.text or "").strip() == "-" else (message.text or "").strip()
-    await state.update_data(prize_summary=text, extra_join_links=[])
-    await state.set_state(AnnounceSG.extra_links)
-    await message.answer(
-        "اگر کانال دیگری هم باید جوین شوند لینک یا @username را بفرستید.\n"
-        "چند مورد پشت‌سرهم بفرستید. وقتی تمام شد «-» بفرستید."
-    )
-
-
-@router.message(AnnounceSG.extra_links)
-async def ann_extra(message: Message, state: FSMContext):
-    text = (message.text or "").strip()
-    data = await state.get_data()
-    links = list(data.get("extra_join_links") or [])
-    if text != "-":
-        parsed = normalize_join_url(text)
-        if not parsed:
-            await message.answer("لینک نامعتبر است. @username یا لینک تلگرام بفرستید یا «-».")
-            return
-        label, url = parsed
-        links.append({"label": label, "url": url})
-        await state.update_data(extra_join_links=links)
-        await message.answer(f"اضافه شد ({len(links)}). مورد بعدی یا «-».")
-        return
     await state.set_state(AnnounceSG.preview)
     await message.answer(
-        "پیش‌نمایش:\n"
-        f"کانال: {esc(data.get('channel_name'))}\n"
-        f"زمان: {format_local(dt.fromisoformat(data['starts_at']))}\n"
-        f"جایزه: {esc(data.get('prize_summary') or '—')}\n"
-        f"لینک‌های جوین: {len(links) + (1 if data.get('channel_url') else 0)}\n\n"
-        "اگر درست است تأیید کنید.",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [ibtn("تأیید و ثبت", callback_data="ann:ok", style=SUCCESS)],
-                [ibtn("انصراف", callback_data="wiz:cancel", style=DANGER)],
-            ]
-        ),
+        "پیش‌نمایش خبر:\n"
+        f"کانال: {esc(data.get('channel_name') or data.get('channel_url'))}\n"
+        f"ساعت: {format_local(when)}\n\n"
+        f"{NEWS_NOTE}",
+        reply_markup=_confirm_kb(),
     )
 
 
 @router.message(AnnounceSG.preview, ~F.text.in_(labeled("تأیید", "انتشار")))
 async def ann_preview_hint(message: Message):
-    await message.answer(
-        "برای ثبت، دکمه سبز «تأیید و ثبت» را بزنید. برای انصراف دکمه قرمز.",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [ibtn("تأیید و ثبت", callback_data="ann:ok", style=SUCCESS)],
-                [ibtn("انصراف", callback_data="wiz:cancel", style=DANGER)],
-            ]
-        ),
-    )
+    await message.answer("برای ثبت، دکمه سبز «تأیید و ثبت» را بزنید.", reply_markup=_confirm_kb())
 
 
 @router.message(AnnounceSG.preview, F.text.in_(labeled("تأیید", "انتشار")))
@@ -285,8 +236,8 @@ async def ann_finish(event: Message | CallbackQuery, state: FSMContext, db: Asyn
         return
     await state.clear()
     await msg.answer(
-        "اطلاع‌رسانی ثبت شد و در بخش اطلاع‌رسانی دیده می‌شود.\n"
-        "اگر خودتان کانال دارید و می‌خواهید ربات سر ساعت ROOM ID و PASS را بفرستد، از «ثبت کاستوم جایزه‌دار» استفاده کنید.",
+        "خبر ثبت شد. کاربران در بخش اطلاع‌رسانی لینک کانال و ساعت را می‌بینند.\n"
+        "ROOM ID و PASS از ربات نمی‌رود مگر خودتان از «ثبت کاستوم» کاستوم را ثبت کنید.",
         reply_markup=await menu_for(db, db_user),
     )
     await msg.answer(_card(row), reply_markup=_ann_kb(row, owner=True))

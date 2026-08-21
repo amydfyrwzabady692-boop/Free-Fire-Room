@@ -27,12 +27,9 @@ class CredsWaitSG(StatesGroup):
 
 
 class AnnounceSG(StatesGroup):
-    channel_name = State()
+    channel_link = State()
     starts_at = State()
     starts_time = State()
-    channel_link = State()
-    prize = State()
-    extra_links = State()
     preview = State()
 
 

@@ -4,6 +4,7 @@ import pytest
 
 from app.core.errors import ValidationAppError
 from app.models.announcement import CustomAnnouncement
+from app.services.announcements import channel_from_link
 from app.services.events import _validate_times
 from tests.conftest import make_user
 
@@ -43,3 +44,21 @@ def test_announcement_row(db):
     found.status = "hidden"
     db.flush()
     assert db.get(CustomAnnouncement, row.id).status == "hidden"
+
+
+def test_announcement_channel_from_username():
+    parsed = channel_from_link("@ffroom")
+    assert parsed["channel_url"] == "https://t.me/ffroom"
+    assert parsed["channel_name"] == "@ffroom"
+    assert parsed["channel_username"] == "ffroom"
+
+
+def test_announcement_channel_from_invite_has_no_username():
+    parsed = channel_from_link("https://t.me/+AbCdEf")
+    assert parsed["channel_url"] == "https://t.me/+AbCdEf"
+    assert parsed["channel_username"] is None
+
+
+def test_announcement_rejects_empty_link():
+    with pytest.raises(ValidationAppError):
+        channel_from_link("-")
