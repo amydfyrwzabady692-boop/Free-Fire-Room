@@ -1,4 +1,4 @@
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 from app.bot.helpers import add_bot_to_channel_url
 
@@ -59,6 +59,7 @@ _MENU_LABELS = (
     "ثبت اطلاع‌رسانی",
     "برنده",
     "برنده شدم",
+    "بستن منو",
 )
 
 
@@ -142,6 +143,7 @@ def main_menu(*, admin: bool = False) -> ReplyKeyboardMarkup:
         [kbtn("پروفایل", PRIMARY), kbtn("پشتیبانی", SUCCESS)],
         [kbtn("نتایج و تاریخچه", PRIMARY), kbtn("اعلان‌های من", PRIMARY)],
         [kbtn("اطلاع‌رسانی", SUCCESS), kbtn("شروع مجدد", DANGER)],
+        [kbtn("بستن منو", DANGER)],
     ]
     if admin:
         rows.append([kbtn("پنل مالک ربات", PRIMARY)])
@@ -149,8 +151,13 @@ def main_menu(*, admin: bool = False) -> ReplyKeyboardMarkup:
         keyboard=rows,
         resize_keyboard=True,
         is_persistent=False,
+        one_time_keyboard=False,
         input_field_placeholder="کاستوم جایزه‌دار Free Fire",
     )
+
+
+def hide_menu_kb() -> ReplyKeyboardRemove:
+    return ReplyKeyboardRemove(remove_keyboard=True)
 
 
 def home_kb() -> InlineKeyboardMarkup:

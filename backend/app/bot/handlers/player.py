@@ -21,6 +21,7 @@ from app.bot.keyboards.common import (
     event_list_kb,
     help_back_kb,
     help_kb,
+    hide_menu_kb,
     home_kb,
     ibtn,
     labeled,
@@ -98,6 +99,11 @@ async def _show_panel(event: Message | CallbackQuery, text: str, markup) -> None
     await event.answer(text, reply_markup=markup)
 
 
+async def _send_fresh_menu(message: Message, db: AsyncSession, db_user: User, text: str) -> None:
+    await message.answer("منوی قبلی بسته شد.", reply_markup=hide_menu_kb())
+    await message.answer(text, reply_markup=await menu_for(db, db_user))
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, command: CommandObject, db: AsyncSession, db_user: User, state: FSMContext):
     await state.clear()
@@ -117,16 +123,20 @@ async def cmd_start(message: Message, command: CommandObject, db: AsyncSession, 
 async def _welcome_after_onboarding(message: Message, db: AsyncSession, db_user: User) -> None:
     kind, token = _parse_start(db_user.start_payload)
     if kind == "event" and token:
-        await message.answer(
+        await _send_fresh_menu(
+            message,
+            db,
+            db_user,
             "از لینک اختصاصی این کاستوم آمدید.\n"
             "🎁 جایزه، شرایط و کانال‌های جوین اجباری را ببینید؛ عضو شوید تا سر ساعت ROOM ID و PASS برایتان بیاید.",
-            reply_markup=await menu_for(db, db_user),
         )
         await _show_event(message, db, db_user, token)
         return
-    await message.answer(
+    await _send_fresh_menu(
+        message,
+        db,
+        db_user,
         f"{T.INTRO}\n\n✨ منوی اصلی آماده است. جزئیات بیشتر در «راهنما و قوانین».",
-        reply_markup=await menu_for(db, db_user),
     )
 
 
@@ -138,6 +148,15 @@ async def restart_menu(message: Message, db: AsyncSession, db_user: User, state:
     if not await _ensure_onboarding(message, db_user, db):
         return
     await _welcome_after_onboarding(message, db, db_user)
+
+
+@router.message(F.text.in_(labeled("بستن منو")))
+async def close_menu(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "منوی پایین بسته شد.\nبرای باز شدن دوباره /start را بزنید.",
+        reply_markup=hide_menu_kb(),
+    )
 
 
 @router.message(Command("cancel"))

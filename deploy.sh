@@ -111,8 +111,11 @@ fi
 echo "در حال build و اجرا..."
 if ! docker compose up -d --build; then
   echo
-  echo "deploy failed — api logs:"
-  docker compose logs api --tail 150 || true
+  echo "deploy failed — migrate logs:"
+  docker compose logs migrate --tail 200 || true
+  echo
+  echo "api logs:"
+  docker compose logs api --tail 80 || true
   echo
   echo "container status:"
   docker compose ps -a || true

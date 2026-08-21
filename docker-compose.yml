@@ -36,6 +36,8 @@ services:
       - -c
       - |
         set -e
+        echo "migrate: alembic current"
+        alembic current
         echo "migrate: alembic upgrade"
         alembic upgrade head
         echo "migrate: bootstrap"

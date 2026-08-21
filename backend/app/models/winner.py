@@ -32,8 +32,8 @@ class WinnerClaim(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     reviewed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    event: Mapped["Event"] = relationship()
-    user: Mapped["User"] = relationship()
+    event: Mapped["Event"] = relationship(foreign_keys="WinnerClaim.event_id")
+    user: Mapped["User"] = relationship(foreign_keys="WinnerClaim.user_id")
 
 
 from app.models.event import Event  # noqa: E402
