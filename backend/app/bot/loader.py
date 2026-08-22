@@ -27,14 +27,10 @@ async def setup_bot_profile(bot: Bot) -> None:
 
     log = get_logger("bot")
     try:
+        await bot.delete_my_commands()
         await bot.set_my_commands(
             [
-                BotCommand(command="start", description="شروع مجدد"),
-                BotCommand(command="customs", description="کاستوم‌های جایزه‌دار"),
-                BotCommand(command="host", description="ثبت کاستوم"),
-                BotCommand(command="winner", description="اعلام برنده"),
-                BotCommand(command="help", description="راهنما و قوانین"),
-                BotCommand(command="cancel", description="لغو عملیات جاری"),
+                BotCommand(command="start", description="ری‌استارت"),
             ]
         )
     except Exception:

@@ -47,6 +47,9 @@ _MENU_LABELS = (
     "ثبت‌نام‌های من",
     "راهنما و قوانین",
     "راهنما",
+    "قوانین",
+    "ری‌استارت",
+    "ری استارت",
     "پروفایل",
     "پشتیبانی",
     "شروع مجدد",
@@ -135,18 +138,13 @@ def kbtn(text: str, style=None) -> KeyboardButton:
 
 
 def main_menu(*, admin: bool = False) -> ReplyKeyboardMarkup:
+    _ = admin
     rows = [
-        [kbtn("کاستوم‌های جایزه‌دار", SUCCESS), kbtn("کاستوم‌های امروز", PRIMARY)],
-        [kbtn("برنده", SUCCESS), kbtn("ثبت کاستوم", SUCCESS)],
-        [kbtn("پنل برگزارکننده", PRIMARY), kbtn("ثبت‌نام‌های من", PRIMARY)],
-        [kbtn("دعوت دوستان", SUCCESS), kbtn("راهنما و قوانین", PRIMARY)],
-        [kbtn("پروفایل", PRIMARY), kbtn("پشتیبانی", SUCCESS)],
-        [kbtn("نتایج و تاریخچه", PRIMARY), kbtn("اعلان‌های من", PRIMARY)],
-        [kbtn("اطلاع‌رسانی", SUCCESS), kbtn("شروع مجدد", DANGER)],
-        [kbtn("بستن منو", DANGER)],
+        [kbtn("کاستوم‌های جایزه‌دار", SUCCESS), kbtn("ثبت کاستوم", SUCCESS)],
+        [kbtn("قوانین", PRIMARY), kbtn("اطلاع‌رسانی", SUCCESS)],
+        [kbtn("برنده", SUCCESS), kbtn("پنل برگزارکننده", PRIMARY)],
+        [kbtn("دعوت دوستان", SUCCESS), kbtn("پشتیبانی", PRIMARY)],
     ]
-    if admin:
-        rows.append([kbtn("پنل مالک ربات", PRIMARY)])
     return ReplyKeyboardMarkup(
         keyboard=rows,
         resize_keyboard=True,

@@ -136,11 +136,11 @@ async def _welcome_after_onboarding(message: Message, db: AsyncSession, db_user:
         message,
         db,
         db_user,
-        f"{T.INTRO}\n\n✨ منوی اصلی آماده است. جزئیات بیشتر در «راهنما و قوانین».",
+        f"{T.INTRO}\n\n✨ منوی اصلی آماده است. جزئیات بیشتر در «قوانین».",
     )
 
 
-@router.message(F.text.in_(labeled("شروع مجدد")))
+@router.message(F.text.in_(labeled("شروع مجدد", "ری‌استارت", "ری استارت")))
 async def restart_menu(message: Message, db: AsyncSession, db_user: User, state: FSMContext):
     await state.clear()
     db_user.start_payload = None
@@ -716,7 +716,7 @@ async def history(event: Message | CallbackQuery, db: AsyncSession, db_user: Use
 
 
 @router.message(Command("help"))
-@router.message(F.text.in_(labeled("راهنما و قوانین", "راهنما")))
+@router.message(F.text.in_(labeled("راهنما و قوانین", "راهنما", "قوانین")))
 async def help_msg(message: Message):
     await message.answer(T.HELP + "\n\n" + T.DISCLAIMER, reply_markup=help_kb())
 
