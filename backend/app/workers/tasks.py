@@ -28,7 +28,7 @@ WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro) if asyncio.get_event_loop().is_running() else asyncio.run(coro)
+    return asyncio.run(coro)
 
 
 @celery_app.task(name="app.workers.tasks.dispatch_due_jobs", bind=True, max_retries=0)

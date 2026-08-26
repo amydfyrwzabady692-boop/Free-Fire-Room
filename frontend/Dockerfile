@@ -14,7 +14,7 @@ RUN npm run build
 
 FROM node:20-alpine AS runner
 WORKDIR /app
-ENV NODE_ENV=production
+ENV NODE_ENV=production NODE_OPTIONS=--max-old-space-size=128 NEXT_TELEMETRY_DISABLED=1
 RUN adduser -D -u 10001 nextjs
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static

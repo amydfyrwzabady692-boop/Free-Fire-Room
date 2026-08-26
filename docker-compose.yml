@@ -5,6 +5,18 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-ffroom}
       POSTGRES_USER: ${POSTGRES_USER:-ffroom}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-db-password}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=32MB
+      - -c
+      - work_mem=2MB
+      - -c
+      - maintenance_work_mem=32MB
+      - -c
+      - max_connections=40
+      - -c
+      - effective_cache_size=128MB
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -12,11 +24,21 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+    mem_limit: 192m
     restart: unless-stopped
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - 48mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ""
     volumes:
       - redisdata:/data
     healthcheck:
@@ -24,6 +46,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+    mem_limit: 64m
     restart: unless-stopped
 
   migrate:
@@ -46,6 +69,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    mem_limit: 192m
     restart: "no"
 
   api:
@@ -53,7 +77,17 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     env_file: .env
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "1"
+      - --timeout-keep-alive
+      - "5"
     depends_on:
       postgres:
         condition: service_healthy
@@ -67,6 +101,7 @@ services:
       timeout: 5s
       retries: 12
       start_period: 45s
+    mem_limit: 192m
     restart: unless-stopped
 
   bot:
@@ -82,6 +117,7 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    mem_limit: 192m
     restart: unless-stopped
 
   worker:
@@ -89,7 +125,19 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     env_file: .env
-    command: ["celery", "-A", "app.workers.celery_app:celery_app", "worker", "-l", "info", "-Q", "default,telegram,credentials,broadcasts", "--concurrency=1"]
+    command:
+      - celery
+      - -A
+      - app.workers.celery_app:celery_app
+      - worker
+      - -B
+      - -l
+      - warning
+      - -Q
+      - default,telegram,credentials,broadcasts
+      - --pool=solo
+      - --concurrency=1
+      - --schedule=/tmp/celerybeat-schedule
     depends_on:
       postgres:
         condition: service_healthy
@@ -97,21 +145,7 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    restart: unless-stopped
-
-  beat:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    env_file: .env
-    command: ["celery", "-A", "app.workers.celery_app:celery_app", "beat", "-l", "info", "--schedule=/tmp/celerybeat-schedule"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
+    mem_limit: 192m
     restart: unless-stopped
 
   frontend:
@@ -123,10 +157,11 @@ services:
     env_file: .env
     environment:
       NEXT_PUBLIC_API_BASE_URL: ${API_BASE_URL:-http://localhost:8080/api}
-      NODE_OPTIONS: --max-old-space-size=256
+      NODE_OPTIONS: --max-old-space-size=128
     depends_on:
       api:
         condition: service_healthy
+    mem_limit: 160m
     restart: unless-stopped
 
   nginx:
@@ -138,6 +173,7 @@ services:
     depends_on:
       - api
       - frontend
+    mem_limit: 32m
     restart: unless-stopped
 
 volumes:

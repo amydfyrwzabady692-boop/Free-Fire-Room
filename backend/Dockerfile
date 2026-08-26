@@ -10,7 +10,10 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends libpq5 curl && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --uid 10001 appuser
 COPY --from=builder /opt/venv /opt/venv
-ENV PATH="/opt/venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    MALLOC_ARENA_MAX=2
 COPY --chown=appuser:appuser . /app
 USER appuser
 EXPOSE 8000

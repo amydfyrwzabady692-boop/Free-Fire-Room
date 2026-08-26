@@ -109,7 +109,7 @@ if empty_or_placeholder BOT_USERNAME; then
 fi
 
 echo "در حال build و اجرا..."
-if ! docker compose up -d --build; then
+if ! docker compose up -d --build --remove-orphans; then
   echo
   echo "deploy failed — migrate logs:"
   docker compose logs migrate --tail 200 || true

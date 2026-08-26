@@ -13,10 +13,14 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     task_acks_late=True,
+    task_ignore_result=True,
+    result_expires=120,
     worker_prefetch_multiplier=1,
     task_reject_on_worker_lost=True,
+    broker_pool_limit=4,
+    broker_transport_options={"max_connections": 4},
     beat_schedule={
-        "dispatch-due-jobs": {"task": "app.workers.tasks.dispatch_due_jobs", "schedule": 5.0},
+        "dispatch-due-jobs": {"task": "app.workers.tasks.dispatch_due_jobs", "schedule": 15.0},
         "recheck-channel-admin": {
             "task": "app.workers.tasks.recheck_channel_admin",
             "schedule": crontab(minute=15),
