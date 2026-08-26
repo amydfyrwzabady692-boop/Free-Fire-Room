@@ -16,6 +16,8 @@ celery_app.conf.update(
     task_ignore_result=True,
     result_expires=120,
     worker_prefetch_multiplier=1,
+    worker_max_memory_per_child=120000,
+    worker_max_tasks_per_child=200,
     task_reject_on_worker_lost=True,
     broker_pool_limit=4,
     broker_transport_options={"max_connections": 4},

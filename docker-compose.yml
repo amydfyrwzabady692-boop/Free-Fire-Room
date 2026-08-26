@@ -1,3 +1,8 @@
+x-python-env: &python-env
+  MALLOC_ARENA_MAX: "2"
+  PYTHONMALLOC: malloc
+  PYTHONDONTWRITEBYTECODE: "1"
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -14,9 +19,12 @@ services:
       - -c
       - maintenance_work_mem=32MB
       - -c
+      - effective_cache_size=128MB
+      - -c
       - max_connections=40
       - -c
-      - effective_cache_size=128MB
+      - wal_buffers=4MB
+    mem_limit: 192m
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -24,7 +32,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    mem_limit: 192m
     restart: unless-stopped
 
   redis:
@@ -34,11 +41,12 @@ services:
       - --appendonly
       - "yes"
       - --maxmemory
-      - 48mb
+      - 32mb
       - --maxmemory-policy
       - allkeys-lru
       - --save
       - ""
+    mem_limit: 64m
     volumes:
       - redisdata:/data
     healthcheck:
@@ -46,7 +54,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-    mem_limit: 64m
     restart: unless-stopped
 
   migrate:
@@ -54,6 +61,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     env_file: .env
+    environment:
+      <<: *python-env
+    mem_limit: 192m
     command:
       - sh
       - -c
@@ -69,7 +79,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    mem_limit: 192m
     restart: "no"
 
   api:
@@ -77,17 +86,10 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     env_file: .env
-    command:
-      - uvicorn
-      - app.main:app
-      - --host
-      - 0.0.0.0
-      - --port
-      - "8000"
-      - --workers
-      - "1"
-      - --timeout-keep-alive
-      - "5"
+    environment:
+      <<: *python-env
+    mem_limit: 192m
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -101,7 +103,6 @@ services:
       timeout: 5s
       retries: 12
       start_period: 45s
-    mem_limit: 192m
     restart: unless-stopped
 
   bot:
@@ -109,6 +110,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     env_file: .env
+    environment:
+      <<: *python-env
+    mem_limit: 192m
     command: ["python", "-m", "app.bot.runner"]
     depends_on:
       postgres:
@@ -117,7 +121,6 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    mem_limit: 192m
     restart: unless-stopped
 
   worker:
@@ -125,6 +128,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     env_file: .env
+    environment:
+      <<: *python-env
+    mem_limit: 192m
     command:
       - celery
       - -A
@@ -145,7 +151,6 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    mem_limit: 192m
     restart: unless-stopped
 
   frontend:
@@ -158,14 +163,15 @@ services:
     environment:
       NEXT_PUBLIC_API_BASE_URL: ${API_BASE_URL:-http://localhost:8080/api}
       NODE_OPTIONS: --max-old-space-size=128
+    mem_limit: 192m
     depends_on:
       api:
         condition: service_healthy
-    mem_limit: 160m
     restart: unless-stopped
 
   nginx:
     image: nginx:1.27-alpine
+    mem_limit: 32m
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     ports:
@@ -173,7 +179,6 @@ services:
     depends_on:
       - api
       - frontend
-    mem_limit: 32m
     restart: unless-stopped
 
 volumes:
