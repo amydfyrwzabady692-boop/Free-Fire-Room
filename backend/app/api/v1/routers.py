@@ -806,9 +806,10 @@ async def confirm_broadcast(campaign_id: UUID, admin_user: User = Depends(requir
     row.confirmed_at = utcnow()
     await write_audit(db, action="broadcast_confirmed", entity_type="broadcast", entity_id=row.id, actor_id=admin_user.id)
     await db.commit()
+    from app.workers.enqueue import spawn
     from app.workers.tasks import run_broadcast
 
-    run_broadcast.delay(str(row.id))
+    spawn(run_broadcast, str(row.id))
     return {"status": row.status}
 
 

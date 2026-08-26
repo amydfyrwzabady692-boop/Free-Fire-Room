@@ -475,9 +475,10 @@ async def _queue_late_credentials(db: AsyncSession, event: Event) -> None:
     if not creds_were_provided(creds):
         return
     await db.commit()
+    from app.workers.enqueue import spawn
     from app.workers.tasks import send_event_credentials
 
-    send_event_credentials.delay(str(event.id))
+    spawn(send_event_credentials, str(event.id))
 
 
 async def _send_join_result(cb: CallbackQuery, event: Event, token: str, result, db: AsyncSession) -> None:

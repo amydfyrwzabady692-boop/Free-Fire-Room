@@ -1,5 +1,5 @@
 x-python-env: &python-env
-  MALLOC_ARENA_MAX: "2"
+  MALLOC_ARENA_MAX: "1"
   PYTHONMALLOC: malloc
   PYTHONDONTWRITEBYTECODE: "1"
 
@@ -13,18 +13,18 @@ services:
     command:
       - postgres
       - -c
-      - shared_buffers=32MB
+      - shared_buffers=16MB
       - -c
-      - work_mem=2MB
+      - work_mem=1MB
       - -c
-      - maintenance_work_mem=32MB
+      - maintenance_work_mem=16MB
       - -c
-      - effective_cache_size=128MB
+      - effective_cache_size=48MB
       - -c
-      - max_connections=40
+      - max_connections=20
       - -c
-      - wal_buffers=4MB
-    mem_limit: 192m
+      - wal_buffers=1MB
+    mem_limit: 80m
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -41,12 +41,12 @@ services:
       - --appendonly
       - "yes"
       - --maxmemory
-      - 32mb
+      - 16mb
       - --maxmemory-policy
       - allkeys-lru
       - --save
       - ""
-    mem_limit: 64m
+    mem_limit: 24m
     volumes:
       - redisdata:/data
     healthcheck:
@@ -63,7 +63,7 @@ services:
     env_file: .env
     environment:
       <<: *python-env
-    mem_limit: 192m
+    mem_limit: 128m
     command:
       - sh
       - -c
@@ -88,7 +88,7 @@ services:
     env_file: .env
     environment:
       <<: *python-env
-    mem_limit: 192m
+    mem_limit: 112m
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
     depends_on:
       postgres:
@@ -112,38 +112,8 @@ services:
     env_file: .env
     environment:
       <<: *python-env
-    mem_limit: 192m
+    mem_limit: 144m
     command: ["python", "-m", "app.bot.runner"]
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
-    restart: unless-stopped
-
-  worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    env_file: .env
-    environment:
-      <<: *python-env
-    mem_limit: 192m
-    command:
-      - celery
-      - -A
-      - app.workers.celery_app:celery_app
-      - worker
-      - -B
-      - -l
-      - warning
-      - -Q
-      - default,telegram,credentials,broadcasts
-      - --pool=solo
-      - --concurrency=1
-      - --schedule=/tmp/celerybeat-schedule
     depends_on:
       postgres:
         condition: service_healthy
@@ -162,8 +132,8 @@ services:
     env_file: .env
     environment:
       NEXT_PUBLIC_API_BASE_URL: ${API_BASE_URL:-http://localhost:8080/api}
-      NODE_OPTIONS: --max-old-space-size=128
-    mem_limit: 192m
+      NODE_OPTIONS: --max-old-space-size=64
+    mem_limit: 80m
     depends_on:
       api:
         condition: service_healthy
@@ -171,7 +141,7 @@ services:
 
   nginx:
     image: nginx:1.27-alpine
-    mem_limit: 32m
+    mem_limit: 16m
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
     ports:

@@ -19,7 +19,7 @@ RUN adduser -D -u 10001 nextjs
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
-ENV NODE_OPTIONS=--max-old-space-size=128
+ENV NODE_OPTIONS=--max-old-space-size=64
 USER nextjs
 EXPOSE 3000
 CMD ["node", "server.js"]

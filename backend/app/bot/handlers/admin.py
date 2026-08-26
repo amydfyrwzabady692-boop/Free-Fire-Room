@@ -770,9 +770,10 @@ async def admin_bc_confirm(cb: CallbackQuery, db: AsyncSession, db_user: User):
     row.confirmed_by = db_user.id
     row.confirmed_at = utcnow()
     await write_audit(db, action="broadcast_confirmed", entity_type="broadcast", entity_id=row.id, actor_id=db_user.id)
+    from app.workers.enqueue import spawn
     from app.workers.tasks import run_broadcast
 
-    run_broadcast.delay(str(row.id))
+    spawn(run_broadcast, str(row.id))
     await cb.message.answer("ارسال همگانی شروع شد.", reply_markup=_back_kb())
     await cb.answer()
 

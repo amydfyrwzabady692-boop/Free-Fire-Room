@@ -24,8 +24,5 @@ services:
   bot:
     restart: always
 
-  worker:
-    restart: always
-
   frontend:
     restart: always

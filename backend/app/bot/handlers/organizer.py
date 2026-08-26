@@ -827,9 +827,10 @@ async def _save_and_dispatch_creds(
             reply_markup=await menu_for(db, db_user),
         )
         return True
+    from app.workers.enqueue import spawn
     from app.workers.tasks import send_event_credentials
 
-    send_event_credentials.delay(str(event.id))
+    spawn(send_event_credentials, str(event.id))
     await message.answer(
             "✅ گرفته شد. در حال ارسال برای کسانی که جوین را کامل کرده‌اند.\n"
             f"تا {get_settings().custom_fill_minutes} دقیقه بعد هم اگر کسی شرایط را کامل کند، مشخصات برایش می‌آید.\n\n"

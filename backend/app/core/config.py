@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     openapi_enabled: bool = True
 
     sentry_dsn: str = ""
-    prometheus_enabled: bool = True
+    prometheus_enabled: bool = False
 
     @field_validator("bot_username")
     @classmethod
