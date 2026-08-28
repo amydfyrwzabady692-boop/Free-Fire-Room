@@ -2,6 +2,7 @@ x-python-env: &python-env
   MALLOC_ARENA_MAX: "1"
   PYTHONMALLOC: malloc
   PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
   BOT_EMBEDDED: "true"
   DEBUG: "false"
   LOG_LEVEL: WARNING
@@ -128,7 +129,7 @@ services:
     environment:
       <<: *python-env
       BOT_EMBEDDED: "false"
-    mem_limit: 160m
+    mem_limit: 256m
     command: ["python", "-m", "app.bot.runner"]
     depends_on:
       postgres:

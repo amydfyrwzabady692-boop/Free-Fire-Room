@@ -62,7 +62,7 @@ async def _run_polling() -> None:
     except Exception:
         log.exception("bot_profile_setup_failed")
     jobs = asyncio.create_task(_run_scheduled_jobs())
-    log.info("bot_polling_start")
+    log.warning("bot_polling_start")
     try:
         await dp.start_polling(bot)
     finally:
@@ -113,6 +113,7 @@ def main() -> None:
     configure_logging()
     logging.getLogger("aiogram").setLevel(logging.WARNING)
     settings = get_settings()
+    print(f"bot_runner_start mode={settings.telegram_mode}", flush=True)
     if settings.telegram_mode == "webhook":
         asyncio.run(_set_webhook())
         return
