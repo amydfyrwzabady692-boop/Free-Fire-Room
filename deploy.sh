@@ -114,6 +114,7 @@ if grep -qE '^APP_ENV=production' .env 2>/dev/null; then
 fi
 if [ "${DEPLOY_MINIMAL:-1}" = "1" ]; then
   COMPOSE_FILES="$COMPOSE_FILES -f docker-compose.minimal.yml"
+  COMPOSE_PROFILES="--profile bot"
   UP_SERVICES="postgres redis migrate bot"
   LOG_SERVICE="bot"
   echo "حالت سبک: postgres + redis + bot (بدون api/panel)"
