@@ -91,7 +91,7 @@ services:
     env_file: .env
     environment:
       <<: *python-env
-    mem_limit: 192m
+    mem_limit: 384m
     command:
       - uvicorn
       - app.main:app

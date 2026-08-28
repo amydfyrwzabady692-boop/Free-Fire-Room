@@ -1,7 +1,26 @@
-# Bot-only stack for low-RAM VPS (no panel/nginx).
-# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml -f docker-compose.minimal.yml up -d postgres redis migrate api
+# Bot-only stack for low-RAM VPS (no FastAPI panel).
 services:
+  api:
+    profiles: ["panel"]
   frontend:
     profiles: ["panel"]
   nginx:
     profiles: ["panel"]
+  bot:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      <<: *python-env
+      BOT_EMBEDDED: "false"
+    mem_limit: 160m
+    command: ["python", "-m", "app.bot.runner"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
