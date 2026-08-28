@@ -117,6 +117,10 @@ if [ "${DEPLOY_MINIMAL:-1}" = "1" ]; then
   COMPOSE_PROFILES="--profile bot"
   UP_SERVICES="postgres redis migrate bot"
   LOG_SERVICE="bot"
+  if grep -qE '^TELEGRAM_MODE=webhook' .env 2>/dev/null; then
+    set_kv TELEGRAM_MODE polling
+    echo "TELEGRAM_MODE=polling (حالت سبک بدون api به polling نیاز دارد)"
+  fi
   echo "حالت سبک: postgres + redis + bot (بدون api/panel)"
 else
   UP_SERVICES=""

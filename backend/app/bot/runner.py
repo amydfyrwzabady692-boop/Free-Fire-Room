@@ -113,11 +113,12 @@ def main() -> None:
     configure_logging()
     logging.getLogger("aiogram").setLevel(logging.WARNING)
     settings = get_settings()
-    print(f"bot_runner_start mode={settings.telegram_mode}", flush=True)
-    if settings.telegram_mode == "webhook":
-        asyncio.run(_set_webhook())
-        return
-    asyncio.run(_run_polling())
+    print(f"bot_runner_start mode=polling standalone=true", flush=True)
+    try:
+        asyncio.run(_run_polling())
+    except Exception:
+        log.exception("bot_runner_fatal")
+        raise
 
 
 if __name__ == "__main__":

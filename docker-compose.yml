@@ -129,6 +129,7 @@ services:
     environment:
       <<: *python-env
       BOT_EMBEDDED: "false"
+      TELEGRAM_MODE: polling
     mem_limit: 256m
     command: ["python", "-m", "app.bot.runner"]
     depends_on:
