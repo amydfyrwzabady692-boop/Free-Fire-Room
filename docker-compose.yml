@@ -67,7 +67,6 @@ services:
     env_file: .env
     environment:
       <<: *python-env
-    mem_limit: 96m
     command:
       - sh
       - -c

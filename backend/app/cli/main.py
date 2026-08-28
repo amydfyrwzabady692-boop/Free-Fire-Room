@@ -70,8 +70,9 @@ async def seed() -> None:
         print("seed ok")
 
 
-async def create_super_admin(telegram_id: int, password: str) -> None:
-    await seed()
+async def create_super_admin(telegram_id: int, password: str, *, seed_first: bool = True) -> None:
+    if seed_first:
+        await seed()
     async with SessionLocal() as db:
         user = await get_by_telegram(db, telegram_id)
         if user is None:
@@ -110,7 +111,7 @@ async def bootstrap_from_env() -> None:
     if not tg or not password:
         print("bootstrap: seed done; super admin skipped (set BOOTSTRAP_SUPERADMIN_TELEGRAM_ID and BOOTSTRAP_SUPERADMIN_PASSWORD)")
         return
-    await create_super_admin(int(tg), password)
+    await create_super_admin(int(tg), password, seed_first=False)
     print("bootstrap: super admin ensured from env")
 
 

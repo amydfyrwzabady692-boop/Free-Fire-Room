@@ -13,7 +13,12 @@ from passlib.context import CryptContext
 
 from app.core.config import get_settings
 
-_pwd = CryptContext(schemes=["argon2"], deprecated="auto")
+_pwd = CryptContext(
+    schemes=["argon2"],
+    deprecated="auto",
+    argon2__memory_cost=32768,
+    argon2__time_cost=2,
+)
 settings = get_settings()
 
 
