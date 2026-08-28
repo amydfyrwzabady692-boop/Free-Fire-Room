@@ -80,6 +80,8 @@ class Settings(BaseSettings):
     past_events_hours: int = 48
     maintenance_mode: bool = False
     openapi_enabled: bool = True
+    job_dispatch_interval_seconds: int = 60
+    bot_embedded: bool = True
 
     sentry_dsn: str = ""
     prometheus_enabled: bool = False

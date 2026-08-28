@@ -108,17 +108,30 @@ if empty_or_placeholder BOT_USERNAME; then
   exit 1
 fi
 
+COMPOSE_FILES="-f docker-compose.yml"
+if grep -qE '^APP_ENV=production' .env 2>/dev/null; then
+  COMPOSE_FILES="$COMPOSE_FILES -f docker-compose.prod.yml"
+fi
+if [ "${DEPLOY_MINIMAL:-1}" = "1" ]; then
+  COMPOSE_FILES="$COMPOSE_FILES -f docker-compose.minimal.yml"
+  UP_SERVICES="postgres redis migrate api"
+  echo "حالت سبک: فقط postgres + redis + api (ربات داخل api)"
+else
+  UP_SERVICES=""
+  echo "حالت کامل: postgres + redis + api + frontend + nginx"
+fi
+
 echo "در حال build و اجرا..."
-if ! docker compose up -d --build --remove-orphans; then
+if ! docker compose $COMPOSE_FILES up -d --build --remove-orphans $UP_SERVICES; then
   echo
   echo "deploy failed — migrate logs:"
-  docker compose logs migrate --tail 200 || true
+  docker compose $COMPOSE_FILES logs migrate --tail 200 || true
   echo
   echo "api logs:"
-  docker compose logs api --tail 80 || true
+  docker compose $COMPOSE_FILES logs api --tail 80 || true
   echo
   echo "container status:"
-  docker compose ps -a || true
+  docker compose $COMPOSE_FILES ps -a || true
   exit 1
 fi
 
@@ -126,4 +139,5 @@ echo
 echo "ØªÙ…Ø§Ù…. Ù¾Ù†Ù„: http://${IP:-SERVER}"
 echo "ÙˆØ±ÙˆØ¯ Ù¾Ù†Ù„ Ø¨Ø§ Telegram ID = ${TG} Ùˆ Ø±Ù…Ø² BOOTSTRAP_SUPERADMIN_PASSWORD Ø¯Ø§Ø®Ù„ .env"
 echo "Ø±Ø¨Ø§Øª Ø±Ø§ ÛŒÚ©â€ŒØ¨Ø§Ø± /start Ú©Ù†ÛŒØ¯ Ùˆ Ø±Ø¨Ø§Øª Ø±Ø§ Ø¯Ø± Ú©Ø§Ù†Ø§Ù„ Ø§ØµÙ„ÛŒ Ø§Ø¯Ù…ÛŒÙ† Ú©Ù†ÛŒØ¯."
-echo "Ù„Ø§Ú¯: docker compose logs -f bot"
+echo "لاگ: docker compose $COMPOSE_FILES logs -f api"
+echo "پنل کامل: DEPLOY_MINIMAL=0 ./deploy.sh"

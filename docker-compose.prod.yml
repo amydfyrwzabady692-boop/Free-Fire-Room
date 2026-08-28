@@ -8,7 +8,21 @@ services:
     restart: always
 
   api:
-    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--proxy-headers", "--forwarded-allow-ips", "*"]
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "1"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - "*"
+      - --log-level
+      - warning
+      - --no-access-log
     restart: always
 
   nginx:
@@ -19,9 +33,6 @@ services:
       - ./nginx/nginx.prod.conf:/etc/nginx/nginx.conf:ro
       - ${TLS_CERT_PATH:-./nginx/certs/fullchain.pem}:/etc/nginx/certs/fullchain.pem:ro
       - ${TLS_KEY_PATH:-./nginx/certs/privkey.pem}:/etc/nginx/certs/privkey.pem:ro
-    restart: always
-
-  bot:
     restart: always
 
   frontend:

@@ -42,6 +42,10 @@ def _redact(obj: Any) -> Any:
 
 def configure_logging() -> None:
     settings = get_settings()
+    level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    logging.getLogger("aiogram").setLevel(logging.WARNING)
+    if settings.is_production:
+        logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
     structlog.configure(
         processors=[
             structlog.contextvars.merge_contextvars,
@@ -54,9 +58,7 @@ def configure_logging() -> None:
             if settings.is_production
             else structlog.dev.ConsoleRenderer(),
         ],
-        wrapper_class=structlog.make_filtering_bound_logger(
-            getattr(logging, settings.log_level.upper(), logging.INFO)
-        ),
+        wrapper_class=structlog.make_filtering_bound_logger(level),
         cache_logger_on_first_use=True,
     )
 

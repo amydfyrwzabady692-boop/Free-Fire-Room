@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -26,9 +27,33 @@ async def lifespan(app: FastAPI):
         import sentry_sdk
 
         sentry_sdk.init(dsn=settings.sentry_dsn, traces_sample_rate=0.1)
-    yield
-    await close_redis()
-    await engine.dispose()
+    bot_ctx = None
+    bot_boot: asyncio.Task | None = None
+
+    async def _start_embedded_bot() -> None:
+        nonlocal bot_ctx
+        await asyncio.sleep(2)
+        from app.bot.runner import run_bot_services
+
+        bot_ctx = run_bot_services()
+        await bot_ctx.__aenter__()
+        log.info("bot_embedded_started")
+
+    if settings.bot_embedded and settings.bot_token:
+        bot_boot = asyncio.create_task(_start_embedded_bot())
+    try:
+        yield
+    finally:
+        if bot_boot is not None:
+            bot_boot.cancel()
+            try:
+                await bot_boot
+            except asyncio.CancelledError:
+                pass
+        if bot_ctx is not None:
+            await bot_ctx.__aexit__(None, None, None)
+        await close_redis()
+        await engine.dispose()
 
 
 openapi_url = "/api/openapi.json" if (settings.openapi_enabled and not settings.is_production) else None

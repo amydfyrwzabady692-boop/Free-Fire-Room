@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
@@ -20,6 +21,8 @@ async def _run_scheduled_jobs() -> None:
         send_daily_custom_digest,
     )
 
+    settings = get_settings()
+    tick = max(15, settings.job_dispatch_interval_seconds)
     last_recheck_hour = None
     last_purge_day = None
     last_digest_day = None
@@ -47,7 +50,7 @@ async def _run_scheduled_jobs() -> None:
                 await asyncio.to_thread(send_daily_custom_digest.run)
             except Exception:
                 log.exception("daily_digest_failed")
-        await asyncio.sleep(15)
+        await asyncio.sleep(tick)
 
 
 async def _run_polling() -> None:
@@ -79,9 +82,36 @@ async def _set_webhook() -> None:
     log.info("webhook_set", url=url)
 
 
+@asynccontextmanager
+async def run_bot_services():
+    settings = get_settings()
+    if not settings.bot_token:
+        yield
+        return
+
+    polling_task: asyncio.Task | None = None
+    jobs_task: asyncio.Task | None = None
+    try:
+        if settings.telegram_mode == "webhook":
+            await _set_webhook()
+            jobs_task = asyncio.create_task(_run_scheduled_jobs())
+        else:
+            polling_task = asyncio.create_task(_run_polling())
+        yield
+    finally:
+        for task in (polling_task, jobs_task):
+            if task is None:
+                continue
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
 def main() -> None:
     configure_logging()
-    logging.getLogger("aiogram").setLevel(logging.INFO)
+    logging.getLogger("aiogram").setLevel(logging.WARNING)
     settings = get_settings()
     if settings.telegram_mode == "webhook":
         asyncio.run(_set_webhook())
