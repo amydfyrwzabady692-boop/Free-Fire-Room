@@ -130,8 +130,15 @@ services:
       <<: *python-env
       BOT_EMBEDDED: "false"
       TELEGRAM_MODE: polling
-    mem_limit: 256m
-    command: ["python", "-m", "app.bot.runner"]
+      LOG_LEVEL: INFO
+    command:
+      - sh
+      - -c
+      - |
+        python -m app.bot.runner
+        code=$?
+        echo "bot_exit_code=$code"
+        exit $code
     depends_on:
       postgres:
         condition: service_healthy

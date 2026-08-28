@@ -54,14 +54,23 @@ async def _run_scheduled_jobs() -> None:
 
 
 async def _run_polling() -> None:
+    print("bot_step=1_get_bot", flush=True)
     bot = get_bot()
+    print("bot_step=2_get_dispatcher", flush=True)
     dp = get_dispatcher()
-    await bot.delete_webhook(drop_pending_updates=False)
+    print("bot_step=3_delete_webhook", flush=True)
+    try:
+        await bot.delete_webhook(drop_pending_updates=False)
+    except Exception as exc:
+        print(f"bot_step=3_delete_webhook_failed {type(exc).__name__}: {exc}", flush=True)
+        raise
+    print("bot_step=4_setup_profile", flush=True)
     try:
         await setup_bot_profile(bot)
     except Exception:
         log.exception("bot_profile_setup_failed")
     jobs = asyncio.create_task(_run_scheduled_jobs())
+    print("bot_step=5_start_polling", flush=True)
     log.warning("bot_polling_start")
     try:
         await dp.start_polling(bot)
@@ -112,11 +121,14 @@ async def run_bot_services():
 def main() -> None:
     configure_logging()
     logging.getLogger("aiogram").setLevel(logging.WARNING)
-    settings = get_settings()
-    print(f"bot_runner_start mode=polling standalone=true", flush=True)
+    print("bot_runner_start mode=polling standalone=true", flush=True)
     try:
         asyncio.run(_run_polling())
-    except Exception:
+    except Exception as exc:
+        import traceback
+
+        print(f"bot_runner_fatal {type(exc).__name__}: {exc}", flush=True)
+        traceback.print_exc()
         log.exception("bot_runner_fatal")
         raise
 
