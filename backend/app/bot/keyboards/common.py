@@ -389,6 +389,7 @@ def organizer_home_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [ibtn("ثبت کاستوم جدید", callback_data="orgp:new", style=SUCCESS)],
+            [ibtn("ارسال ROOM ID / PASS", callback_data="orgp:creds_menu", style=SUCCESS)],
             [ibtn("کاستوم‌ها و آمار من", callback_data="orgp:mine", style=PRIMARY)],
             [ibtn("کانال‌های من", callback_data="orgp:ch", style=PRIMARY)],
             [ibtn("راهنمای برگزارکننده", callback_data="help:host", style=PRIMARY)],
@@ -397,9 +398,18 @@ def organizer_home_kb() -> InlineKeyboardMarkup:
     )
 
 
+def creds_send_confirm_kb(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [ibtn("✅ تأیید و ارسال برای واجدین شرایط", callback_data=f"orgp:sendok:{token}", style=SUCCESS)],
+            [ibtn("❌ انصراف", callback_data="orgp:sendcancel", style=DANGER)],
+        ]
+    )
+
+
 def send_creds_kb(token: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[ibtn("ارسال ROOM ID", callback_data=f"orgp:creds:{token}", style=SUCCESS)]]
+        inline_keyboard=[[ibtn("ارسال ROOM ID / PASS", callback_data=f"orgp:creds:{token}", style=SUCCESS)]]
     )
 
 

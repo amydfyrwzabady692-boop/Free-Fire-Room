@@ -20,6 +20,7 @@ from app.bot.keyboards.common import (
     PRIMARY,
     SUCCESS,
     add_required_channel_kb,
+    creds_send_confirm_kb,
     event_share_kb,
     ibtn,
     labeled,
@@ -135,7 +136,8 @@ async def org_home(event: Message | CallbackQuery, db: AsyncSession, db_user: Us
         "این پنل مالک ربات نیست.\n\n"
         "اینجا کاستوم جایزه‌دار خودتان را می‌گذارید: ساعت + جایزه + کانال جوین اجباری. "
         "در فهرست همه دیده می‌شود.\n"
-        "سر ساعت اول <b>ROOM ID</b> را می‌فرستید، بعد <b>PASS</b> را جدا.\n"
+        "از «ارسال ROOM ID / PASS» مشخصات را می‌فرستید؛ بعد از تأیید شما، "
+        "فقط برای کسانی که شرایط را کامل کرده‌اند ارسال می‌شود.\n"
         "می‌بینید چند نفر از لینک اختصاصی آمدند، چند نفر جوین کردند و چند نفر ROOM ID / PASS گرفتند."
         f"{rating}"
     )
@@ -642,7 +644,7 @@ async def org_mine(cb: CallbackQuery, db: AsyncSession, db_user: User):
         )
         buttons = []
         if can_send:
-            buttons.append([ibtn("ارسال ROOM ID", callback_data=f"orgp:creds:{e.public_token}", style=SUCCESS)])
+            buttons.append([ibtn("ارسال ROOM ID / PASS", callback_data=f"orgp:creds:{e.public_token}", style=SUCCESS)])
         buttons.append([ibtn("لینک اختصاصی", callback_data=f"orgp:link:{e.public_token}", style=PRIMARY)])
         if e.status not in {EventStatus.CANCELLED, EventStatus.FINISHED}:
             buttons.append([ibtn("لغو کاستوم", callback_data=f"orgp:cancel:{e.public_token}", style=DANGER)])
@@ -758,6 +760,71 @@ async def org_channels(cb: CallbackQuery, db: AsyncSession, db_user: User):
     await cb.answer()
 
 
+async def _organizer_events_for_creds(db: AsyncSession, user_id) -> list[Event]:
+    org = await db.scalar(select(Organizer).where(Organizer.user_id == user_id))
+    if not org:
+        return []
+    rows = (
+        await db.scalars(
+            select(Event)
+            .where(Event.organizer_id == org.id, Event.deleted_at.is_(None))
+            .order_by(Event.starts_at.desc())
+            .limit(15)
+        )
+    ).all()
+    out: list[Event] = []
+    for e in rows:
+        creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == e.id))
+        if e.status in {EventStatus.CANCELLED, EventStatus.FINISHED, EventStatus.REJECTED}:
+            continue
+        if credentials_window_open(e) or creds_were_provided(creds):
+            out.append(e)
+    return out
+
+
+@router.callback_query(F.data == "orgp:creds_menu")
+async def org_creds_menu(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    if await _blocked_organize(db, db_user, cb):
+        return
+    if await _organizer_ready(db, db_user, cb) is None:
+        await cb.answer()
+        return
+    rows = await _organizer_events_for_creds(db, db_user.id)
+    if not rows:
+        await cb.message.answer(
+            "الان کاستوم فعالی برای ارسال ROOM ID / PASS نیست.\n"
+            "بعد از رسیدن ساعت کاستوم (یا تا ۵ دقیقه بعد) اینجا ظاهر می‌شود.",
+            reply_markup=organizer_home_kb(),
+        )
+        await cb.answer()
+        return
+    from app.services.reviews import event_audience_stats, format_audience_stats
+
+    await cb.message.answer(
+        "🎮 <b>ارسال ROOM ID / PASS</b>\n"
+        "کاستوم را انتخاب کنید. ROOM ID و PASS را می‌فرستید؛ "
+        "بعد از تأیید شما، فقط برای کسانی که شرایط را کامل کرده‌اند ارسال می‌شود."
+    )
+    for e in rows:
+        stats = await event_audience_stats(db, e.id)
+        creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == e.id))
+        sent_note = " (قبلاً ارسال شده — با تأیید دوباره، اصلاح هم پخش می‌شود)" if creds and creds.sent_at else ""
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [ibtn("ارسال ROOM ID / PASS", callback_data=f"orgp:creds:{e.public_token}", style=SUCCESS)],
+                [ibtn("بازگشت", callback_data="orgp:home", style=PRIMARY)],
+            ]
+        )
+        await cb.message.answer(
+            f"<b>{esc(e.title)}</b>{sent_note}\n"
+            f"زمان: {format_local(e.starts_at, e.timezone)}\n"
+            f"وضعیت: {event_status_fa(e.status)}\n"
+            f"{format_audience_stats(stats)}",
+            reply_markup=kb,
+        )
+    await cb.answer()
+
+
 @router.callback_query(F.data.startswith("orgp:creds:"))
 async def ask_live_creds(cb: CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
     if await _blocked_organize(db, db_user, cb):
@@ -777,10 +844,11 @@ async def ask_live_creds(cb: CallbackQuery, db: AsyncSession, db_user: User, sta
     deadline = credentials_deadline(e)
     remain = max(0, int((deadline - dt.now(UTC)).total_seconds() // 60))
     await cb.message.answer(
-        f"🎮 ساعت کاستوم «{esc(e.title)}» رسید.\n\n"
+        f"🎮 کاستوم «{esc(e.title)}»\n\n"
         "اول فقط <b>ROOM ID</b> را بفرستید.\n"
         "نمونه: <code>12345678</code>\n\n"
-        "بعد ربات از شما <b>PASS</b> را جدا می‌پرسد.\n"
+        "بعد ربات <b>PASS</b> را جدا می‌پرسد.\n"
+        "در پایان پیش‌نمایش می‌بینید و با تأیید شما ارسال انجام می‌شود.\n"
         f"⏳ مهلت ارسال: {grace} دقیقه (حدود {remain} دقیقه مانده).\n"
         f"⏳ پر شدن کاستوم: {get_settings().custom_fill_minutes} دقیقه بعد از ساعت شروع.",
         reply_markup=wizard_nav(),
@@ -805,8 +873,9 @@ def _looks_like_room_creds(text: str | None) -> tuple[str, str] | None:
     return room_id, password
 
 
-async def _save_and_dispatch_creds(
+async def _offer_creds_confirm(
     message: Message,
+    state: FSMContext,
     db: AsyncSession,
     db_user: User,
     event: Event,
@@ -817,27 +886,123 @@ async def _save_and_dispatch_creds(
     if not credentials_window_open(event) and not creds_were_provided(creds):
         await message.answer("فرصت ۵ دقیقه‌ای تمام شد. دیگر نمی‌توانید ROOM ID و PASS بفرستید.")
         return False
+    from app.services.reviews import event_audience_stats
+
+    stats = await event_audience_stats(db, event.id)
+    now = dt.now(UTC)
+    scheduled = now < event.credentials_send_at
+    await state.update_data(
+        event_token=event.public_token,
+        room_id=room_id,
+        pending_password=password,
+    )
+    when = (
+        f"⏰ ارسال زمان‌بندی‌شده: {format_local(event.credentials_send_at, event.timezone)}\n"
+        "با تأیید، مشخصات ذخیره می‌شود و سر همان ساعت برای واجدین شرایط ارسال می‌شود."
+        if scheduled
+        else "با تأیید، همین الان برای کسانی که شرایط را کامل کرده‌اند ارسال می‌شود."
+    )
+    extra = (
+        f"\nتا {get_settings().custom_fill_minutes} دقیقه بعد از شروع، "
+        "اگر کسی دیرتر شرایط را کامل کند، مشخصات برایش هم می‌آید."
+        if not scheduled
+        else ""
+    )
+    resend = "\n⚠️ قبلاً ارسال شده — با تأیید، نسخه جدید (اصلاح) هم پخش می‌شود." if creds and creds.sent_at else ""
+    await message.answer(
+        "📋 <b>پیش‌نمایش ارسال ROOM ID / PASS</b>\n\n"
+        f"کاستوم: <b>{esc(event.title)}</b>\n"
+        f"{room_pair(esc(room_id), esc(password))}\n\n"
+        f"👥 شرایط را کامل کردند: <b>{stats['confirmed']}</b>\n"
+        f"⏳ هنوز جوین نکرده‌اند: {stats['pending']}\n"
+        f"✅ قبلاً دریافت کردند: {stats['delivered']}\n\n"
+        f"{when}{extra}{resend}\n\n"
+        "فقط کاربرانی که <b>عضو کانال‌های اجباری</b> باشند در لحظه ارسال، ROOM ID / PASS می‌گیرند.",
+        reply_markup=creds_send_confirm_kb(event.public_token),
+    )
+    return True
+
+
+async def _commit_creds_send(
+    message: Message,
+    db: AsyncSession,
+    db_user: User,
+    event: Event,
+    room_id: str,
+    password: str,
+) -> None:
     await update_credentials(db, event, db_user.id, room_id, password)
     await db.commit()
     now = dt.now(UTC)
     if now < event.credentials_send_at:
         await message.answer(
-            "✅ ذخیره شد و سر ساعت ارسال می‌شود.\n\n"
+            "✅ تأیید شد و ذخیره گردید.\n"
+            f"سر ساعت {format_local(event.credentials_send_at, event.timezone)} "
+            "برای کسانی که تا آن لحظه شرایط را کامل کرده‌اند ارسال می‌شود.\n\n"
             f"{room_pair(esc(room_id), esc(password))}",
             reply_markup=await menu_for(db, db_user),
         )
-        return True
+        return
     from app.workers.enqueue import spawn
     from app.workers.tasks import send_event_credentials
 
     spawn(send_event_credentials, str(event.id))
     await message.answer(
-            "✅ گرفته شد. در حال ارسال برای کسانی که جوین را کامل کرده‌اند.\n"
-            f"تا {get_settings().custom_fill_minutes} دقیقه بعد هم اگر کسی شرایط را کامل کند، مشخصات برایش می‌آید.\n\n"
-            f"{room_pair(esc(room_id), esc(password))}",
+        "✅ تأیید شد. در حال ارسال برای کسانی که شرایط را کامل کرده‌اند.\n"
+        f"تا {get_settings().custom_fill_minutes} دقیقه بعد هم اگر کسی شرایط را کامل کند، مشخصات برایش می‌آید.\n\n"
+        f"{room_pair(esc(room_id), esc(password))}",
         reply_markup=await menu_for(db, db_user),
     )
-    return True
+
+
+async def _save_and_dispatch_creds(
+    message: Message,
+    state: FSMContext,
+    db: AsyncSession,
+    db_user: User,
+    event: Event,
+    room_id: str,
+    password: str,
+) -> bool:
+    ok = await _offer_creds_confirm(message, state, db, db_user, event, room_id, password)
+    if ok:
+        await state.set_state(default_state)
+    return ok
+
+
+@router.callback_query(F.data.startswith("orgp:sendok:"))
+async def confirm_creds_send(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_user: User):
+    if await _blocked_organize(db, db_user, cb):
+        return
+    token = cb.data.split(":", 2)[-1]
+    data = await state.get_data()
+    room_id = (data.get("room_id") or "").strip()
+    password = (data.get("pending_password") or "").strip()
+    if not room_id or not password:
+        await cb.answer("ROOM ID یا PASS یافت نشد. دوباره از منو شروع کنید.", show_alert=True)
+        await state.clear()
+        return
+    e = await db.scalar(select(Event).where(Event.public_token == token).options(selectinload(Event.organizer)))
+    if not e or not e.organizer or e.organizer.user_id != db_user.id:
+        await cb.answer("کاستوم یافت نشد.", show_alert=True)
+        await state.clear()
+        return
+    creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == e.id))
+    if not credentials_window_open(e) and not creds_were_provided(creds):
+        await cb.answer("مهلت ارسال تمام شده.", show_alert=True)
+        await state.clear()
+        return
+    await _commit_creds_send(cb.message, db, db_user, e, room_id, password)
+    await state.clear()
+    await cb.answer("ارسال تأیید شد")
+
+
+@router.callback_query(F.data == "orgp:sendcancel")
+async def cancel_creds_send(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_user: User):
+    await state.update_data(pending_password=None, room_id=None, event_token=None)
+    await state.clear()
+    await cb.message.answer("ارسال ROOM ID / PASS لغو شد.", reply_markup=organizer_home_kb())
+    await cb.answer()
 
 
 @router.message(CredsWaitSG.room_id)
@@ -854,8 +1019,7 @@ async def receive_room_id(message: Message, state: FSMContext, db: AsyncSession,
             await state.clear()
             await message.answer("کاستوم یافت نشد.")
             return
-        await _save_and_dispatch_creds(message, db, db_user, e, parsed[0], parsed[1])
-        await state.clear()
+        await _save_and_dispatch_creds(message, state, db, db_user, e, parsed[0], parsed[1])
         return
     room_id = _parse_room_id(message.text)
     if not room_id:
@@ -894,8 +1058,7 @@ async def receive_room_password(message: Message, state: FSMContext, db: AsyncSe
         await state.clear()
         await message.answer("کاستوم یافت نشد.")
         return
-    await _save_and_dispatch_creds(message, db, db_user, e, room_id, password)
-    await state.clear()
+    await _save_and_dispatch_creds(message, state, db, db_user, e, room_id, password)
 
 
 @router.message(StateFilter(default_state), F.text.regexp(r"^\d{4,16}(\s+\S+)?$"))
@@ -914,7 +1077,7 @@ async def maybe_live_creds(message: Message, db: AsyncSession, db_user: User, st
             return
     parsed = _looks_like_room_creds(message.text)
     if parsed:
-        await _save_and_dispatch_creds(message, db, db_user, e, parsed[0], parsed[1])
+        await _save_and_dispatch_creds(message, state, db, db_user, e, parsed[0], parsed[1])
         return
     room_id = _parse_room_id(message.text)
     if not room_id:
