@@ -120,6 +120,10 @@ async def can_review(db: AsyncSession, user: User, event: Event) -> tuple[bool, 
     if org and org.user_id == user.id:
         return False, "نمی‌توانید برای کاستوم خودتان نظر بگذارید."
     if not review_window_open(event):
+        hours = get_settings().past_events_hours
+        now = datetime.now(UTC)
+        if now < event.starts_at:
+            return False, "بعد از برگزاری کاستوم می‌توانید نظر ثبت کنید."
         return False, f"فقط تا {hours} ساعت بعد از ساعت کاستوم می‌توان نظر ثبت کرد."
     if await existing_review(db, user.id, event.id):
         return False, "قبلاً برای این کاستوم نظر ثبت کرده‌اید."
