@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import sys
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.security import encrypt_secret, generate_unguessable_token, hash_password
 from app.core.session import SessionLocal, SyncSessionLocal
@@ -115,6 +115,40 @@ async def bootstrap_from_env() -> None:
     print("bootstrap: super admin ensured from env")
 
 
+async def bot_access_report(*, open_public: bool = False) -> None:
+    from app.core.config import get_settings
+    from app.models.channel import Channel, GlobalRequiredChannel
+    from app.services.settings import get_setting, set_setting
+    from sqlalchemy.orm import selectinload
+
+    settings = get_settings()
+    async with SessionLocal() as db:
+        maint = bool(await get_setting(db, "maintenance_mode", settings.maintenance_mode))
+        rows = (
+            await db.scalars(
+                select(GlobalRequiredChannel)
+                .where(GlobalRequiredChannel.is_active.is_(True), GlobalRequiredChannel.scope == "player")
+                .options(selectinload(GlobalRequiredChannel.channel))
+            )
+        ).all()
+        users = await db.scalar(select(func.count()).select_from(User).where(User.deleted_at.is_(None)))
+        print(f"maintenance_mode={'ON' if maint else 'OFF'}")
+        print(f"env_maintenance_mode={settings.maintenance_mode}")
+        print(f"users={users or 0}")
+        print(f"active_global_channels={len(rows)}")
+        for row in rows:
+            ch: Channel | None = row.channel
+            title = ch.title if ch else str(row.channel_id)
+            admin_flag = "bot_admin=yes" if ch and ch.bot_is_admin else "bot_admin=NO"
+            print(f"  - {title} ({admin_flag})")
+        if open_public and maint:
+            await set_setting(db, "maintenance_mode", False)
+            await db.commit()
+            print("maintenance_mode=OFF (fixed)")
+        elif open_public:
+            print("maintenance already OFF")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="ffroom")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -124,6 +158,8 @@ def main() -> None:
     p.add_argument("--password", required=True)
     sub.add_parser("gen-key")
     sub.add_parser("bootstrap")
+    p_access = sub.add_parser("bot-access", help="Show why public users may be blocked")
+    p_access.add_argument("--open", action="store_true", help="Turn maintenance mode OFF")
     args = parser.parse_args()
     if args.cmd == "seed":
         asyncio.run(seed())
@@ -131,6 +167,8 @@ def main() -> None:
         asyncio.run(create_super_admin(args.telegram_id, args.password))
     elif args.cmd == "bootstrap":
         asyncio.run(bootstrap_from_env())
+    elif args.cmd == "bot-access":
+        asyncio.run(bot_access_report(open_public=args.open))
     elif args.cmd == "gen-key":
         gen_key()
     else:

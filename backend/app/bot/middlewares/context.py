@@ -101,9 +101,14 @@ class MaintenanceMiddleware(BaseMiddleware):
             if on and not is_admin:
                 from aiogram.types import CallbackQuery, Message
 
+                text = (
+                    "⛔ ربات در حالت تعمیرات است.\n"
+                    "فعلاً فقط مدیر ربات می‌تواند استفاده کند.\n"
+                    "اگر مالک ربات هستید: پنل مالک → «تعمیرات ربات» را خاموش کنید."
+                )
                 if isinstance(event, Message):
-                    await event.answer("ربات موقتاً در حال تعمیرات است. کمی بعد دوباره تلاش کنید.")
+                    await event.answer(text)
                 elif isinstance(event, CallbackQuery):
-                    await event.answer("ربات موقتاً در حال تعمیرات است.", show_alert=True)
+                    await event.answer(text, show_alert=True)
                 return None
         return await handler(event, data)
