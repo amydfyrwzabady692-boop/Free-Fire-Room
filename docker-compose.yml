@@ -131,14 +131,7 @@ services:
       BOT_EMBEDDED: "false"
       TELEGRAM_MODE: polling
       LOG_LEVEL: INFO
-    command:
-      - sh
-      - -c
-      - |
-        python -m app.bot.runner
-        code=$?
-        echo "bot_exit_code=$code"
-        exit $code
+    command: ["python", "-m", "app.bot.runner"]
     depends_on:
       postgres:
         condition: service_healthy
