@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import os
-import uuid
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from cryptography.fernet import Fernet
-from sqlalchemy import create_engine, event, select
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -59,6 +58,25 @@ def db(engine) -> Session:
     s = SessionLocal()
     yield s
     s.close()
+
+
+@pytest.fixture()
+async def async_db():
+    """An AsyncSession over the same in-memory SQLite, for services that are
+    written against AsyncSession (funnel, registration, events, ...)."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    eng = create_async_engine(
+        "sqlite+aiosqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    async with eng.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(eng, expire_on_commit=False)
+    async with maker() as session:
+        yield session
+    await eng.dispose()
 
 
 def make_user(db: Session, telegram_id: int, **kwargs):

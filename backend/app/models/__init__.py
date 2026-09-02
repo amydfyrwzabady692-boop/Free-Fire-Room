@@ -1,4 +1,5 @@
 from app.models.admin import Admin, AdminSession, AuditLog, BotContent, SystemSetting
+from app.models.analytics import EventView
 from app.models.announcement import CustomAnnouncement
 from app.models.broadcast import BroadcastCampaign, BroadcastDelivery
 from app.models.channel import Channel, ChannelOwnership, GlobalRequiredChannel
@@ -51,4 +52,5 @@ __all__ = [
     "BroadcastDelivery",
     "CustomAnnouncement",
     "WinnerClaim",
+    "EventView",
 ]
