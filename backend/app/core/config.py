@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, field_validator
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -77,7 +77,8 @@ class Settings(BaseSettings):
     max_required_referrals: int = 20
     credentials_grace_minutes: int = 5
     custom_fill_minutes: int = 20
-    past_events_hours: int = 48
+    event_retention_hours: int = 24
+    past_events_hours: int = 24
     maintenance_mode: bool = False
     openapi_enabled: bool = True
     job_dispatch_interval_seconds: int = 60

@@ -24,11 +24,12 @@ from app.bot.keyboards.common import (
     event_share_kb,
     ibtn,
     labeled,
+    MENU_BUTTON_TEXTS,
     organizer_home_kb,
     pick_date_kb,
     wizard_nav,
 )
-from app.locales.labels import event_status_fa, org_status_fa
+from app.locales.labels import event_status_fa, org_status_fa, reg_status_fa
 from app.locales.style import room_pair
 from app.bot.onboarding import ensure_onboarding, target_message
 from app.bot.states.groups import CredsWaitSG, EventWizardSG
@@ -38,17 +39,27 @@ from app.core.errors import AppError
 from app.core.time import combine_local_date_and_clock, format_jalali_date, format_local, parse_clock, upcoming_local_dates
 from app.models.channel import Channel, ChannelOwnership
 from app.models.event import Event, RoomCredential
+from app.models.jobs import Delivery
 from app.models.organizer import Organizer
 from app.models.registration import Registration
 from app.models.user import User
 from app.services.bans import is_banned
 from app.services.channels import connect_organizer_channel, list_owned_channels
+from app.services.event_display import (
+    default_custom_description,
+    event_public_load_options,
+    format_event_identity_block,
+)
 from app.services.events import MIN_START_LEAD_MINUTES, cancel_event, create_event, submit_for_publish, update_credentials, waiting_live_credential_event
 from app.services.organizers import get_or_apply
 from app.services.reports import credentials_deadline, credentials_window_open, creds_were_provided
 from app.services.settings import get_setting
 
 router = Router(name="organizer")
+
+def _short_label(e: Event, limit: int = 50) -> str:
+    return ((e.prize_summary or e.title or "کاستوم").strip())[:limit]
+
 
 DEFAULT_RULES = (
     "برای دریافت ROOM ID و PASS باید تا لحظه ارسال در کانال‌های اجباری عضو بمانید "
@@ -133,12 +144,14 @@ async def org_home(event: Message | CallbackQuery, db: AsyncSession, db_user: Us
         rating = "\n" + format_rating_line(await review_summary_for_organizer(db, org.id), prefix="امتیاز شما از بازیکن‌ها")
     text = (
         "👑 <b>پنل برگزارکننده</b>\n"
-        "این پنل مالک ربات نیست.\n\n"
-        "اینجا کاستوم جایزه‌دار خودتان را می‌گذارید: ساعت + جایزه + کانال جوین اجباری. "
-        "در فهرست همه دیده می‌شود.\n"
-        "از «ارسال ROOM ID / PASS» مشخصات را می‌فرستید؛ بعد از تأیید شما، "
-        "فقط برای کسانی که شرایط را کامل کرده‌اند ارسال می‌شود.\n"
-        "می‌بینید چند نفر از لینک اختصاصی آمدند، چند نفر جوین کردند و چند نفر ROOM ID / PASS گرفتند."
+        "<i>این پنل مالک ربات نیست؛ مخصوص کسی است که کاستوم می‌گذارد.</i>\n\n"
+        "<b>۱) ثبت کاستوم جدید</b>\n"
+        "ساعت، کانال جوین اجباری، جایزه، و در صورت تمایل توضیح و عکس.\n\n"
+        "<b>۲) ارسال ROOM ID / PASS</b>\n"
+        "لازم نیست سر ساعت آنلاین باشید — از همان لحظهٔ ساخت کاستوم می‌توانید مشخصات را ثبت کنید "
+        "و ربات سر ساعت خودش برای واجدین شرایط می‌فرستد. نتیجه را هم به شما خبر می‌دهد.\n\n"
+        "<b>۳) کاستوم‌ها و آمار من</b>\n"
+        "چند نفر از لینک آمدند، چند نفر جوین کردند و چند نفر مشخصات گرفتند."
         f"{rating}"
     )
     if isinstance(event, CallbackQuery):
@@ -175,7 +188,7 @@ async def wiz_pick_date(cb: CallbackQuery, state: FSMContext):
         f"🕐 تاریخ: {format_jalali_date(day)}\n"
         "حالا ساعت را بفرستید. نمونه: <code>22:00</code> یا <code>22</code>\n"
         "سر همین ساعت ROOM ID و PASS فقط برای کسانی می‌رود که کانال‌ها را جوین کرده باشند.",
-        reply_markup=wizard_nav(),
+        reply_markup=wizard_nav(include_back=True),
     )
     await cb.answer()
 
@@ -428,7 +441,7 @@ async def bot_added_as_channel_admin(event: ChatMemberUpdated, db: AsyncSession,
         return
     try:
         ch = await connect_organizer_channel(db, event.bot, db_user, event.chat.id)
-    except Exception as exc:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         try:
             await event.bot.send_message(
                 event.from_user.id,
@@ -476,35 +489,82 @@ async def bot_added_as_channel_admin(event: ChatMemberUpdated, db: AsyncSession,
 
 
 PRIZE_STEP_TEXT = (
-    "جایزه این کاستوم چیست؟\n"
-    "یک متن کوتاه بفرستید؛ همین متن برای همه دیده می‌شود.\n\n"
+    "💎 <b>جایزه این کاستوم چیست؟</b>\n\n"
+    "این متن هم روی دکمهٔ کاستوم در فهرست دیده می‌شود و هم داخل کارت آن، "
+    "پس کوتاه و روشن بنویسید.\n\n"
     "نمونه:\n"
-    "۱۰۰۰ الماس\n"
-    "نفر اول ۵۰ الماس — نفر دوم اسکین"
+    "• ۱۰۰۰ الماس\n"
+    "• نفر اول ۵۰ الماس، نفر دوم اسکین\n"
+    "• ۵۰ هزار تومان کارت‌به‌کارت"
 )
+
+
+DESCRIPTION_STEP_TEXT = (
+    "📝 <b>توضیح کاستوم</b> (اختیاری)\n\n"
+    "یک یا دو خط دربارهٔ اینکه این کاستوم چیست و برای چه کسانی است.\n\n"
+    "نمونه:\n"
+    "• کاستوم کلن، شب جمعه ساعت ۱۰\n"
+    "• تورنمنت دوئل مخصوص فالوورهای کانال\n"
+    "• مود Clash Squad، بدون کاراکتر\n\n"
+    "اگر توضیحی ندارید «رد کردن» را بزنید — چیزی از دست نمی‌دهید."
+)
+
+
+BANNER_STEP_TEXT = (
+    "🖼 <b>عکس یا بنر کاستوم</b> (اختیاری)\n\n"
+    "اگر بنر آماده دارید همین‌جا بفرستید؛ بالای کارت کاستوم به بازیکن‌ها نشان داده می‌شود.\n"
+    "ربات خودش عکس نمی‌سازد. اگر ندارید «رد کردن» را بزنید — این آخرین مرحله است."
+)
+
+
+async def _ask_description(message: Message, state: FSMContext) -> None:
+    await state.set_state(EventWizardSG.description)
+    await message.answer(DESCRIPTION_STEP_TEXT, reply_markup=wizard_nav(include_skip=True, include_back=True))
 
 
 async def _ask_prize(message: Message, state: FSMContext) -> None:
     await state.set_state(EventWizardSG.prizes)
-    await message.answer(PRIZE_STEP_TEXT, reply_markup=wizard_nav())
+    await message.answer(PRIZE_STEP_TEXT, reply_markup=wizard_nav(include_back=True))
+
+
+async def _ask_banner(message: Message, state: FSMContext) -> None:
+    await state.set_state(EventWizardSG.banner)
+    await message.answer(BANNER_STEP_TEXT, reply_markup=wizard_nav(include_skip=True, include_back=True))
+
+
+@router.message(EventWizardSG.description)
+async def wiz_description(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
+    text = (message.text or "").strip()
+    if text in labeled("-", "رد کردن", "رد"):
+        await state.update_data(custom_description=None)
+        await _ask_banner(message, state)
+        return
+    if len(text) < 5:
+        await message.answer(
+            "توضیح را کمی کامل‌تر بنویسید (حداقل ۵ حرف)، یا «رد کردن» را بزنید.",
+            reply_markup=wizard_nav(include_skip=True, include_back=True),
+        )
+        return
+    if len(text) > 500:
+        await message.answer(
+            "توضیح کاستوم حداکثر ۵۰۰ حرف باشد.", reply_markup=wizard_nav(include_skip=True, include_back=True)
+        )
+        return
+    await state.update_data(custom_description=text)
+    await _ask_banner(message, state)
 
 
 @router.message(EventWizardSG.prizes)
 async def wiz_prize(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
     text = (message.text or "").strip()
     if len(text) < 3:
-        await message.answer("جایزه را کمی واضح‌تر بنویسید.", reply_markup=wizard_nav())
+        await message.answer("جایزه را کمی واضح‌تر بنویسید.", reply_markup=wizard_nav(include_back=True))
         return
     if len(text) > 400:
-        await message.answer("متن جایزه حداکثر ۴۰۰ حرف باشد.", reply_markup=wizard_nav())
+        await message.answer("متن جایزه حداکثر ۴۰۰ حرف باشد.", reply_markup=wizard_nav(include_back=True))
         return
     await state.update_data(prize_summary=text)
-    await state.set_state(EventWizardSG.banner)
-    await message.answer(
-        "اگر عکس یا بنر خودتان را دارید همین‌جا بفرستید — جدا از جایزه روی کارت دیده می‌شود.\n"
-        "اگر عکس نمی‌خواهید «رد کردن» را بزنید. ربات عکس نمی‌سازد.",
-        reply_markup=wizard_nav(include_skip=True),
-    )
+    await _ask_description(message, state)
 
 
 @router.message(EventWizardSG.banner)
@@ -519,17 +579,51 @@ async def wiz_banner(message: Message, state: FSMContext, db: AsyncSession, db_u
         return
     await message.answer(
         "یک عکس بفرستید، یا دکمه «رد کردن» را بزنید.",
-        reply_markup=wizard_nav(include_skip=True),
+        reply_markup=wizard_nav(include_skip=True, include_back=True),
     )
+
+
+@router.callback_query(F.data == "wiz:back")
+async def wiz_back(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_user: User):
+    current = await state.get_state()
+    msg = cb.message
+    if current == EventWizardSG.starts_time.state:
+        await state.set_state(EventWizardSG.starts_at)
+        await msg.answer("روز کاستوم را دوباره انتخاب کنید.", reply_markup=pick_date_kb("wzd"))
+    elif current in {EventWizardSG.channel.state, EventWizardSG.extra_channels.state}:
+        await state.update_data(required_channel_ids=[], channel_id=None)
+        await state.set_state(EventWizardSG.starts_at)
+        await msg.answer("روز کاستوم را دوباره انتخاب کنید.", reply_markup=pick_date_kb("wzd"))
+    elif current == EventWizardSG.prizes.state:
+        data = await state.get_data()
+        ids = list(data.get("required_channel_ids") or [])
+        await state.set_state(EventWizardSG.extra_channels)
+        await msg.answer(
+            "کانال‌های جوین اجباری را دوباره تنظیم کنید، بعد «تمام شد» را بزنید.",
+            reply_markup=await _channel_step_kb(db, db_user, ids, extra=True),
+        )
+    elif current == EventWizardSG.description.state:
+        await _ask_prize(msg, state)
+    elif current == EventWizardSG.banner.state:
+        await _ask_description(msg, state)
+    else:
+        await cb.answer("مرحله قبلی ندارد.", show_alert=True)
+        return
+    await cb.answer()
 
 
 @router.callback_query(F.data == "wiz:skip")
 async def wiz_skip(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_user: User):
     current = await state.get_state()
-    if current != EventWizardSG.banner.state:
+    if current == EventWizardSG.description.state:
+        await state.update_data(custom_description=None)
+        await _ask_banner(cb.message, state)
         await cb.answer()
         return
-    await _publish_custom(cb.message, state, db, db_user)
+    if current == EventWizardSG.banner.state:
+        await _publish_custom(cb.message, state, db, db_user)
+        await cb.answer()
+        return
     await cb.answer()
 
 
@@ -539,6 +633,11 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
     if not prize:
         await _ask_prize(message, state)
         return
+    description = default_custom_description(
+        custom_description=data.get("custom_description"),
+        title=data.get("title"),
+        channel_title=data.get("channel_title"),
+    )
     org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
     title = (data.get("title") or "").strip() or "کاستوم جایزه‌دار"
     starts_at = dt.fromisoformat(data["starts_at"])
@@ -556,7 +655,7 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
         "region": "ME",
         "game_mode": "squad",
         "prize_summary": prize,
-        "description": prize,
+        "description": description,
         "banner_file_id": data.get("banner_file_id"),
         "prizes": [{"place": 1, "title": prize[:160], "description": prize}],
         "rules_text": DEFAULT_RULES,
@@ -568,18 +667,20 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
     try:
         event = await create_event(db, org, payload, db_user.id)
         await submit_for_publish(db, event, db_user.id)
+        event = await db.scalar(
+            select(Event).where(Event.id == event.id).options(*event_public_load_options())
+        )
         link = event_deep_link(event.public_token)
         n_ch = len(payload["required_channel_ids"])
         details = (
-            f"🎁 <b>جایزه</b>\n{esc(prize)}\n"
+            f"{format_event_identity_block(event)}\n"
             f"🕐 {format_local(event.starts_at, event.timezone)}\n"
             f"📢 کانال جوین اجباری: {n_ch} مورد\n\n"
             f"<b>لینک این کاستوم:</b>\n{link}\n\n"
-            "جایزه همین متن است. اگر عکس فرستاده باشید جدا بالای همین پیام است.\n"
-            f"سر ساعت اول ROOM ID را می‌فرستید (۵ دقیقه مهلت). "
-            f"{get_settings().custom_fill_minutes} دقیقه هم برای پر شدن کاستوم فرصت هست؛ "
-            "هر کس در این مدت شرایط را کامل کند مشخصات برایش می‌آید.\n"
-            "لینک را در کانال بگذارید."
+            "📌 لینک را در کانال خودتان بگذارید تا بازیکن‌ها وارد شوند.\n\n"
+            "🆔 <b>قدم بعدی:</b> از «ارسال ROOM ID / PASS» می‌توانید <b>همین حالا</b> مشخصات اتاق را ثبت کنید؛ "
+            f"ربات سر ساعت خودکار برای واجدین شرایط می‌فرستد و نتیجه را به شما خبر می‌دهد.\n"
+            f"اگر ترجیح می‌دهید سر ساعت بفرستید، از لحظهٔ شروع {get_settings().credentials_grace_minutes} دقیقه مهلت دارید."
         )
         banner = data.get("banner_file_id")
         if banner:
@@ -619,6 +720,7 @@ async def org_mine(cb: CallbackQuery, db: AsyncSession, db_user: User):
         await db.scalars(
             select(Event)
             .where(Event.organizer_id == org.id, Event.deleted_at.is_(None))
+            .options(*event_public_load_options())
             .order_by(Event.starts_at.desc())
             .limit(15)
         )
@@ -645,13 +747,18 @@ async def org_mine(cb: CallbackQuery, db: AsyncSession, db_user: User):
         buttons = []
         if can_send:
             buttons.append([ibtn("ارسال ROOM ID / PASS", callback_data=f"orgp:creds:{e.public_token}", style=SUCCESS)])
-        buttons.append([ibtn("لینک اختصاصی", callback_data=f"orgp:link:{e.public_token}", style=PRIMARY)])
+        buttons.append(
+            [
+                ibtn("لینک اختصاصی", callback_data=f"orgp:link:{e.public_token}", style=PRIMARY),
+                ibtn("قیف و آمار", callback_data=f"orgp:fun:{e.public_token}", style=PRIMARY),
+            ]
+        )
+        buttons.append([ibtn("خروجی شرکت‌کننده‌ها", callback_data=f"orgp:csv:{e.public_token}", style=PRIMARY)])
         if e.status not in {EventStatus.CANCELLED, EventStatus.FINISHED}:
             buttons.append([ibtn("لغو کاستوم", callback_data=f"orgp:cancel:{e.public_token}", style=DANGER)])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
         await cb.message.answer(
-            f"<b>{esc(e.title)}</b>\n"
-            f"جایزه: {esc(e.prize_summary or '—')}\n"
+            f"{format_event_identity_block(e)}\n"
             f"زمان (شمسی): {format_local(e.starts_at, e.timezone)}\n"
             f"وضعیت: {event_status_fa(e.status)}\n"
             f"{format_audience_stats(stats)}\n"
@@ -662,13 +769,113 @@ async def org_mine(cb: CallbackQuery, db: AsyncSession, db_user: User):
     await cb.answer()
 
 
+async def _own_event(db: AsyncSession, db_user: User, token: str) -> Event | None:
+    e = await db.scalar(
+        select(Event).where(Event.public_token == token).options(*event_public_load_options())
+    )
+    if not e or not e.organizer or e.organizer.user_id != db_user.id:
+        return None
+    return e
+
+
+@router.callback_query(F.data.startswith("orgp:fun:"))
+async def org_funnel(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    """Where the organizer is losing people - every number already existed."""
+    from app.services.funnel import biggest_drop, event_funnel, format_funnel
+
+    token = cb.data.split(":", 2)[-1]
+    e = await _own_event(db, db_user, token)
+    if not e:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    stats = await event_funnel(db, e.id)
+    hint = biggest_drop(stats)
+    text = (
+        f"<b>{esc(_short_label(e))}</b>\n"
+        f"🕐 {format_local(e.starts_at, e.timezone)}\n"
+        "━━━━━━━━━━━━━━\n"
+        f"{format_funnel(stats)}"
+    )
+    if hint:
+        text += f"\n\n💡 {hint}"
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [ibtn("خروجی شرکت‌کننده‌ها", callback_data=f"orgp:csv:{e.public_token}", style=PRIMARY)],
+            [ibtn("بازگشت به پنل", callback_data="orgp:home", style=PRIMARY)],
+        ]
+    )
+    await cb.message.answer(text, reply_markup=kb)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("orgp:csv:"))
+async def org_participants_csv(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    """The web API could already export this; the bot could not."""
+    import csv
+    import io as _io
+
+    from aiogram.types import BufferedInputFile
+
+    token = cb.data.split(":", 2)[-1]
+    e = await _own_event(db, db_user, token)
+    if not e:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    rows = (
+        await db.scalars(
+            select(Registration)
+            .where(Registration.event_id == e.id)
+            .options(selectinload(Registration.user))
+            .order_by(Registration.created_at.asc())
+        )
+    ).all()
+    if not rows:
+        await cb.answer("هنوز کسی ثبت‌نام نکرده.", show_alert=True)
+        return
+    delivered = set(
+        (
+            await db.scalars(
+                select(Delivery.user_id).where(
+                    Delivery.event_id == e.id,
+                    Delivery.kind == "room_credentials",
+                    Delivery.status == "sent",
+                )
+            )
+        ).all()
+    )
+    buffer = _io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["telegram_id", "name", "username", "status", "source", "got_credentials", "joined_at"])
+    for reg in rows:
+        u = reg.user
+        writer.writerow(
+            [
+                u.telegram_id if u else "",
+                (u.first_name or "") if u else "",
+                (u.username or "") if u else "",
+                reg_status_fa(reg.status),
+                reg.source or "",
+                "yes" if reg.user_id in delivered else "no",
+                reg.created_at.isoformat(timespec="minutes"),
+            ]
+        )
+    # BOM so Excel opens the Persian columns correctly
+    data = ("\ufeff" + buffer.getvalue()).encode("utf-8")
+    name = f"participants-{e.public_token[:8]}.csv"
+    await cb.message.answer_document(
+        BufferedInputFile(data, filename=name),
+        caption=f"شرکت‌کننده‌های «{esc(_short_label(e))}» — {len(rows)} نفر",
+    )
+    await cb.answer()
+
+
 @router.callback_query(F.data.startswith("orgp:link:"))
 async def org_link(cb: CallbackQuery, db: AsyncSession, db_user: User):
     token = cb.data.split(":", 2)[-1]
     e = await db.scalar(
         select(Event)
         .where(Event.public_token == token)
-        .options(selectinload(Event.organizer), selectinload(Event.required_channels))
+        .options(*event_public_load_options(), selectinload(Event.required_channels))
     )
     if not e or not e.organizer or e.organizer.user_id != db_user.id:
         await cb.answer("یافت نشد", show_alert=True)
@@ -676,11 +883,11 @@ async def org_link(cb: CallbackQuery, db: AsyncSession, db_user: User):
     link = event_deep_link(e.public_token)
     n_ch = len([c for c in (e.required_channels or []) if c.is_active])
     details = (
-        f"🎁 <b>جایزه</b>\n{esc(e.prize_summary or e.title)}\n"
+        f"{format_event_identity_block(e)}\n"
         f"🕐 {format_local(e.starts_at, e.timezone)}\n"
         f"📢 کانال جوین اجباری: {n_ch} مورد\n\n"
         f"<b>لینک اختصاصی:</b>\n{link}\n\n"
-        "جایزه متن جداست. اگر عکس داشته باشید جدا فرستاده می‌شود."
+        "هر کس این لینک را باز کند مستقیم وارد کارت همین کاستوم می‌شود."
     )
     if e.banner_file_id:
         try:
@@ -731,6 +938,8 @@ async def org_cancel(cb: CallbackQuery, db: AsyncSession, db_user: User):
 
 @router.callback_query(F.data == "orgp:ch")
 async def org_channels(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    if await _blocked_organize(db, db_user, cb):
+        return
     rows = (
         await db.scalars(
             select(ChannelOwnership)
@@ -786,14 +995,15 @@ async def _organizer_events_for_creds(db: AsyncSession, user_id) -> list[Event]:
 async def org_creds_menu(cb: CallbackQuery, db: AsyncSession, db_user: User):
     if await _blocked_organize(db, db_user, cb):
         return
-    if await _organizer_ready(db, db_user, cb) is None:
+    if await _organizer_ready(db, db_user, cb.message) is None:
         await cb.answer()
         return
     rows = await _organizer_events_for_creds(db, db_user.id)
     if not rows:
         await cb.message.answer(
-            "الان کاستوم فعالی برای ارسال ROOM ID / PASS نیست.\n"
-            "بعد از رسیدن ساعت کاستوم (یا تا ۵ دقیقه بعد) اینجا ظاهر می‌شود.",
+            "الان کاستومی برای ارسال ROOM ID / PASS ندارید.\n"
+            "اول از «ثبت کاستوم جدید» یک کاستوم بسازید؛ بلافاصله بعدش همین‌جا ظاهر می‌شود "
+            f"و می‌توانید مشخصات را از همان لحظه تا {get_settings().credentials_grace_minutes} دقیقه بعد از ساعت شروع ثبت کنید.",
             reply_markup=organizer_home_kb(),
         )
         await cb.answer()
@@ -801,9 +1011,11 @@ async def org_creds_menu(cb: CallbackQuery, db: AsyncSession, db_user: User):
     from app.services.reviews import event_audience_stats, format_audience_stats
 
     await cb.message.answer(
-        "🎮 <b>ارسال ROOM ID / PASS</b>\n"
-        "کاستوم را انتخاب کنید. ROOM ID و PASS را می‌فرستید؛ "
-        "بعد از تأیید شما، فقط برای کسانی که شرایط را کامل کرده‌اند ارسال می‌شود."
+        "🎮 <b>ارسال ROOM ID / PASS</b>\n\n"
+        "لازم نیست سر ساعت آنلاین باشید: <b>همین حالا</b> هم می‌توانید ثبت کنید.\n"
+        "• اگر قبل از ساعت کاستوم ثبت کنید، ربات خودش سر ساعت برای واجدین شرایط می‌فرستد.\n"
+        "• اگر بعد از ساعت کاستوم ثبت کنید، بلافاصله فرستاده می‌شود.\n\n"
+        "در هر دو حالت اول پیش‌نمایش می‌بینید و تا شما تأیید نکنید چیزی ارسال نمی‌شود."
     )
     for e in rows:
         stats = await event_audience_stats(db, e.id)
@@ -843,14 +1055,22 @@ async def ask_live_creds(cb: CallbackQuery, db: AsyncSession, db_user: User, sta
     grace = get_settings().credentials_grace_minutes
     deadline = credentials_deadline(e)
     remain = max(0, int((deadline - dt.now(UTC)).total_seconds() // 60))
+    started = dt.now(UTC) >= e.starts_at
+    timing = (
+        f"⏳ ساعت کاستوم رسیده — {remain} دقیقه تا پایان مهلت ارسال."
+        if started
+        else f"⏳ هنوز به ساعت کاستوم نرسیده‌ایم. با تأیید، مشخصات ذخیره می‌شود و "
+        f"سر ساعت {format_local(e.starts_at, e.timezone)} خودکار ارسال می‌شود."
+    )
     await cb.message.answer(
         f"🎮 کاستوم «{esc(e.title)}»\n\n"
         "اول فقط <b>ROOM ID</b> را بفرستید.\n"
         "نمونه: <code>12345678</code>\n\n"
         "بعد ربات <b>PASS</b> را جدا می‌پرسد.\n"
-        "در پایان پیش‌نمایش می‌بینید و با تأیید شما ارسال انجام می‌شود.\n"
-        f"⏳ مهلت ارسال: {grace} دقیقه (حدود {remain} دقیقه مانده).\n"
-        f"⏳ پر شدن کاستوم: {get_settings().custom_fill_minutes} دقیقه بعد از ساعت شروع.",
+        "در پایان پیش‌نمایش می‌بینید و تا تأیید نکنید چیزی ارسال نمی‌شود.\n\n"
+        f"{timing}\n"
+        f"⏳ مهلت ثبت مشخصات: تا {grace} دقیقه بعد از ساعت شروع.\n"
+        f"⏳ پر شدن کاستوم: تا {get_settings().custom_fill_minutes} دقیقه بعد از ساعت شروع.",
         reply_markup=wizard_nav(),
     )
     await cb.answer()
@@ -873,6 +1093,61 @@ def _looks_like_room_creds(text: str | None) -> tuple[str, str] | None:
     return room_id, password
 
 
+# The ROOM ID / PASS typed by the organizer live here between the preview and
+# the confirm tap. FSM data alone is not enough: any menu button the organizer
+# taps in between runs a handler that calls state.clear().
+PENDING_CREDS_TTL_SECONDS = 45 * 60
+
+
+def _pending_creds_key(event: Event) -> str:
+    return f"pending_creds:{event.id}"
+
+
+async def _store_pending_creds(event: Event, room_id: str, password: str, user_id) -> None:
+    import json
+
+    from app.core.redis import get_redis
+    from app.core.security import encrypt_secret
+
+    blob = encrypt_secret(json.dumps({"room_id": room_id, "password": password, "by": str(user_id)}))
+    try:
+        await get_redis().setex(_pending_creds_key(event), PENDING_CREDS_TTL_SECONDS, blob)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _load_pending_creds(event: Event, user_id) -> tuple[str, str] | None:
+    import json
+
+    from app.core.redis import get_redis
+    from app.core.security import decrypt_secret
+
+    try:
+        blob = await get_redis().get(_pending_creds_key(event))
+    except Exception:  # noqa: BLE001
+        return None
+    if not blob:
+        return None
+    try:
+        data = json.loads(decrypt_secret(blob))
+    except (ValueError, TypeError):
+        return None
+    if data.get("by") != str(user_id):
+        return None
+    room_id = (data.get("room_id") or "").strip()
+    password = (data.get("password") or "").strip()
+    return (room_id, password) if room_id and password else None
+
+
+async def _clear_pending_creds(event: Event) -> None:
+    from app.core.redis import get_redis
+
+    try:
+        await get_redis().delete(_pending_creds_key(event))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 async def _offer_creds_confirm(
     message: Message,
     state: FSMContext,
@@ -884,7 +1159,9 @@ async def _offer_creds_confirm(
 ) -> bool:
     creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == event.id))
     if not credentials_window_open(event) and not creds_were_provided(creds):
-        await message.answer("فرصت ۵ دقیقه‌ای تمام شد. دیگر نمی‌توانید ROOM ID و PASS بفرستید.")
+        await message.answer(
+            f"فرصت {get_settings().credentials_grace_minutes} دقیقه‌ای تمام شد. دیگر نمی‌توانید ROOM ID و PASS بفرستید."
+        )
         return False
     from app.services.reviews import event_audience_stats
 
@@ -896,6 +1173,7 @@ async def _offer_creds_confirm(
         room_id=room_id,
         pending_password=password,
     )
+    await _store_pending_creds(event, room_id, password, db_user.id)
     when = (
         f"⏰ ارسال زمان‌بندی‌شده: {format_local(event.credentials_send_at, event.timezone)}\n"
         "با تأیید، مشخصات ذخیره می‌شود و سر همان ساعت برای واجدین شرایط ارسال می‌شود."
@@ -966,7 +1244,9 @@ async def _save_and_dispatch_creds(
 ) -> bool:
     ok = await _offer_creds_confirm(message, state, db, db_user, event, room_id, password)
     if ok:
-        await state.set_state(default_state)
+        # a real state (not default) so MenuResetMiddleware keeps the pending
+        # ROOM ID / PASS if the organizer taps a menu button before confirming
+        await state.set_state(CredsWaitSG.confirm)
     return ok
 
 
@@ -975,16 +1255,20 @@ async def confirm_creds_send(cb: CallbackQuery, state: FSMContext, db: AsyncSess
     if await _blocked_organize(db, db_user, cb):
         return
     token = cb.data.split(":", 2)[-1]
-    data = await state.get_data()
-    room_id = (data.get("room_id") or "").strip()
-    password = (data.get("pending_password") or "").strip()
-    if not room_id or not password:
-        await cb.answer("ROOM ID یا PASS یافت نشد. دوباره از منو شروع کنید.", show_alert=True)
-        await state.clear()
-        return
     e = await db.scalar(select(Event).where(Event.public_token == token).options(selectinload(Event.organizer)))
     if not e or not e.organizer or e.organizer.user_id != db_user.id:
         await cb.answer("کاستوم یافت نشد.", show_alert=True)
+        await state.clear()
+        return
+    pending = await _load_pending_creds(e, db_user.id)
+    if pending is None:
+        data = await state.get_data()
+        room_id = (data.get("room_id") or "").strip()
+        password = (data.get("pending_password") or "").strip()
+    else:
+        room_id, password = pending
+    if not room_id or not password:
+        await cb.answer("ROOM ID یا PASS یافت نشد. دوباره از منو شروع کنید.", show_alert=True)
         await state.clear()
         return
     creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == e.id))
@@ -993,12 +1277,49 @@ async def confirm_creds_send(cb: CallbackQuery, state: FSMContext, db: AsyncSess
         await state.clear()
         return
     await _commit_creds_send(cb.message, db, db_user, e, room_id, password)
+    await _clear_pending_creds(e)
     await state.clear()
     await cb.answer("ارسال تأیید شد")
 
 
+@router.message(CredsWaitSG.confirm, ~F.text.in_(MENU_BUTTON_TEXTS))
+async def creds_awaiting_confirm(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
+    data = await state.get_data()
+    token = data.get("event_token")
+    room_id = (data.get("room_id") or "").strip()
+    password = (data.get("pending_password") or "").strip()
+    if not token or not room_id or not password:
+        await state.clear()
+        await message.answer(
+            "مشخصات در دسترس نیست. از «ارسال ROOM ID / PASS» دوباره شروع کنید.",
+            reply_markup=organizer_home_kb(),
+        )
+        return
+    parsed = _looks_like_room_creds(message.text) or (
+        (_parse_room_id(message.text), None) if _parse_room_id(message.text) else None
+    )
+    if parsed and parsed[1]:
+        e = await db.scalar(
+            select(Event).where(Event.public_token == token).options(selectinload(Event.organizer))
+        )
+        if e and e.organizer and e.organizer.user_id == db_user.id:
+            await _save_and_dispatch_creds(message, state, db, db_user, e, parsed[0], parsed[1])
+            return
+    await message.answer(
+        "برای ارسال، دکمه سبز «تأیید و ارسال» را بزنید.\n"
+        "اگر می‌خواهید ROOM ID یا PASS را عوض کنید، «انصراف» را بزنید و دوباره شروع کنید.",
+        reply_markup=creds_send_confirm_kb(token),
+    )
+
+
 @router.callback_query(F.data == "orgp:sendcancel")
 async def cancel_creds_send(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_user: User):
+    data = await state.get_data()
+    token = data.get("event_token")
+    if token:
+        e = await db.scalar(select(Event).where(Event.public_token == token))
+        if e:
+            await _clear_pending_creds(e)
     await state.update_data(pending_password=None, room_id=None, event_token=None)
     await state.clear()
     await cb.message.answer("ارسال ROOM ID / PASS لغو شد.", reply_markup=organizer_home_kb())

@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app.core.enums import EventStatus, RegistrationStatus, RequirementStatus
-from app.core.errors import ConflictError, ForbiddenError, NotFoundError, ValidationAppError
+from app.core.errors import ConflictError, NotFoundError, ValidationAppError
 from app.core.logging import get_logger
 from app.models.event import Event
 from app.models.registration import Registration, WaitlistEntry
@@ -102,8 +102,6 @@ async def register_user(
             holder.rules_accepted_at = now
 
     checklist = await evaluate_requirements(db, user=user, event=event, bot=bot, registration=holder)
-    blocking = [i for i in checklist.items if i.status not in {RequirementStatus.DONE, RequirementStatus.PENDING_REVIEW}]
-    capacity_pending = any(i.requirement_type == "capacity" and i.status != RequirementStatus.DONE for i in checklist.items)
 
     if any(i.status == RequirementStatus.REJECTED for i in checklist.items):
         holder.status = RegistrationStatus.INELIGIBLE

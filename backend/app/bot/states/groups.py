@@ -13,6 +13,7 @@ class EventWizardSG(StatesGroup):
     starts_time = State()
     channel = State()
     extra_channels = State()
+    description = State()
     banner = State()
     capacity = State()
     prizes = State()
@@ -24,6 +25,7 @@ class EventWizardSG(StatesGroup):
 class CredsWaitSG(StatesGroup):
     room_id = State()
     password = State()
+    confirm = State()
 
 
 class AnnounceSG(StatesGroup):

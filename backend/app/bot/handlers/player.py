@@ -43,6 +43,16 @@ from app.locales import fa as T
 from app.locales.labels import event_status_fa, reg_status_fa
 from app.models.event import Event, RoomCredential
 from app.models.organizer import Organizer
+from app.services.funnel import record_view
+from app.services.trust import format_trust_line, is_risky
+from app.services.event_display import (
+    event_public_load_options,
+    format_capacity_line,
+    format_event_identity_block,
+    format_event_list_label,
+    format_time_left,
+    required_channel_count,
+)
 from app.models.registration import Registration
 from app.models.user import User, UserProfile
 from app.services.referrals import apply_start_referral, get_or_create_link
@@ -130,7 +140,7 @@ async def _welcome_after_onboarding(message: Message, db: AsyncSession, db_user:
             "از لینک اختصاصی این کاستوم آمدید.\n"
             "🎁 جایزه، شرایط و کانال‌های جوین اجباری را ببینید؛ عضو شوید تا سر ساعت ROOM ID و PASS برایتان بیاید.",
         )
-        await _show_event(message, db, db_user, token)
+        await _show_event(message, db, db_user, token, source="deep_link")
         return
     await _send_fresh_menu(
         message,
@@ -204,7 +214,7 @@ async def _list_events(db: AsyncSession, *, mode: str = "upcoming") -> list[Even
             Event.visibility == EventVisibility.PUBLIC,
             Event.deep_link_active.is_(True),
         )
-        .options(selectinload(Event.organizer), selectinload(Event.channel))
+        .options(*event_public_load_options())
         .limit(20)
     )
     if mode == "past":
@@ -240,19 +250,11 @@ def _join_urls(items) -> list[tuple[str, str]]:
 
 
 def _list_title(e: Event) -> str:
-    stamp = format_local(e.starts_at, e.timezone, compact=True)
-    prize = (e.prize_summary or "").strip().replace("\n", " ")
-    label = prize[:28] if prize else e.title
-    if e.starts_at < datetime.now(UTC):
-        return f"گذشته · 🕐 {stamp} · 🎁 {label}"
-    return f"🕐 {stamp} · 🎁 {label}"
+    return format_event_list_label(e)
 
 
 async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> str:
-    org = e.organizer.display_name if e.organizer else "برگزارکننده"
-    ch = e.channel.title if e.channel else "-"
     now = datetime.now(UTC)
-    left = max(0, int((e.starts_at - now).total_seconds() // 60))
     grace = get_settings().credentials_grace_minutes
     fill = get_settings().custom_fill_minutes
     extra = (
@@ -277,25 +279,23 @@ async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> st
         )
     org_line = format_rating_line(await review_summary_for_organizer(db, e.organizer_id), prefix="سابقه برگزارکننده")
     ev_line = format_rating_line(await review_summary_for_event(db, e.id), prefix="امتیاز این کاستوم")
-    prize = (e.prize_summary or "").strip()
-    if not prize and e.prizes:
-        prize = "\n".join(f"{p.place}. {p.title}" for p in e.prizes if p.title)
-    heading = (e.title or "").strip()
-    prize = prize or "اعلام نشده"
-    heading_html = f"<b>{esc(heading)}</b>\n\n" if heading and heading != prize else ""
-    left_line = f"مانده: {left} دقیقه" if left else "ساعت کاستوم رسیده"
+    trust_line = format_trust_line(e.organizer)
+    if is_risky(e.organizer):
+        trust_line += "\n⚠️ <b>این برگزارکننده سابقهٔ خوبی ندارد. با احتیاط شرکت کنید.</b>"
+    n_ch = required_channel_count(e)
+    channel_line = f"📢 کانال جوین اجباری: {n_ch} مورد" if n_ch else "📢 کانال جوین اجباری ندارد"
     return (
         "🎮 <b>کاستوم جایزه‌دار</b>\n"
         "━━━━━━━━━━━━━━\n"
-        f"{heading_html}"
-        f"💎 <b>جایزه</b>\n{esc(prize)}\n"
+        f"{format_event_identity_block(e)}\n"
         "━━━━━━━━━━━━━━\n"
         f"🕐 {format_local(e.starts_at, e.timezone)}\n"
-        f"⏳ {left_line}\n"
-        f"👤 برگزارکننده: {esc(org)}\n"
+        f"⏳ {format_time_left(e.starts_at)}\n"
+        f"{format_capacity_line(e)}\n"
+        f"{channel_line}\n"
         f"{org_line}\n"
         f"{ev_line}\n"
-        f"📢 کانال برگزارکننده: {esc(ch)}\n\n"
+        f"{trust_line}\n\n"
         f"{extra}"
     )
 
@@ -323,8 +323,8 @@ async def upcoming(event: Message | CallbackQuery, db: AsyncSession, db_user: Us
     kb = event_list_kb([(e.public_token, _list_title(e)) for e in rows], mode="upcoming")
     text = (
         "🔥 <b>کاستوم‌های جایزه‌دار پیش‌رو</b>\n"
-        "روی مورد بزنید تا جایزه، ساعت و کانال‌های جوین اجباری را ببینید. اگر عکس باشد جدا می‌آید.\n"
-        "بعد عضو شوید و دکمه سبز «عضو شدم» را بزنید تا سر ساعت ROOM ID و PASS برایتان بیاید.\n"
+        "روی هر دکمه ساعت و جایزه‌اش نوشته شده. بزنید تا جزئیات کامل، ظرفیت و کانال‌های جوین اجباری را ببینید.\n"
+        "بعد عضو کانال‌ها شوید و دکمه سبز «عضو شدم» را بزنید تا سر ساعت ROOM ID و PASS برایتان بیاید.\n"
         f"کاستوم‌های {hours} ساعت گذشته هم از دکمه پایین در دسترس است."
     )
     await _show_panel(event, text, kb)
@@ -399,16 +399,19 @@ async def _event_by_token(db: AsyncSession, token: str | None) -> Event | None:
     return await db.scalar(
         select(Event)
         .where(Event.public_token == token, Event.deleted_at.is_(None))
-        .options(
-            selectinload(Event.organizer),
-            selectinload(Event.channel),
-            selectinload(Event.prizes),
-            selectinload(Event.required_channels),
-        )
+        .options(*event_public_load_options())
     )
 
 
-async def _show_event(message: Message, db: AsyncSession, user: User, token: str, *, back: str = "upcoming"):
+async def _show_event(
+    message: Message,
+    db: AsyncSession,
+    user: User,
+    token: str,
+    *,
+    back: str = "upcoming",
+    source: str = "list",
+):
     e = await _event_by_token(db, token)
     if not e or e.deleted_at:
         await message.answer("این کاستوم در دسترس نیست یا حذف شده است.")
@@ -417,6 +420,8 @@ async def _show_event(message: Message, db: AsyncSession, user: User, token: str
     if not e.deep_link_active and not cancelled:
         await message.answer("این کاستوم در دسترس نیست یا لغو شده است.")
         return
+    # top of the organizer's funnel: who looked, not only who joined
+    await record_view(db, e.id, user.id, source=source)
     reg = await db.scalar(select(Registration).where(Registration.event_id == e.id, Registration.user_id == user.id))
     checklist = await evaluate_requirements(db, user=user, event=e, bot=message.bot, registration=reg)
     channel_items = [

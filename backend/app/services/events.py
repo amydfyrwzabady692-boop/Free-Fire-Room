@@ -1,19 +1,16 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.enums import EventStatus, EventVisibility, GameMode, JobType, RequirementType
-from app.core.errors import ForbiddenError, NotFoundError, ValidationAppError
+from app.core.enums import EventStatus, GameMode, RequirementType
+from app.core.errors import ForbiddenError, ValidationAppError
 from app.core.security import encrypt_secret, generate_unguessable_token
 from app.core.time import as_utc
-from app.models.channel import Channel
 from app.models.event import Event, EventPrize, EventRequiredChannel, EventRequirement, RoomCredential
-from app.models.jobs import ScheduledJob
 from app.models.organizer import Organizer
 from app.services.audit import write_audit
 from app.services.scheduler import cancel_event_jobs, schedule_event_jobs
@@ -41,19 +38,6 @@ def _validate_times(starts_at, registration_ends_at, credentials_send_at) -> Non
 async def create_event(db: AsyncSession, organizer: Organizer, data: dict, actor_id) -> Event:
     settings = get_settings()
     max_events = organizer.max_events or await get_setting(db, "max_events_per_organizer", settings.max_events_per_organizer)
-    active = await db.scalar(
-        select(Event).where(
-            Event.organizer_id == organizer.id,
-            Event.status.in_(
-                [
-                    EventStatus.DRAFT,
-                    EventStatus.PENDING_APPROVAL,
-                    EventStatus.PUBLISHED,
-                    EventStatus.FULL,
-                ]
-            ),
-        )
-    )
     count_stmt = select(Event).where(
         Event.organizer_id == organizer.id,
         Event.deleted_at.is_(None),
@@ -61,8 +45,10 @@ async def create_event(db: AsyncSession, organizer: Organizer, data: dict, actor
             [EventStatus.DRAFT, EventStatus.PENDING_APPROVAL, EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED]
         ),
     )
-    existing = (await db.scalars(count_stmt)).all()
-    if len(existing) >= int(max_events):
+    from sqlalchemy import func as _func
+
+    existing = int(await db.scalar(select(_func.count()).select_from(count_stmt.subquery())) or 0)
+    if existing >= int(max_events):
         raise ForbiddenError("event_quota", "به سقف تعداد کاستوم فعال رسیده‌اید.")
 
     max_refs = int(await get_setting(db, "max_required_referrals", settings.max_required_referrals))
@@ -105,7 +91,7 @@ async def create_event(db: AsyncSession, organizer: Organizer, data: dict, actor
         custom_credentials_message=data.get("custom_credentials_message"),
         reveal_button_enabled=bool(data.get("reveal_button_enabled", True)),
         personalize_delivery=bool(data.get("personalize_delivery", True)),
-        reminder_offsets_minutes=data.get("reminder_offsets_minutes") or [60, 15],
+        reminder_offsets_minutes=data.get("reminder_offsets_minutes") or [60, 15, 5],
         prize_summary=data.get("prize_summary"),
         deep_link_active=True,
     )
@@ -191,7 +177,6 @@ def _seed_requirements(db: AsyncSession, event: Event, data: dict) -> None:
 async def submit_for_publish(db: AsyncSession, event: Event, actor_id) -> Event:
     if not event.channel_id:
         raise ValidationAppError("channel_required", "کانال برگزارکننده را مشخص کنید.")
-    creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == event.id))
     approval = await get_setting(db, "event_approval_required", False)
     if approval:
         event.status = EventStatus.PENDING_APPROVAL
@@ -355,7 +340,7 @@ async def copy_event(db: AsyncSession, event: Event, organizer: Organizer, actor
         "channel_id": event.channel_id,
         "required_channel_ids": [rc.channel_id for rc in event.required_channels],
         "prizes": [{"place": p.place, "title": p.title, "description": p.description} for p in event.prizes],
-        "reminder_offsets_minutes": event.reminder_offsets_minutes or [60, 15],
+        "reminder_offsets_minutes": event.reminder_offsets_minutes or [60, 15, 5],
     }
     copy = await create_event(db, organizer, data, actor_id)
     copy.status = EventStatus.DRAFT

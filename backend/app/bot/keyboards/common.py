@@ -349,8 +349,10 @@ def pick_date_kb(prefix: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def wizard_nav(include_skip: bool = False) -> InlineKeyboardMarkup:
+def wizard_nav(include_skip: bool = False, include_back: bool = False) -> InlineKeyboardMarkup:
     row = [ibtn("لغو", callback_data="wiz:cancel", style=DANGER)]
+    if include_back:
+        row.insert(0, ibtn("مرحله قبل", callback_data="wiz:back", style=PRIMARY))
     if include_skip:
         row.insert(0, ibtn("رد کردن", callback_data="wiz:skip", style=SUCCESS))
     return InlineKeyboardMarkup(inline_keyboard=[row])

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from uuid import UUID, uuid4
+from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -17,7 +17,7 @@ def _key(job_type: str, event_id: UUID, extra: str = "") -> str:
 
 
 async def schedule_event_jobs(db: AsyncSession, event: Event) -> None:
-    offsets = event.reminder_offsets_minutes or [60, 15]
+    offsets = event.reminder_offsets_minutes or [60, 15, 5]
     jobs = [
         (JobType.SEND_CREDENTIALS, event.credentials_send_at, "creds"),
         (JobType.EVENT_START, event.starts_at, "start"),
@@ -84,7 +84,7 @@ def cancel_event_jobs_sync(db: Session, event_id: UUID) -> int:
 
 
 def schedule_event_jobs_sync(db: Session, event: Event) -> None:
-    offsets = event.reminder_offsets_minutes or [60, 15]
+    offsets = event.reminder_offsets_minutes or [60, 15, 5]
     jobs = [
         (JobType.SEND_CREDENTIALS, event.credentials_send_at, "creds"),
         (JobType.EVENT_START, event.starts_at, "start"),
