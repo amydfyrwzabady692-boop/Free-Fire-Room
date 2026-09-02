@@ -29,24 +29,61 @@ log = get_logger("worker")
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 
 
-def _run_with_bot(make_coro):
-    """Run a Telegram-sending job in a fresh loop with its own Bot.
+class _BotPool:
+    """Lends one Bot to a whole batch of jobs, built only if a job needs it.
 
-    ``asyncio.run`` creates a new event loop each call, and aiogram pins its
-    aiohttp session to the loop that first used it. Reusing the process-global
-    Bot here raises "Timeout context manager should be used inside a task", so
-    every job gets a short-lived Bot that is closed when it finishes.
+    aiogram pins its aiohttp session to the loop that first uses it, so the
+    process-global Bot cannot be shared with code running under its own
+    ``asyncio.run``. Building one per *job* would be correct but wasteful: a
+    fresh TLS handshake to Telegram for every reminder. One per batch, created
+    lazily, means an idle tick opens no connection at all.
     """
-    from app.bot.loader import make_bot
+
+    def __init__(self) -> None:
+        self._bot = None
+
+    def get(self):
+        if self._bot is None:
+            from app.bot.loader import make_bot
+
+            self._bot = make_bot()
+        return self._bot
+
+    async def aclose(self) -> None:
+        if self._bot is not None:
+            try:
+                await self._bot.session.close()
+            except Exception:  # noqa: BLE001
+                log.exception("bot_session_close_failed")
+            self._bot = None
+
+
+def _run_with_bot(make_coro):
+    """Run one coroutine in its own loop with its own Bot. Used by the
+    single-shot tasks; batches go through :func:`_run_batch` instead."""
 
     async def _main():
-        bot = make_bot()
+        pool = _BotPool()
         try:
-            return await make_coro(bot)
+            return await make_coro(pool.get())
         finally:
-            await bot.session.close()
+            await pool.aclose()
 
     return asyncio.run(_main())
+
+
+def _retry_or_fail(db, job_id, exc: Exception) -> None:
+    db.rollback()
+    job = db.get(ScheduledJob, job_id)
+    if job:
+        job.last_error = str(exc)
+        if job.attempts >= job.max_attempts:
+            job.status = JobStatus.FAILED
+        else:
+            job.status = JobStatus.PENDING
+            job.run_at = datetime.now(UTC) + timedelta(seconds=min(300, 2 ** job.attempts))
+        db.commit()
+    log.exception("job_failed", job_id=str(job_id))
 
 
 @celery_app.task(name="app.workers.tasks.dispatch_due_jobs", bind=True, max_retries=0)
@@ -55,35 +92,47 @@ def dispatch_due_jobs(self):
     try:
         jobs = claim_due_jobs_sync(db, WORKER_ID, limit=25)
         db.commit()
-        for job in jobs:
-            try:
-                _handle_job(db, job)
-                db.commit()
-            except Exception as exc:  # noqa: BLE001
-                db.rollback()
-                job = db.get(ScheduledJob, job.id)
-                if job:
-                    job.last_error = str(exc)
-                    if job.attempts >= job.max_attempts:
-                        job.status = JobStatus.FAILED
-                    else:
-                        job.status = JobStatus.PENDING
-                        job.run_at = datetime.now(UTC) + timedelta(seconds=min(300, 2 ** job.attempts))
-                    db.commit()
-                log.exception("job_failed", job_id=str(job.id) if job else None)
+        if not jobs:
+            # the common case on a quiet bot: no loop, no Bot, no connection
+            return
+        _run_batch(db, jobs)
     finally:
         db.close()
 
 
-def _handle_job(db, job: ScheduledJob) -> None:
+def _run_batch(db, jobs) -> None:
+    """One event loop and at most one Bot for the whole claimed batch."""
+
+    async def _main():
+        pool = _BotPool()
+        try:
+            for job in jobs:
+                job_id = job.id
+                try:
+                    await _handle_job_async(pool, db, job)
+                    db.commit()
+                except Exception as exc:  # noqa: BLE001
+                    _retry_or_fail(db, job_id, exc)
+        finally:
+            await pool.aclose()
+
+    asyncio.run(_main())
+
+
+async def _handle_job_async(pool: "_BotPool", db, job: ScheduledJob) -> None:
     if job.job_type == JobType.SEND_CREDENTIALS:
-        _run_with_bot(lambda bot: _send_credentials(bot, db, job))
+        await _send_credentials(pool.get(), db, job)
         return
     if job.job_type == JobType.REMINDER:
-        _run_with_bot(lambda bot: _send_reminders(bot, db, job))
+        await _send_reminders(pool.get(), db, job)
         job.status = JobStatus.DONE
         job.completed_at = datetime.now(UTC)
         return
+    _handle_job(db, job)
+
+
+def _handle_job(db, job: ScheduledJob) -> None:
+    """Job types that never talk to Telegram."""
     if job.job_type == JobType.EVENT_START:
         event = db.get(Event, job.entity_id)
         if event and event.status not in {EventStatus.CANCELLED, EventStatus.FINISHED}:

@@ -130,7 +130,10 @@ else
 fi
 
 echo "در حال build و اجرا..."
-if ! docker compose $COMPOSE_FILES ${COMPOSE_PROFILES:-} up -d --build --remove-orphans $UP_SERVICES; then
+# no --remove-orphans: it deletes containers carrying this project label
+# that are not in the compose file, which is a foot-gun on a host that
+# runs other stacks. Compose still recreates our own services in place.
+if ! docker compose $COMPOSE_FILES ${COMPOSE_PROFILES:-} up -d --build $UP_SERVICES; then
   echo
   echo "deploy failed — migrate logs:"
   docker compose $COMPOSE_FILES logs migrate --tail 200 || true
