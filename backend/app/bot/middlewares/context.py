@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Awaitable, Callable
+from typing import Any, Callable
 
 from aiogram import BaseMiddleware
 from aiogram.types import TelegramObject, Update, User as TgUser
@@ -11,6 +11,23 @@ from app.core.session import SessionLocal
 from app.services.bans import is_banned
 from app.services.settings import get_setting
 from app.services.users import upsert_from_telegram
+
+
+async def _notify(event: TelegramObject, text: str) -> None:
+    """Answer whichever concrete update carries a chat.
+
+    Outer middlewares on ``dp.update`` receive an ``Update``, not a Message or
+    CallbackQuery, so the concrete object has to be unwrapped before replying.
+    """
+    from aiogram.types import CallbackQuery, Message
+
+    target: TelegramObject | None = event
+    if isinstance(event, Update):
+        target = event.message or event.callback_query or event.edited_message
+    if isinstance(target, CallbackQuery):
+        await target.answer(text, show_alert=True)
+    elif isinstance(target, Message):
+        await target.answer(text)
 
 
 class DbSessionMiddleware(BaseMiddleware):
@@ -99,16 +116,11 @@ class MaintenanceMiddleware(BaseMiddleware):
                 admin = await db.scalar(select(Admin).where(Admin.user_id == user.id, Admin.is_active.is_(True)))
                 is_admin = bool(admin)
             if on and not is_admin:
-                from aiogram.types import CallbackQuery, Message
-
                 text = (
                     "⛔ ربات در حالت تعمیرات است.\n"
                     "فعلاً فقط مدیر ربات می‌تواند استفاده کند.\n"
                     "اگر مالک ربات هستید: پنل مالک → «تعمیرات ربات» را خاموش کنید."
                 )
-                if isinstance(event, Message):
-                    await event.answer(text)
-                elif isinstance(event, CallbackQuery):
-                    await event.answer(text, show_alert=True)
+                await _notify(event, text)
                 return None
         return await handler(event, data)

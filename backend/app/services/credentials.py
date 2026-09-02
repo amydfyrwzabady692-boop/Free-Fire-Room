@@ -5,9 +5,9 @@ from datetime import UTC, datetime
 from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError
 from sqlalchemy import select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session
 
-from app.core.enums import DeliveryStatus, EventStatus, JobStatus, RegistrationStatus
+from app.core.enums import DeliveryStatus, RegistrationStatus
 from app.core.logging import get_logger
 from app.core.security import decrypt_secret
 from app.models.channel import Channel, GlobalRequiredChannel
@@ -15,61 +15,9 @@ from app.models.event import Event, EventRequiredChannel, RoomCredential
 from app.models.jobs import Delivery, ScheduledJob
 from app.models.registration import Registration
 from app.models.user import User
-from app.services.telegram_ops import get_membership
+from app.services.telegram_ops import CHECK_UNAVAILABLE, get_membership
 
 log = get_logger(__name__)
-
-
-async def send_credentials_for_job(db: Session, job: ScheduledJob, bot: Bot, redis=None) -> dict:
-    """Idempotent credential delivery. Safe to retry after worker restart."""
-    event = db.get(Event, job.entity_id)
-    if not event or event.status in {EventStatus.CANCELLED, EventStatus.REJECTED, EventStatus.DRAFT}:
-        job.status = JobStatus.CANCELLED
-        db.flush()
-        return {"skipped": True, "reason": "event_inactive"}
-
-    creds = db.scalar(select(RoomCredential).where(RoomCredential.event_id == event.id))
-    if not creds or creds.purged_at:
-        job.status = JobStatus.FAILED
-        job.last_error = "missing_credentials"
-        db.flush()
-        return {"ok": False, "reason": "missing_credentials"}
-
-    regs = db.scalars(
-        select(Registration)
-        .where(Registration.event_id == event.id, Registration.status == RegistrationStatus.CONFIRMED)
-        .options(selectinload(Registration.user))
-    ).all()
-
-    sent = failed = skipped = 0
-
-    for reg in regs:
-        user = db.get(User, reg.user_id)
-        if not user:
-            skipped += 1
-            continue
-        result = await deliver_one(bot, db, event, user, creds, job, redis)
-        if result == "check_failed":
-            job.status = JobStatus.PENDING
-            job.last_error = "bot_not_admin_on_required_channel"
-            db.flush()
-            return {"ok": False, "reason": "bot_not_admin", "sent": sent, "failed": failed, "skipped": skipped}
-        if result == "sent":
-            sent += 1
-        elif result in {"skipped", "already"}:
-            skipped += 1
-        else:
-            failed += 1
-
-    creds.sent_at = datetime.now(UTC)
-    job.status = JobStatus.DONE if failed == 0 or sent > 0 else JobStatus.FAILED
-    job.completed_at = datetime.now(UTC)
-    job.last_error = None if failed == 0 else f"failed={failed}"
-    if event.status in {EventStatus.PUBLISHED, EventStatus.FULL}:
-        event.status = EventStatus.STARTED
-    db.flush()
-    log.info("credentials_job_done", event_id=str(event.id), sent=sent, failed=failed, skipped=skipped)
-    return {"sent": sent, "failed": failed, "skipped": skipped}
 
 
 def _collect_required_chat_ids(db: Session, event: Event) -> list[int]:
@@ -96,10 +44,13 @@ def _collect_required_chat_ids(db: Session, event: Event) -> list[int]:
 
 
 async def _recheck_user_async(bot: Bot, user: User, chat_ids: list[int]) -> tuple[bool, str | None]:
+    """Returns (eligible, reason). A reason of ``bot_not_admin`` or
+    ``check_unavailable`` means the check could not be completed - the caller
+    must retry rather than treat the player as ineligible."""
     for chat_id in chat_ids:
         result = await get_membership(bot, chat_id, user.telegram_id)
-        if result.error == "bot_not_admin":
-            return False, "bot_not_admin"
+        if result.unknown:
+            return False, result.error
         if not result.ok:
             return False, f"left_channel:{chat_id}"
     return True, None
@@ -173,8 +124,12 @@ async def deliver_one(bot: Bot, db: Session, event: Event, user: User, creds: Ro
     if is_banned_sync(db, user, BanScope.PARTICIPATE):
         ok, reason = False, "banned"
     if not ok:
+        # we could not verify this player: leave their registration alone and
+        # let the job retry, instead of demoting them to "ineligible"
         if reason == "bot_not_admin":
             return "check_failed"
+        if reason == CHECK_UNAVAILABLE:
+            return "check_unavailable"
         _upsert_delivery(db, user=user, event=event, job=job, idem=idem, status=DeliveryStatus.SKIPPED, error=reason)
         reg = db.scalar(
             select(Registration).where(Registration.event_id == event.id, Registration.user_id == user.id)

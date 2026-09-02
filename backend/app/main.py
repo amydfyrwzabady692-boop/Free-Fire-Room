@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -110,7 +110,10 @@ async def ready():
 
 
 @app.post(settings.webhook_path)
-async def telegram_webhook(request: Request, x_telegram_bot_api_secret_token: str | None = None):
+async def telegram_webhook(
+    request: Request,
+    x_telegram_bot_api_secret_token: str | None = Header(default=None),
+):
     if settings.telegram_mode != "webhook":
         return {"ok": True, "ignored": True}
     if x_telegram_bot_api_secret_token != settings.webhook_secret:

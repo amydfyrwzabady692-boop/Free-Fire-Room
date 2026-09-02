@@ -7,7 +7,7 @@ import socket
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 
 from app.core.enums import BroadcastStatus, DeliveryStatus, EventStatus, JobStatus, JobType
 from app.core.logging import get_logger
@@ -15,10 +15,12 @@ from app.core.session import SyncSessionLocal
 from app.models.broadcast import BroadcastCampaign, BroadcastDelivery
 from app.models.channel import Channel
 from app.models.event import Event, RoomCredential
-from app.models.jobs import ScheduledJob
-from app.models.organizer import Organizer
+from app.models.announcement import CustomAnnouncement
+from app.models.jobs import Delivery, Notification, ScheduledJob
+from app.models.organizer import Organizer, OrganizerTrustEvent
 from app.models.registration import Registration
 from app.models.user import User
+from app.services import trust
 from app.services.credentials import deliver_one
 from app.services.scheduler import claim_due_jobs_sync
 from app.workers.celery_app import celery_app
@@ -27,8 +29,24 @@ log = get_logger("worker")
 WORKER_ID = f"{socket.gethostname()}:{os.getpid()}"
 
 
-def _run(coro):
-    return asyncio.run(coro)
+def _run_with_bot(make_coro):
+    """Run a Telegram-sending job in a fresh loop with its own Bot.
+
+    ``asyncio.run`` creates a new event loop each call, and aiogram pins its
+    aiohttp session to the loop that first used it. Reusing the process-global
+    Bot here raises "Timeout context manager should be used inside a task", so
+    every job gets a short-lived Bot that is closed when it finishes.
+    """
+    from app.bot.loader import make_bot
+
+    async def _main():
+        bot = make_bot()
+        try:
+            return await make_coro(bot)
+        finally:
+            await bot.session.close()
+
+    return asyncio.run(_main())
 
 
 @celery_app.task(name="app.workers.tasks.dispatch_due_jobs", bind=True, max_retries=0)
@@ -59,10 +77,10 @@ def dispatch_due_jobs(self):
 
 def _handle_job(db, job: ScheduledJob) -> None:
     if job.job_type == JobType.SEND_CREDENTIALS:
-        _run(_send_credentials(db, job))
+        _run_with_bot(lambda bot: _send_credentials(bot, db, job))
         return
     if job.job_type == JobType.REMINDER:
-        _run(_send_reminders(db, job))
+        _run_with_bot(lambda bot: _send_reminders(bot, db, job))
         job.status = JobStatus.DONE
         job.completed_at = datetime.now(UTC)
         return
@@ -98,12 +116,10 @@ def _handle_job(db, job: ScheduledJob) -> None:
     job.completed_at = datetime.now(UTC)
 
 
-async def _send_credentials(db, job: ScheduledJob) -> None:
-    from app.bot.loader import get_bot
+async def _send_credentials(bot, db, job: ScheduledJob) -> None:
     from redis import Redis
     from app.core.config import get_settings
 
-    bot = get_bot()
     event = db.get(Event, job.entity_id)
     if not event or event.status in {EventStatus.CANCELLED, EventStatus.REJECTED, EventStatus.DRAFT}:
         job.status = JobStatus.CANCELLED
@@ -143,7 +159,7 @@ async def _send_credentials(db, job: ScheduledJob) -> None:
         return
     try:
         regs = db.scalars(select(Registration).where(Registration.event_id == event.id, Registration.status == "confirmed")).all()
-        sent = failed = skipped = check_failed = 0
+        sent = failed = skipped = not_admin = unverified = 0
         for reg in regs:
             user = db.get(User, reg.user_id)
             if not user:
@@ -155,34 +171,56 @@ async def _send_credentials(db, job: ScheduledJob) -> None:
             elif result == "already":
                 skipped += 1
             elif result == "check_failed":
-                check_failed += 1
+                not_admin += 1
+            elif result == "check_unavailable":
+                unverified += 1
             elif result == "skipped":
                 skipped += 1
             else:
                 failed += 1
                 await asyncio.sleep(min(8, 0.05 * (failed + 1)))
-        if check_failed:
+        if not_admin or unverified:
+            # nobody was demoted; retry shortly so these players still get their creds
             job.status = JobStatus.PENDING
             job.run_at = datetime.now(UTC) + timedelta(minutes=2)
-            job.last_error = "bot_not_admin_on_required_channel"
-            org = db.get(Organizer, event.organizer_id)
-            org_user = db.get(User, org.user_id) if org else None
-            if org_user:
-                try:
-                    await bot.send_message(
-                        org_user.telegram_id,
-                        f"ROOM ID / PASS کاستوم «{html.escape(event.title)}» ارسال نشد چون ربات دیگر ادمین کانال جوین اجباری نیست.\n"
-                        "ربات را دوباره ادمین کنید تا ارسال تکرار شود.",
-                    )
-                except Exception:
-                    log.exception("organizer_bot_not_admin_warn_failed", event_id=str(event.id))
-            log.warning("credentials_blocked_bot_not_admin", event_id=str(event.id), check_failed=check_failed)
-            return
+            job.last_error = "bot_not_admin_on_required_channel" if not_admin else "membership_check_unavailable"
+            if not_admin:
+                org = db.get(Organizer, event.organizer_id)
+                org_user = db.get(User, org.user_id) if org else None
+                if org_user:
+                    try:
+                        await bot.send_message(
+                            org_user.telegram_id,
+                            f"⚠️ ROOM ID / PASS کاستوم «{html.escape(event.title)}» برای {not_admin} نفر ارسال نشد "
+                            "چون ربات دیگر ادمین کانال جوین اجباری نیست.\n"
+                            "ربات را دوباره ادمین کنید؛ ربات خودش تا چند دقیقه دیگر دوباره تلاش می‌کند.",
+                        )
+                    except Exception:
+                        log.exception("organizer_bot_not_admin_warn_failed", event_id=str(event.id))
+            log.warning(
+                "credentials_delivery_incomplete",
+                event_id=str(event.id),
+                not_admin=not_admin,
+                unverified=unverified,
+                sent=sent,
+            )
+            if sent == 0:
+                return
         creds.sent_at = datetime.now(UTC)
         event.status = EventStatus.STARTED
         from app.services.reports import fill_deadline
 
         now = datetime.now(UTC)
+        payload = dict(job.payload or {})
+        if not payload.get("organizer_notified"):
+            # the organizer scheduled these creds ahead of time and has heard
+            # nothing since; tell them the send actually happened
+            payload["organizer_notified"] = True
+            job.payload = payload
+            org = db.get(Organizer, event.organizer_id)
+            if org and sent:
+                trust.record_sync(db, org, "credentials_delivered", related_event_id=event.id)
+            await _notify_organizer_delivery_done(bot, db, event, sent=sent, skipped=skipped, failed=failed)
         if now < fill_deadline(event):
             job.status = JobStatus.PENDING
             job.run_at = now + timedelta(minutes=2)
@@ -198,13 +236,84 @@ async def _send_credentials(db, job: ScheduledJob) -> None:
         redis.delete(lock_key)
 
 
-async def _send_reminders(db, job: ScheduledJob) -> None:
-    from app.bot.loader import get_bot
+async def _notify_organizer_delivery_done(bot, db, event: Event, *, sent: int, skipped: int, failed: int) -> None:
+    org = db.get(Organizer, event.organizer_id)
+    org_user = db.get(User, org.user_id) if org else None
+    if not org_user:
+        return
+    from app.core.config import get_settings
 
-    bot = get_bot()
+    fill = get_settings().custom_fill_minutes
+    lines = [
+        f"✅ ROOM ID / PASS کاستوم «{html.escape(event.title)}» ارسال شد.",
+        "",
+        f"📨 دریافت کردند: <b>{sent}</b>",
+    ]
+    if skipped:
+        lines.append(f"⏭ ارسال نشد (از کانال خارج شده یا قبلاً گرفته بود): {skipped}")
+    if failed:
+        lines.append(f"❌ خطا در ارسال: {failed}")
+    lines.append("")
+    lines.append(
+        f"تا {fill} دقیقه بعد از ساعت شروع، هر کس شرایط را کامل کند مشخصات برایش می‌رود "
+        "و همین‌جا خبر نهایی را می‌گیرید."
+    )
+    try:
+        await bot.send_message(org_user.telegram_id, "\n".join(lines))
+    except Exception:
+        log.exception("organizer_delivery_summary_failed", event_id=str(event.id))
+
+
+async def _remind_organizer_before_start(bot, db, event: Event) -> None:
+    """Warn the organizer ahead of time, while they can still act.
+
+    Without this the first thing they hear is the prompt at the very start of
+    the 5-minute window, which is easy to miss.
+    """
+    creds = db.scalar(select(RoomCredential).where(RoomCredential.event_id == event.id))
+    from app.services.reports import creds_were_provided
+
+    org = db.get(Organizer, event.organizer_id)
+    org_user = db.get(User, org.user_id) if org else None
+    if not org_user or org_user.is_bot_blocked:
+        return
+
+    from app.core.config import get_settings
+    from app.core.time import format_local
+
+    grace = get_settings().credentials_grace_minutes
+    minutes = max(0, int((event.starts_at - datetime.now(UTC)).total_seconds() // 60))
+    when = format_local(event.starts_at, event.timezone)
+    if creds_were_provided(creds):
+        text = (
+            f"🔔 کاستوم «{html.escape(event.title)}» تا {minutes} دقیقه دیگر ({when}) شروع می‌شود.\n"
+            "ROOM ID و PASS را از قبل ثبت کرده‌اید ✅\n"
+            "سر ساعت خودکار برای واجدین شرایط ارسال می‌شود و نتیجه را همین‌جا می‌گیرید."
+        )
+        markup = None
+    else:
+        text = (
+            f"🔔 کاستوم «{html.escape(event.title)}» تا {minutes} دقیقه دیگر ({when}) شروع می‌شود.\n\n"
+            "❗️ هنوز ROOM ID و PASS را ثبت نکرده‌اید.\n"
+            f"می‌توانید همین حالا ثبت کنید تا سر ساعت خودکار ارسال شود، وگرنه سر ساعت فقط {grace} دقیقه فرصت دارید.\n"
+            "دکمه سبز زیر را بزنید."
+        )
+        from app.bot.keyboards.common import send_creds_kb
+
+        markup = send_creds_kb(event.public_token)
+    try:
+        await bot.send_message(org_user.telegram_id, text, reply_markup=markup)
+    except Exception:
+        log.exception("organizer_pre_start_reminder_failed", event_id=str(event.id))
+
+
+async def _send_reminders(bot, db, job: ScheduledJob) -> None:
     event = db.get(Event, job.entity_id)
     if not event:
         return
+    if event.status in {EventStatus.CANCELLED, EventStatus.REJECTED, EventStatus.FINISHED}:
+        return
+    await _remind_organizer_before_start(bot, db, event)
     regs = db.scalars(select(Registration).where(Registration.event_id == event.id, Registration.status == "confirmed")).all()
     text = (
         f"🔔 یادآوری: کاستوم «{html.escape(event.title)}» به‌زودی شروع می‌شود.\n"
@@ -263,6 +372,8 @@ async def _expire_missing_credentials(bot, db, event: Event, job: ScheduledJob) 
     event.finished_at = datetime.now(UTC)
 
     org = db.get(Organizer, event.organizer_id)
+    if org:
+        trust.record_sync(db, org, "credentials_missed", related_event_id=event.id)
     org_user = db.get(User, org.user_id) if org else None
     if org_user:
         try:
@@ -341,7 +452,7 @@ def send_event_credentials(event_id: str):
             db.flush()
         else:
             job.status = JobStatus.RUNNING
-        _run(_send_credentials(db, job))
+        _run_with_bot(lambda bot: _send_credentials(bot, db, job))
         db.commit()
     finally:
         db.close()
@@ -351,32 +462,48 @@ def send_event_credentials(event_id: str):
 def run_broadcast(self, campaign_id: str):
     db = SyncSessionLocal()
     try:
-        _run(_broadcast(db, UUID(campaign_id)))
+        _run_with_bot(lambda bot: _broadcast(bot, db, UUID(campaign_id)))
         db.commit()
     finally:
         db.close()
 
 
-async def _broadcast(db, campaign_id: UUID) -> None:
-    from app.bot.loader import get_bot
-
+async def _broadcast(bot, db, campaign_id: UUID) -> None:
     camp = db.get(BroadcastCampaign, campaign_id)
     if not camp or camp.status not in {BroadcastStatus.RUNNING, BroadcastStatus.SCHEDULED, "running", "scheduled"}:
         return
     camp.status = BroadcastStatus.RUNNING
     camp.started_at = datetime.now(UTC)
     users = db.scalars(select(User).where(User.deleted_at.is_(None), User.is_bot_blocked.is_(False))).all()
-    bot = get_bot()
-    for user in users:
+    from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+
+    for i, user in enumerate(users, start=1):
         if camp.status == BroadcastStatus.PAUSED:
             break
         try:
             await bot.send_message(user.telegram_id, camp.body)
             db.add(BroadcastDelivery(campaign_id=camp.id, user_id=user.id, status=DeliveryStatus.SENT, sent_at=datetime.now(UTC)))
             camp.sent_count += 1
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(exc.retry_after + 0.5)
+            try:
+                await bot.send_message(user.telegram_id, camp.body)
+                db.add(BroadcastDelivery(campaign_id=camp.id, user_id=user.id, status=DeliveryStatus.SENT, sent_at=datetime.now(UTC)))
+                camp.sent_count += 1
+            except Exception as retry_exc:  # noqa: BLE001
+                db.add(BroadcastDelivery(campaign_id=camp.id, user_id=user.id, status=DeliveryStatus.FAILED, error_message=str(retry_exc)))
+                camp.fail_count += 1
+        except TelegramForbiddenError as exc:
+            # user blocked the bot: stop retrying them on every future campaign
+            user.is_bot_blocked = True
+            db.add(BroadcastDelivery(campaign_id=camp.id, user_id=user.id, status=DeliveryStatus.PERMANENT_FAIL, error_message=str(exc)))
+            camp.fail_count += 1
         except Exception as exc:  # noqa: BLE001
             db.add(BroadcastDelivery(campaign_id=camp.id, user_id=user.id, status=DeliveryStatus.FAILED, error_message=str(exc)))
             camp.fail_count += 1
+        if i % 50 == 0:
+            # checkpoint so a crash mid-campaign does not replay every send
+            db.commit()
         await asyncio.sleep(1 / max(get_outbound_rate(), 1))
     camp.status = BroadcastStatus.DONE
     camp.finished_at = datetime.now(UTC)
@@ -392,17 +519,15 @@ def get_outbound_rate() -> int:
 def recheck_channel_admin():
     db = SyncSessionLocal()
     try:
-        _run(_recheck(db))
+        _run_with_bot(lambda bot: _recheck(bot, db))
         db.commit()
     finally:
         db.close()
 
 
-async def _recheck(db) -> None:
-    from app.bot.loader import get_bot
+async def _recheck(bot, db) -> None:
     from app.services.telegram_ops import inspect_bot_admin
 
-    bot = get_bot()
     channels = db.scalars(select(Channel).where(Channel.deleted_at.is_(None))).all()
     for ch in channels:
         result = await inspect_bot_admin(bot, ch.telegram_chat_id)
@@ -411,6 +536,75 @@ async def _recheck(db) -> None:
         ch.last_check_error = result.error
         if not result.is_admin:
             log.warning("channel_bot_not_admin", chat_id=ch.telegram_chat_id)
+
+
+PURGE_BATCH = 200
+
+
+def _purge_events_older_than(db, cutoff: datetime) -> int:
+    """Hard-delete finished customs and everything hanging off them.
+
+    Deletion goes through a Core statement rather than ``db.delete(event)``:
+    the ORM would try to NULL out ``registrations.event_id`` /
+    ``room_credentials.event_id`` (both NOT NULL) instead of letting the
+    database cascade, which fails with an IntegrityError. Tables whose FK is
+    not ON DELETE CASCADE are cleared by hand first.
+    """
+    removed = 0
+    while True:
+        event_ids = list(
+            db.scalars(select(Event.id).where(Event.starts_at < cutoff).limit(PURGE_BATCH))
+        )
+        if not event_ids:
+            return removed
+
+        db.execute(
+            update(OrganizerTrustEvent)
+            .where(OrganizerTrustEvent.related_event_id.in_(event_ids))
+            .values(related_event_id=None)
+        )
+        db.execute(delete(Notification).where(Notification.event_id.in_(event_ids)))
+        db.execute(update(Delivery).where(Delivery.event_id.in_(event_ids)).values(event_id=None))
+
+        job_ids = list(db.scalars(select(ScheduledJob.id).where(ScheduledJob.entity_id.in_(event_ids))))
+        if job_ids:
+            db.execute(update(Delivery).where(Delivery.job_id.in_(job_ids)).values(job_id=None))
+            db.execute(delete(ScheduledJob).where(ScheduledJob.id.in_(job_ids)))
+
+        db.execute(delete(Event).where(Event.id.in_(event_ids)))
+        removed += len(event_ids)
+
+
+def _purge_announcements_older_than(db, cutoff: datetime) -> int:
+    rows = list(db.scalars(select(CustomAnnouncement).where(CustomAnnouncement.starts_at < cutoff)))
+    for row in rows:
+        db.delete(row)
+    return len(rows)
+
+
+@celery_app.task(name="app.workers.tasks.purge_old_events")
+def purge_old_events():
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    cutoff = datetime.now(UTC) - timedelta(hours=settings.event_retention_hours)
+    db = SyncSessionLocal()
+    try:
+        removed_events = _purge_events_older_than(db, cutoff)
+        removed_announcements = _purge_announcements_older_than(db, cutoff)
+        db.commit()
+        if removed_events or removed_announcements:
+            log.info(
+                "purge_old_events_done",
+                events=removed_events,
+                announcements=removed_announcements,
+                cutoff=cutoff.isoformat(),
+            )
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 @celery_app.task(name="app.workers.tasks.purge_old_credentials")
@@ -434,29 +628,23 @@ def purge_old_credentials():
 
 @celery_app.task(name="app.workers.tasks.send_telegram_message")
 def send_telegram_message(telegram_id: int, text: str):
-    from app.bot.loader import get_bot
-
-    async def _s():
-        await get_bot().send_message(telegram_id, text)
-
-    _run(_s())
+    _run_with_bot(lambda bot: bot.send_message(telegram_id, text))
 
 
 @celery_app.task(name="app.workers.tasks.send_daily_custom_digest")
 def send_daily_custom_digest():
     db = SyncSessionLocal()
     try:
-        _run(_send_daily_custom_digest(db))
+        _run_with_bot(lambda bot: _send_daily_custom_digest(bot, db))
         db.commit()
     finally:
         db.close()
 
 
-async def _send_daily_custom_digest(db) -> None:
+async def _send_daily_custom_digest(bot, db) -> None:
     from redis import Redis
     from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
     from app.bot.keyboards.common import event_list_kb
-    from app.bot.loader import get_bot
     from app.core.config import get_settings
     from app.core.enums import UserStatus
     from app.core.time import DEFAULT_TZ, to_tz
@@ -490,7 +678,6 @@ async def _send_daily_custom_digest(db) -> None:
             User.status == UserStatus.ACTIVE,
         )
     ).all()
-    bot = get_bot()
     sent = failed = skipped = 0
     for user in users:
         if not user.telegram_id:

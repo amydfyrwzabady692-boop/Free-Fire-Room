@@ -3,8 +3,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramAPIError, TelegramBadRequest, TelegramForbiddenError
+from aiogram.exceptions import (
+    TelegramAPIError,
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
 from aiogram.enums import ChatMemberStatus
+
+#: returned when the membership check itself could not run. The player's
+#: eligibility is unknown, so callers must retry instead of treating them as
+#: "left the channel".
+CHECK_UNAVAILABLE = "check_unavailable"
 
 ADMIN_STATUSES = {
     ChatMemberStatus.CREATOR,
@@ -23,6 +35,11 @@ class MembershipResult:
     ok: bool
     status: str | None
     error: str | None = None
+
+    @property
+    def unknown(self) -> bool:
+        """True when the answer is "we could not check", not "not a member"."""
+        return self.error in {CHECK_UNAVAILABLE, "bot_not_admin"}
 
 
 @dataclass
@@ -46,12 +63,17 @@ async def get_membership(bot: Bot, chat_id: int, user_id: int) -> MembershipResu
         return MembershipResult(status in MEMBER_STATUSES, status)
     except TelegramForbiddenError:
         return MembershipResult(False, None, "bot_not_admin")
+    except (TelegramRetryAfter, TelegramNetworkError, TelegramServerError):
+        # transient: Telegram is throttling or unreachable
+        return MembershipResult(False, None, CHECK_UNAVAILABLE)
     except TelegramBadRequest as exc:
         return MembershipResult(False, None, str(exc))
-    except TelegramAPIError as exc:
-        return MembershipResult(False, None, str(exc))
-    except Exception as exc:  # noqa: BLE001
-        return MembershipResult(False, None, str(exc))
+    except TelegramAPIError:
+        return MembershipResult(False, None, CHECK_UNAVAILABLE)
+    except Exception:  # noqa: BLE001
+        # anything non-Telegram (event-loop, DNS, SSL, ...) is our problem, not
+        # the player's - never let it look like they left the channel
+        return MembershipResult(False, None, CHECK_UNAVAILABLE)
 
 
 async def inspect_bot_admin(bot: Bot, chat_id: int | str) -> BotAdminResult:

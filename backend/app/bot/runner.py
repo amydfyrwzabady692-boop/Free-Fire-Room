@@ -17,14 +17,18 @@ async def _run_scheduled_jobs() -> None:
     from app.workers.tasks import (
         dispatch_due_jobs,
         purge_old_credentials,
+        purge_old_events,
         recheck_channel_admin,
         send_daily_custom_digest,
     )
 
     settings = get_settings()
+    # the tick can be up to a minute wide, so each slot below is a 2-minute
+    # window guarded by a last-run marker rather than an exact minute match
     tick = max(15, settings.job_dispatch_interval_seconds)
     last_recheck_hour = None
     last_purge_day = None
+    last_event_purge_hour = None
     last_digest_day = None
     while True:
         try:
@@ -32,7 +36,7 @@ async def _run_scheduled_jobs() -> None:
         except Exception:
             log.exception("dispatch_due_jobs_failed")
         now = datetime.now(UTC)
-        if now.minute == 15 and last_recheck_hour != now.hour:
+        if 15 <= now.minute < 17 and last_recheck_hour != now.hour:
             last_recheck_hour = now.hour
             try:
                 await asyncio.to_thread(recheck_channel_admin.run)
@@ -44,6 +48,12 @@ async def _run_scheduled_jobs() -> None:
                 await asyncio.to_thread(purge_old_credentials.run)
             except Exception:
                 log.exception("purge_old_credentials_failed")
+        if 5 <= now.minute < 7 and last_event_purge_hour != now.hour:
+            last_event_purge_hour = now.hour
+            try:
+                await asyncio.to_thread(purge_old_events.run)
+            except Exception:
+                log.exception("purge_old_events_failed")
         if now.hour == 14 and 30 <= now.minute < 32 and last_digest_day != now.date():
             last_digest_day = now.date()
             try:

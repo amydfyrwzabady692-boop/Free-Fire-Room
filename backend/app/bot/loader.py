@@ -12,13 +12,25 @@ _bot: Bot | None = None
 _dp: Dispatcher | None = None
 
 
+def make_bot() -> Bot:
+    """Build a fresh Bot for the event loop that will use it.
+
+    aiogram caches its aiohttp session on the loop that created it, so the
+    process-global Bot cannot be shared with code running under its own
+    ``asyncio.run()`` (background jobs). Those callers build their own Bot and
+    close its session when the job finishes.
+    """
+    settings = get_settings()
+    if not settings.bot_token:
+        raise RuntimeError("BOT_TOKEN is not configured")
+    return Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+
+
 def get_bot() -> Bot:
+    """Process-global Bot for the dispatcher loop (polling / webhook / API)."""
     global _bot
     if _bot is None:
-        settings = get_settings()
-        if not settings.bot_token:
-            raise RuntimeError("BOT_TOKEN is not configured")
-        _bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+        _bot = make_bot()
     return _bot
 
 

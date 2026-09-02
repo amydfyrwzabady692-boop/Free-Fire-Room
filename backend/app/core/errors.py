@@ -39,8 +39,13 @@ class ConflictError(AppError):
 
 
 class RateLimitError(AppError):
-    def __init__(self, code: str = "rate_limited", message: str = "تعداد درخواست بیش از حد مجاز است"):
-        super().__init__(code, message, status.HTTP_429_TOO_MANY_REQUESTS)
+    def __init__(
+        self,
+        code: str = "rate_limited",
+        message: str = "تعداد درخواست بیش از حد مجاز است",
+        details: dict | None = None,
+    ):
+        super().__init__(code, message, status.HTTP_429_TOO_MANY_REQUESTS, details)
 
 
 class ValidationAppError(AppError):

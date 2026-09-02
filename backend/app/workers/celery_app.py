@@ -31,6 +31,10 @@ celery_app.conf.update(
             "task": "app.workers.tasks.purge_old_credentials",
             "schedule": crontab(hour=3, minute=10),
         },
+        "purge-old-events": {
+            "task": "app.workers.tasks.purge_old_events",
+            "schedule": crontab(minute=5),
+        },
         "daily-prize-custom-digest": {
             "task": "app.workers.tasks.send_daily_custom_digest",
             "schedule": crontab(hour=14, minute=30),
