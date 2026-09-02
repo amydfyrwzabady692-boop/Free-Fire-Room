@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 
 from app.services.requirements import Checklist, CheckItem
 from app.core.enums import RequirementStatus

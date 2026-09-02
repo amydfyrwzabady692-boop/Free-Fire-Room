@@ -1,15 +1,13 @@
 """E2E-style happy path using services (no live Telegram)."""
 
-from datetime import UTC, datetime, timedelta
 
 from tests.conftest import make_event, make_organizer, make_user
 from app.core.security import encrypt_secret
 from app.models.event import RoomCredential
-from app.models.jobs import Delivery
 from app.models.registration import Registration
 from app.services.registration import try_confirm_with_lock_sync
 from app.services.scheduler import cancel_event_jobs_sync, schedule_event_jobs_sync
-from app.core.enums import DeliveryStatus, EventStatus
+from app.core.enums import EventStatus
 from sqlalchemy import func, select
 
 

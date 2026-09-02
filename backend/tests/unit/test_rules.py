@@ -1,6 +1,5 @@
 from datetime import UTC, datetime, timedelta
 
-from app.core.enums import RequirementStatus
 from app.core.security import decrypt_secret, encrypt_secret, generate_unguessable_token
 from app.services.registration import try_confirm_with_lock_sync
 from app.services.referrals import apply_referral_sync
@@ -90,6 +89,7 @@ def test_reschedule_updates_run_at(db):
     from tests.conftest import make_event, make_organizer, make_user
     from app.models.jobs import ScheduledJob
     from app.core.enums import JobType
+    from app.core.time import as_utc
 
     host = make_user(db, 31)
     org = make_organizer(db, host)
@@ -101,7 +101,8 @@ def test_reschedule_updates_run_at(db):
     job = db.scalar(
         select(ScheduledJob).where(ScheduledJob.entity_id == event.id, ScheduledJob.job_type == JobType.SEND_CREDENTIALS)
     )
-    assert job.run_at == event.credentials_send_at
+    # SQLite drops tzinfo on the round-trip; compare the instants, not the reprs
+    assert as_utc(job.run_at) == as_utc(event.credentials_send_at)
 
 
 def test_credentials_idempotent_delivery_row(db):
@@ -140,6 +141,8 @@ def test_credentials_idempotent_delivery_row(db):
 
 
 def test_job_claim_not_double(db):
+    from uuid import uuid4
+
     from app.models.jobs import ScheduledJob
     from app.core.enums import JobType, JobStatus
     from app.services.scheduler import claim_due_jobs_sync
@@ -147,7 +150,7 @@ def test_job_claim_not_double(db):
     job = ScheduledJob(
         job_type=JobType.SEND_CREDENTIALS,
         entity_type="event",
-        entity_id=uuid.uuid4() if False else __import__("uuid").uuid4(),
+        entity_id=uuid4(),
         run_at=datetime.now(UTC) - timedelta(seconds=1),
         status=JobStatus.PENDING,
         idempotency_key="only-once",

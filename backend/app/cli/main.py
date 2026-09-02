@@ -6,8 +6,8 @@ import sys
 
 from sqlalchemy import func, select
 
-from app.core.security import encrypt_secret, generate_unguessable_token, hash_password
-from app.core.session import SessionLocal, SyncSessionLocal
+from app.core.security import hash_password
+from app.core.session import SessionLocal
 from app.models.admin import Admin
 from app.models.user import Permission, Role, RolePermission, User, UserRole
 from app.services.users import get_by_telegram
@@ -59,7 +59,7 @@ async def seed() -> None:
                 )
                 if not exists:
                     db.add(RolePermission(role_id=role.id, permission_id=perms[code].id))
-        from app.models.admin import BotContent, SystemSetting
+        from app.models.admin import BotContent
         from app.locales.fa import TOS, HELP, PRIVACY, DISCLAIMER
 
         for key, body in {"welcome": TOS, "help": HELP, "privacy": PRIVACY, "disclaimer": DISCLAIMER}.items():

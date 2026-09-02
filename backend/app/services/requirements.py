@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +13,7 @@ from app.models.channel import Channel, GlobalRequiredChannel
 from app.models.event import Event, EventRequiredChannel, EventRequirement
 from app.models.referral import Referral
 from app.models.registration import Registration
-from app.models.user import User, UserProfile
+from app.models.user import User
 from app.services.bans import is_banned, is_banned_sync
 
 if TYPE_CHECKING:

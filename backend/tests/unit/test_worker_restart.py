@@ -1,9 +1,6 @@
-from datetime import UTC, datetime, timedelta
 
 from tests.conftest import make_event, make_organizer, make_user
-from app.models.jobs import ScheduledJob
 from app.services.scheduler import claim_due_jobs_sync, schedule_event_jobs_sync
-from sqlalchemy import select
 
 
 def test_worker_restart_does_not_reclaim_running(db):

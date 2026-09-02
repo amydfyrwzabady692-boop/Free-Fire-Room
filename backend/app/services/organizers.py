@@ -6,7 +6,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.enums import OrganizerStatus, RoleName, TrustEventType
-from app.core.errors import ConflictError, ValidationAppError
 from app.models.organizer import Organizer, OrganizerTrustEvent
 from app.models.user import Role, User, UserRole
 from app.services.audit import write_audit

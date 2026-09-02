@@ -7,7 +7,6 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from app.core.errors import ValidationAppError
 from app.core.security import generate_unguessable_token
 from app.models.referral import Referral, ReferralLink
 from app.models.user import User

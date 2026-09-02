@@ -27,6 +27,7 @@ node_modules/
 frontend/.next/
 frontend/out/
 frontend/coverage/
+frontend/tsconfig.tsbuildinfo
 
 # OS / IDE
 .DS_Store

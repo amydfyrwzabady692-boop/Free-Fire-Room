@@ -1,4 +1,3 @@
-from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -30,11 +29,7 @@ def _uuid(_type, compiler, **kw):
 
 from app.core.db import Base
 from app import models  # noqa: F401
-from app.core.session import get_db
 from app.main import app
-from app.core.security import create_access_token, hash_password
-from app.models.admin import Admin
-from app.models.user import Role, User, UserRole
 
 
 def _client():
