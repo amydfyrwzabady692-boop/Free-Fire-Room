@@ -13,7 +13,19 @@ class ORMModel(BaseModel):
 
 class TokenResponse(BaseModel):
     access_token: str
+    #: minted on every login but there was no endpoint to spend it, so the
+    #: panel simply died after access_token_expire_minutes
+    refresh_token: str | None = None
     token_type: str = "bearer"
+    expires_in: int | None = None
+
+
+class RefreshIn(BaseModel):
+    refresh_token: str
+
+
+class OtpRequestIn(BaseModel):
+    telegram_id: int
 
 
 class LoginPasswordIn(BaseModel):

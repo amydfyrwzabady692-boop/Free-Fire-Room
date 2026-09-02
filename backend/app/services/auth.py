@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.errors import ForbiddenError, RateLimitError, UnauthorizedError, ValidationAppError
 from app.core.rate_limit import hit_rate_limit
+from app.core.time import as_utc
 from app.core.redis import get_redis
 from app.core.security import (
     create_access_token,
@@ -17,7 +18,6 @@ from app.core.security import (
     decrypt_secret,
     encrypt_secret,
     generate_otp,
-    hash_password,
     verify_password,
     verify_telegram_login,
 )
@@ -158,6 +158,78 @@ async def _issue_user_tokens(db: AsyncSession, user: User, ip: str | None, ua: s
     access = create_access_token(str(user.id), extra=extra)
     await db.flush()
     return access, refresh
+
+
+async def refresh_tokens(
+    db: AsyncSession, refresh_token: str, ip: str | None, ua: str | None
+) -> tuple[str, str]:
+    """Trade a refresh token for a fresh pair.
+
+    Admin refresh tokens are checked against their AdminSession row, so
+    revoking a session really does log that browser out; the old jti is
+    rotated on every use.
+    """
+    from app.core.security import decode_token
+
+    try:
+        payload = decode_token(refresh_token)
+    except ValueError as exc:
+        raise UnauthorizedError("invalid_token", "نشست نامعتبر است.") from exc
+    if payload.get("type") != "refresh":
+        raise UnauthorizedError("invalid_token", "نشست نامعتبر است.")
+    from uuid import UUID as _UUID
+
+    from app.models.user import User as _User
+
+    try:
+        user_id = _UUID(payload["sub"])
+    except (KeyError, ValueError) as exc:
+        raise UnauthorizedError("invalid_token", "نشست نامعتبر است.") from exc
+    user = await db.scalar(select(_User).where(_User.id == user_id, _User.deleted_at.is_(None)))
+    if not user:
+        raise UnauthorizedError("user_not_found", "کاربر یافت نشد.")
+
+    admin = await db.scalar(select(Admin).where(Admin.user_id == user.id, Admin.is_active.is_(True)))
+    now = datetime.now(UTC)
+    if admin:
+        jti = payload.get("jti")
+        session = await db.scalar(
+            select(AdminSession).where(AdminSession.admin_id == admin.id, AdminSession.refresh_jti == jti)
+        )
+        # as_utc: whether expires_at comes back tz-aware depends on the driver,
+        # and comparing a naive value to an aware one raises
+        if not session or session.revoked_at is not None or as_utc(session.expires_at) <= now:
+            raise UnauthorizedError("session_expired", "نشست منقضی شده است. دوباره وارد شوید.")
+        session.refresh_jti = uuid4().hex
+        session.last_seen_at = now
+        session.ip_address = ip or session.ip_address
+        session.user_agent = ua or session.user_agent
+        await db.flush()
+        access = create_access_token(
+            str(user.id),
+            extra={"admin_id": str(admin.id), "super": admin.is_super_admin, "tg": user.telegram_id},
+        )
+        return access, create_refresh_token(str(user.id), session.refresh_jti)
+
+    access = create_access_token(str(user.id), extra={"tg": user.telegram_id})
+    return access, create_refresh_token(str(user.id), uuid4().hex)
+
+
+async def revoke_refresh(db: AsyncSession, refresh_token: str) -> None:
+    from app.core.security import decode_token
+
+    try:
+        payload = decode_token(refresh_token)
+    except ValueError:
+        return
+    jti = payload.get("jti")
+    if not jti:
+        return
+    session = await db.scalar(select(AdminSession).where(AdminSession.refresh_jti == jti))
+    if session and session.revoked_at is None:
+        session.revoked_at = datetime.now(UTC)
+        session.revoked_reason = "logout"
+        await db.flush()
 
 
 async def enable_totp(db: AsyncSession, admin: Admin) -> str:

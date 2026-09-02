@@ -2,6 +2,19 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import { logout } from "@/lib/api";
+
+export const ADMIN_NAV = [
+  { href: "/admin", label: "داشبورد" },
+  { href: "/admin/users", label: "کاربران" },
+  { href: "/admin/organizers", label: "برگزارکنندگان" },
+  { href: "/admin/events", label: "کاستوم‌ها" },
+  { href: "/admin/channels", label: "کانال‌های اجباری" },
+  { href: "/admin/broadcasts", label: "ارسال همگانی" },
+  { href: "/admin/reports", label: "گزارش تخلف" },
+  { href: "/admin/audit", label: "لاگ حسابرسی" },
+  { href: "/admin/settings", label: "تنظیمات" },
+];
 
 export function Shell({
   title,
@@ -23,7 +36,9 @@ export function Shell({
             <Link
               key={it.href}
               href={it.href}
-              className={`block rounded-xl px-3 py-2 ${path === it.href ? "bg-accent text-black" : "hover:bg-white/5"}`}
+              className={`block rounded-xl px-3 py-2 ${
+                path === it.href ? "bg-accent text-black" : "hover:bg-white/5"
+              }`}
             >
               {it.label}
             </Link>
@@ -31,8 +46,8 @@ export function Shell({
         </nav>
         <button
           className="btn-ghost mt-8 w-full"
-          onClick={() => {
-            localStorage.removeItem("ff_token");
+          onClick={async () => {
+            await logout();
             router.push("/login");
           }}
         >
@@ -42,4 +57,21 @@ export function Shell({
       <main className="p-6">{children}</main>
     </div>
   );
+}
+
+export function Loading() {
+  return <p className="text-white/50">در حال بارگذاری…</p>;
+}
+
+export function ErrorBox({ message }: { message: string }) {
+  if (!message) return null;
+  return (
+    <div className="mb-4 rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-300">
+      {message}
+    </div>
+  );
+}
+
+export function EmptyBox({ message }: { message: string }) {
+  return <p className="rounded-xl border border-line p-6 text-center text-white/50">{message}</p>;
 }

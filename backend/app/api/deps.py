@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.core.errors import ForbiddenError, UnauthorizedError
 from app.core.security import decode_token
 from app.core.session import get_db
-from app.models.admin import Admin, AdminSession
+from app.models.admin import Admin
 from app.models.organizer import Organizer
 from app.models.user import User, UserRole
 from app.services.bans import assert_not_banned

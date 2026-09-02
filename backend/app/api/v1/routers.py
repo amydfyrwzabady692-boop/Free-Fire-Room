@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -8,14 +8,14 @@ from sqlalchemy import Select, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.api.deps import get_current_admin, get_current_user, get_organizer, get_super_admin, require_permission
+from app.api.deps import get_current_user, get_organizer, get_super_admin, require_permission
 from app.core.enums import BanScope, EventStatus, EventVisibility, RegistrationStatus
-from app.core.errors import ForbiddenError, NotFoundError
+from app.core.errors import ConflictError, ForbiddenError, NotFoundError, ValidationAppError
 from app.core.session import get_db
 from app.core.time import utcnow
 from app.models.admin import AuditLog, BotContent
 from app.models.broadcast import BroadcastCampaign
-from app.models.channel import Channel, GlobalRequiredChannel
+from app.models.channel import GlobalRequiredChannel
 from app.models.event import Event
 from app.models.jobs import Delivery
 from app.models.organizer import Organizer
@@ -30,7 +30,9 @@ from app.schemas.common import (
     EventCreateIn,
     LoginOtpIn,
     LoginPasswordIn,
+    OtpRequestIn,
     ProfileIn,
+    RefreshIn,
     ReasonIn,
     ReportIn,
     RescheduleIn,
@@ -71,6 +73,16 @@ def _client_ip(request: Request) -> str | None:
     return request.headers.get("x-forwarded-for", request.client.host if request.client else None)
 
 
+def _tokens(access: str, refresh: str | None) -> TokenResponse:
+    from app.core.config import get_settings as _settings
+
+    return TokenResponse(
+        access_token=access,
+        refresh_token=refresh,
+        expires_in=_settings().access_token_expire_minutes * 60,
+    )
+
+
 @router_auth.post("/login/password", response_model=TokenResponse)
 async def login_password(body: LoginPasswordIn, request: Request, db: AsyncSession = Depends(get_db)):
     access, refresh, _ = await auth_svc.login_super_admin(
@@ -82,14 +94,14 @@ async def login_password(body: LoginPasswordIn, request: Request, db: AsyncSessi
         user_agent=request.headers.get("user-agent"),
     )
     await db.commit()
-    return TokenResponse(access_token=access)
+    return _tokens(access, refresh)
 
 
 @router_auth.post("/login/otp", response_model=TokenResponse)
 async def login_otp(body: LoginOtpIn, request: Request, db: AsyncSession = Depends(get_db)):
     access, refresh = await auth_svc.login_with_otp(db, body.telegram_id, body.code, _client_ip(request), request.headers.get("user-agent"))
     await db.commit()
-    return TokenResponse(access_token=access)
+    return _tokens(access, refresh)
 
 
 @router_auth.post("/login/telegram", response_model=TokenResponse)
@@ -98,20 +110,51 @@ async def login_telegram(body: TelegramLoginIn, request: Request, db: AsyncSessi
         db, body.model_dump(), _client_ip(request), request.headers.get("user-agent")
     )
     await db.commit()
-    return TokenResponse(access_token=access)
+    return _tokens(access, refresh)
+
+
+@router_auth.post("/refresh", response_model=TokenResponse)
+async def refresh_token(body: RefreshIn, request: Request, db: AsyncSession = Depends(get_db)):
+    """Refresh tokens were minted on every login but nothing could spend them,
+    so the panel died silently once the 20-minute access token expired."""
+    access, refresh = await auth_svc.refresh_tokens(
+        db, body.refresh_token, _client_ip(request), request.headers.get("user-agent")
+    )
+    await db.commit()
+    return _tokens(access, refresh)
+
+
+@router_auth.post("/logout")
+async def logout(body: RefreshIn, db: AsyncSession = Depends(get_db)):
+    await auth_svc.revoke_refresh(db, body.refresh_token)
+    await db.commit()
+    return {"ok": True}
 
 
 @router_auth.post("/otp/request")
-async def request_otp(telegram_id: int, db: AsyncSession = Depends(get_db)):
+async def request_otp(body: OtpRequestIn, request: Request, db: AsyncSession = Depends(get_db)):
+    """Unauthenticated by design, so throttle the caller as well as the target:
+    otherwise this is a free way to spam any known telegram_id with codes."""
+    from app.core.config import get_settings as _settings
+    from app.core.rate_limit import hit_rate_limit
     from app.services.users import get_by_telegram
-    from aiogram.types import BufferedInputFile  # noqa: F401
 
-    user = await get_by_telegram(db, telegram_id)
+    ip = _client_ip(request) or "unknown"
+    await hit_rate_limit(f"rl:otp_req:{ip}", _settings().rate_limit_login_per_minute)
+
+    user = await get_by_telegram(db, body.telegram_id)
     if not user:
+        # identical answer either way, so this cannot enumerate accounts
         return {"ok": True}
-    code = await auth_svc.issue_otp(telegram_id)
-    bot = _bot()
-    await bot.send_message(telegram_id, f"کد ورود پنل: `{code}`\nاین کد ۵ دقیقه اعتبار دارد.", parse_mode="Markdown")
+    code = await auth_svc.issue_otp(body.telegram_id)
+    try:
+        await _bot().send_message(
+            body.telegram_id,
+            "کد ورود پنل: `" + code + "`\n" + "این کد ۵ دقیقه اعتبار دارد.",
+            parse_mode="Markdown",
+        )
+    except Exception:  # noqa: BLE001
+        return {"ok": True}
     return {"ok": True}
 
 
@@ -451,17 +494,78 @@ async def my_referral(user: User = Depends(get_current_user), db: AsyncSession =
     await db.commit()
     bot = get_settings().bot_username
     return {"token": link.token, "valid_count": link.valid_count, "url": f"https://t.me/{bot}?start=ref_{link.token}"}
+
+
+@router_reports.post("")
+async def create_report(
+    body: ReportIn,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """This endpoint had lost its decorator and signature: the body was left
+    dangling after my_referral returned, so router_reports had no routes at all
+    and nothing could file a report through the API."""
+    from app.core.enums import ReportReason
+
+    valid = {r.value for r in ReportReason}
+    if body.reason not in valid:
+        raise ValidationAppError("bad_reason", "دلیل گزارش نامعتبر است.", {"allowed": sorted(valid)})
+    if not body.event_id and not body.organizer_id:
+        raise ValidationAppError("target_required", "کاستوم یا برگزارکندهٔ مورد گزارش را مشخص کنید.")
+
+    organizer_id = body.organizer_id
+    if body.event_id:
+        event = await db.get(Event, body.event_id)
+        if not event:
+            raise NotFoundError("event_not_found", "کاستوم یافت نشد.")
+        organizer_id = organizer_id or event.organizer_id
+
+    # one open report per person per target, so the queue cannot be flooded
+    existing = await db.scalar(
+        select(Report).where(
+            Report.reporter_id == user.id,
+            Report.event_id == body.event_id,
+            Report.status == "new",
+        )
+    )
+    if existing:
+        raise ConflictError("already_reported", "قبلاً برای این کاستوم گزارش ثبت کرده‌اید.")
+
     row = Report(
         reporter_id=user.id,
         event_id=body.event_id,
-        organizer_id=body.organizer_id,
+        organizer_id=organizer_id,
         reason=body.reason,
         body=body.body,
         status="new",
     )
     db.add(row)
+    await write_audit(
+        db, action="report_created", entity_type="report", entity_id=row.id, actor_id=user.id
+    )
     await db.commit()
     return {"id": str(row.id), "status": row.status}
+
+
+@router_reports.get("/me")
+async def my_reports(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    rows = (
+        await db.scalars(
+            select(Report).where(Report.reporter_id == user.id).order_by(Report.created_at.desc()).limit(50)
+        )
+    ).all()
+    return {
+        "items": [
+            {
+                "id": str(r.id),
+                "reason": r.reason,
+                "reason_label": report_label(r.reason),
+                "status": r.status,
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
+        ]
+    }
 
 
 @router_admin.get("/dashboard")
@@ -478,7 +582,23 @@ async def dashboard(_: User = Depends(require_permission("admin.dashboard")), db
     banned = await db.scalar(select(func.count()).select_from(Ban).where(Ban.is_active.is_(True)))
     orgs = await db.scalar(select(func.count()).select_from(Organizer))
     events_active = await db.scalar(
-        select(func.count()).select_from(Event).where(Event.status.in_([EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED]))
+        select(func.count())
+        .select_from(Event)
+        .where(
+            Event.deleted_at.is_(None),
+            Event.status.in_([EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED]),
+        )
+    )
+    pending_events = await db.scalar(
+        select(func.count())
+        .select_from(Event)
+        .where(Event.deleted_at.is_(None), Event.status == EventStatus.PENDING_APPROVAL)
+    )
+    pending_orgs = await db.scalar(
+        select(func.count()).select_from(Organizer).where(Organizer.status == "pending")
+    )
+    open_reports = await db.scalar(
+        select(func.count()).select_from(Report).where(Report.status == "new")
     )
     regs = await db.scalar(select(func.count()).select_from(Registration).where(Registration.status == RegistrationStatus.CONFIRMED))
     sent = await db.scalar(select(func.count()).select_from(Delivery).where(Delivery.status == "sent"))
@@ -491,7 +611,10 @@ async def dashboard(_: User = Depends(require_permission("admin.dashboard")), db
         "mau": mau,
         "banned": banned,
         "organizers": orgs,
+        "pending_organizers": pending_orgs,
         "active_events": events_active,
+        "pending_events": pending_events,
+        "open_reports": open_reports,
         "confirmed_registrations": regs,
         "deliveries_sent": sent,
         "deliveries_failed": failed,
@@ -499,19 +622,30 @@ async def dashboard(_: User = Depends(require_permission("admin.dashboard")), db
 
 
 @router_admin.get("/users")
-async def admin_users(q: str | None = None, db: AsyncSession = Depends(get_db), _: User = Depends(require_permission("admin.users"))):
-    stmt = select(User).where(User.deleted_at.is_(None)).order_by(User.created_at.desc()).limit(100)
+async def admin_users(
+    q: str | None = None,
+    page: int = Query(0, ge=0),
+    size: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("admin.users")),
+):
+    stmt = select(User).where(User.deleted_at.is_(None)).order_by(User.created_at.desc())
     if q:
         if q.isdigit():
             stmt = stmt.where(or_(User.telegram_id == int(q), User.username.ilike(f"%{q}%"), User.first_name.ilike(f"%{q}%")))
         else:
             stmt = stmt.where(or_(User.username.ilike(f"%{q}%"), User.first_name.ilike(f"%{q}%")))
-    rows = (await db.scalars(stmt)).all()
+    total = await db.scalar(select(func.count()).select_from(stmt.subquery()))
+    rows = (await db.scalars(stmt.offset(page * size).limit(size))).all()
     return {
+        "total": int(total or 0),
+        "page": page,
+        "size": size,
         "items": [
             {
                 "id": str(u.id),
                 "telegram_id": u.telegram_id,
+                "is_banned": u.status == "banned",
                 "username": u.username,
                 "first_name": u.first_name,
                 "status": u.status,
@@ -621,6 +755,20 @@ async def feature_event(event_id: UUID, admin_user: User = Depends(require_permi
     return {"featured": event.featured}
 
 
+@router_organizers.get("/me/events/{event_id}/funnel")
+async def my_event_funnel(
+    event_id: UUID,
+    org=Depends(get_organizer),
+    db: AsyncSession = Depends(get_db),
+):
+    from app.services.funnel import event_funnel
+
+    event = await db.get(Event, event_id)
+    if not event or event.organizer_id != org.id:
+        raise NotFoundError()
+    return await event_funnel(db, event.id)
+
+
 @router_admin.get("/organizers")
 async def admin_orgs(db: AsyncSession = Depends(get_db), _: User = Depends(require_permission("admin.organizers"))):
     rows = (await db.scalars(select(Organizer).options(selectinload(Organizer.user)).order_by(Organizer.created_at.desc()))).all()
@@ -697,6 +845,68 @@ async def toggle_global_channel(row_id: UUID, admin_user: User = Depends(require
     return {"is_active": row.is_active}
 
 
+@router_admin.delete("/global-channels/{row_id}")
+async def remove_global_channel(
+    row_id: UUID,
+    admin_user: User = Depends(require_permission("admin.channels")),
+    db: AsyncSession = Depends(get_db),
+):
+    row = await db.get(GlobalRequiredChannel, row_id)
+    if not row:
+        raise NotFoundError()
+    await db.delete(row)
+    await write_audit(
+        db,
+        action="global_channel_removed",
+        entity_type="global_required_channel",
+        entity_id=row_id,
+        actor_id=admin_user.id,
+    )
+    await db.commit()
+    return {"ok": True}
+
+
+@router_admin.get("/organizers/{org_id}/trust")
+async def organizer_trust(
+    org_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("admin.organizers")),
+):
+    from app.services import trust as trust_svc
+
+    org = await db.get(Organizer, org_id)
+    if not org:
+        raise NotFoundError()
+    rows = await trust_svc.history(db, org.id, limit=25)
+    return {
+        "score": float(org.trust_score or 0),
+        "badge": trust_svc.badge(org.trust_score),
+        "events": [
+            {
+                "at": r.created_at.isoformat(),
+                "type": r.event_type,
+                "delta": r.delta,
+                "reason": r.reason,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router_admin.get("/events/{event_id}/funnel")
+async def admin_event_funnel(
+    event_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_permission("admin.events")),
+):
+    from app.services.funnel import event_funnel
+
+    event = await db.get(Event, event_id)
+    if not event:
+        raise NotFoundError()
+    return await event_funnel(db, event.id)
+
+
 @router_admin.get("/reports")
 async def admin_reports(db: AsyncSession = Depends(get_db), _: User = Depends(require_permission("admin.reports"))):
     rows = (await db.scalars(select(Report).order_by(Report.created_at.desc()).limit(200))).all()
@@ -723,7 +933,17 @@ async def admin_reports(db: AsyncSession = Depends(get_db), _: User = Depends(re
 
 
 @router_admin.post("/reports/{report_id}/status")
-async def report_status(report_id: UUID, status: str, note: str | None = None, admin_user: User = Depends(require_permission("admin.reports")), db: AsyncSession = Depends(get_db)):
+async def report_status(
+    report_id: UUID,
+    status: str = Query(..., pattern="^(new|in_review|confirmed|rejected|closed)$"),
+    note: str | None = Query(None, max_length=500),
+    admin_user: User = Depends(require_permission("admin.reports")),
+    db: AsyncSession = Depends(get_db),
+):
+    """`status` used to be an unvalidated free-text query param, so any string
+    could be written straight into the column."""
+    from app.services import trust as trust_svc
+
     row = await db.get(Report, report_id)
     if not row:
         raise NotFoundError()
@@ -732,7 +952,22 @@ async def report_status(report_id: UUID, status: str, note: str | None = None, a
         row.admin_note = note
     if status in {"confirmed", "rejected", "closed"}:
         row.resolved_at = utcnow()
-    await write_audit(db, action="report_updated", entity_type="report", entity_id=row.id, actor_id=admin_user.id)
+    # upholding a report is the moment the organizer's trust should move
+    if status == "confirmed" and row.organizer_id:
+        org = await db.get(Organizer, row.organizer_id)
+        if org:
+            rule = "prize_unpaid_reported" if row.reason == "unpaid_prize" else "report_upheld"
+            await trust_svc.record(
+                db, org, rule, related_event_id=row.event_id, actor_id=admin_user.id
+            )
+    await write_audit(
+        db,
+        action="report_updated",
+        entity_type="report",
+        entity_id=row.id,
+        actor_id=admin_user.id,
+        after={"status": status},
+    )
     await db.commit()
     return {"status": row.status}
 
@@ -801,6 +1036,9 @@ async def confirm_broadcast(campaign_id: UUID, admin_user: User = Depends(requir
     row = await db.get(BroadcastCampaign, campaign_id)
     if not row:
         raise NotFoundError()
+    if row.status != "draft":
+        # confirming twice would send the whole campaign twice
+        raise ConflictError("broadcast_already_confirmed", "این ارسال همگانی قبلاً تأیید شده است.")
     row.status = "scheduled" if row.scheduled_at else "running"
     row.confirmed_by = admin_user.id
     row.confirmed_at = utcnow()
