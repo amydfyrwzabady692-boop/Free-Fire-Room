@@ -146,11 +146,13 @@ services:
       BOT_EMBEDDED: "false"
       TELEGRAM_MODE: polling
       LOG_LEVEL: INFO
-    # the only service that had no ceiling; a runaway here could starve
-    # anything else sharing the host
-    mem_limit: 256m
-    memswap_limit: 256m
-    cpus: 0.75
+    # Measured: ~87MB of Python objects for the dispatcher alone, 1591 modules,
+    # ~126MB resident once polling. 256m killed it during startup with no swap
+    # cushion, so the ceiling is set well clear of the real figure rather than
+    # just above it. Still bounded, so a leak cannot take the host down.
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: 1.0
     command: ["python", "-m", "app.bot.runner"]
     depends_on:
       postgres:

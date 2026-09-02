@@ -124,8 +124,8 @@ gh repo create FREE-FIRE-ROOM --private --source=. --remote=origin --push
 | ویژگی | مقدار |
 |---|---|
 | پورت باز روی هاست | **هیچ** — ربات فقط polling می‌زند |
-| سقف حافظه | bot 256m + postgres 64m + redis 20m ≈ **۳۴۰ مگابایت** |
-| سقف CPU ربات | 0.75 هسته |
+| سقف حافظه | bot 512m + postgres 64m + redis 20m ≈ **۶۰۰ مگابایت** |
+| سقف CPU ربات | ۱ هسته |
 | لاگ هر کانتینر | حداکثر ۳ فایل × ۱۰ مگابایت |
 
 لاگ‌ها سقف دارند چون درایور پیش‌فرض داکر هیچ‌وقت rotate نمی‌کند؛ روی سروری که
@@ -143,6 +143,15 @@ docker compose -f docker-compose.yml -f docker-compose.minimal.yml --profile bot
 `--build migrate bot` نه فقط `bot`: مهاجرت دیتابیس داخل سرویس `migrate` اجرا
 می‌شود و اگر image آن rebuild نشود، از نسخهٔ کش‌شدهٔ قدیمی اجرا می‌شود و
 مهاجرت‌های جدید اعمال نمی‌شوند.
+
+اگر ربات مدام ری‌استارت شد و در لاگ فقط `bot_step=1` و `bot_step=2` تکرار شد
+بدون هیچ traceback، یعنی کرنل کشته‌اش — سقف حافظه کم است:
+
+```bash
+docker inspect free-fire-room-bot-1 --format 'OOMKilled={{.State.OOMKilled}} ExitCode={{.State.ExitCode}}'
+```
+
+`OOMKilled=true` یا `ExitCode=137` یعنی `mem_limit` سرویس `bot` را باید بالاتر برد.
 
 **دستورهایی که روی این سرور نباید بزنید:**
 
