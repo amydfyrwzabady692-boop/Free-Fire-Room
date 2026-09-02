@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     max_required_referrals: int = 20
     credentials_grace_minutes: int = 5
     custom_fill_minutes: int = 20
+    #: A custom stays open until the organizer taps "custom started". This is
+    #: only the backstop for an organizer who never taps it, so nothing sits
+    #: in the upcoming list forever.
+    auto_archive_hours: int = 12
+    #: how long after the first send the worker keeps sweeping for late
+    #: joiners. Someone who joins later still triggers a send on the spot.
+    late_delivery_sweep_minutes: int = 45
     event_retention_hours: int = 24
     past_events_hours: int = 24
     maintenance_mode: bool = False

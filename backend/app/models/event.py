@@ -56,6 +56,15 @@ class Event(UUIDPrimaryKeyMixin, TimestampMixin, SoftDeleteMixin, Base):
     reviewed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     deep_link_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     prize_summary: Mapped[str | None] = mapped_column(Text)
+    #: set when the organizer taps "custom started" - that, not the clock,
+    #: is what moves a custom out of the upcoming list and closes joining.
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    #: where an approved winner is told to go to collect the prize
+    payout_contact: Mapped[str | None] = mapped_column(String(128))
+    #: optional Instagram / YouTube page the player must follow, proven by screenshot
+    social_url: Mapped[str | None] = mapped_column(Text)
+    social_platform: Mapped[str | None] = mapped_column(String(32))
+    social_note: Mapped[str | None] = mapped_column(Text)
 
     organizer: Mapped["Organizer"] = relationship(back_populates="events")
     channel: Mapped["Channel | None"] = relationship()

@@ -141,10 +141,13 @@ def _handle_job(db, job: ScheduledJob) -> None:
         job.completed_at = datetime.now(UTC)
         return
     if job.job_type == JobType.EVENT_FINISH:
+        # the backstop for an organizer who never taps "custom started"
         event = db.get(Event, job.entity_id)
         if event and event.status != EventStatus.CANCELLED:
+            now = datetime.now(UTC)
             event.status = EventStatus.FINISHED
-            event.finished_at = datetime.now(UTC)
+            event.finished_at = event.finished_at or now
+            event.archived_at = event.archived_at or now
         job.status = JobStatus.DONE
         job.completed_at = datetime.now(UTC)
         return
@@ -165,6 +168,13 @@ def _handle_job(db, job: ScheduledJob) -> None:
     job.completed_at = datetime.now(UTC)
 
 
+#: How many times the bot nudges an organizer who has not entered ROOM ID /
+#: PASS yet, and how many minutes to wait before each nudge. The window is now
+#: hours long, so without this the organizer would be messaged all evening.
+MAX_CRED_PROMPTS = 4
+MAX_CRED_PROMPT_GAPS = (0, 5, 15, 45)
+
+
 async def _send_credentials(bot, db, job: ScheduledJob) -> None:
     from redis import Redis
     from app.core.config import get_settings
@@ -182,21 +192,25 @@ async def _send_credentials(bot, db, job: ScheduledJob) -> None:
             await _expire_missing_credentials(bot, db, event, job)
             return
         payload = dict(job.payload or {})
+        # The organizer now has hours, not minutes, so the reminder must not
+        # turn into a message every other minute for the whole window.
+        sent = int(payload.get("prompt_count") or 0)
         last = payload.get("last_prompt_ts")
-        should_prompt = True
-        if last:
+        gap = MAX_CRED_PROMPT_GAPS[min(sent, len(MAX_CRED_PROMPT_GAPS) - 1)]
+        should_prompt = sent < MAX_CRED_PROMPTS
+        if should_prompt and last:
             try:
-                prev = datetime.fromisoformat(last)
-                should_prompt = now - prev >= timedelta(minutes=2)
+                should_prompt = now - datetime.fromisoformat(last) >= timedelta(minutes=gap)
             except ValueError:
                 should_prompt = True
         if should_prompt:
             await _prompt_organizer_for_creds(bot, db, event)
             payload["last_prompt_ts"] = now.isoformat()
+            payload["prompt_count"] = sent + 1
             payload["prompted"] = True
             job.payload = payload
         job.status = JobStatus.PENDING
-        job.run_at = now + timedelta(minutes=1)
+        job.run_at = now + timedelta(minutes=1 if sent < MAX_CRED_PROMPTS else 15)
         job.last_error = "waiting_organizer_credentials"
         return
     redis = Redis.from_url(get_settings().redis_url)
@@ -223,7 +237,7 @@ async def _send_credentials(bot, db, job: ScheduledJob) -> None:
                 not_admin += 1
             elif result == "check_unavailable":
                 unverified += 1
-            elif result == "skipped":
+            elif result in {"skipped", "social_pending"}:
                 skipped += 1
             else:
                 failed += 1
@@ -270,7 +284,11 @@ async def _send_credentials(bot, db, job: ScheduledJob) -> None:
             if org and sent:
                 trust.record_sync(db, org, "credentials_delivered", related_event_id=event.id)
             await _notify_organizer_delivery_done(bot, db, event, sent=sent, skipped=skipped, failed=failed)
-        if now < fill_deadline(event):
+        sweep_until = min(
+            fill_deadline(event),
+            (creds.sent_at or now) + timedelta(minutes=get_settings().late_delivery_sweep_minutes),
+        )
+        if now < sweep_until:
             job.status = JobStatus.PENDING
             job.run_at = now + timedelta(minutes=2)
             job.attempts = 0
@@ -290,9 +308,6 @@ async def _notify_organizer_delivery_done(bot, db, event: Event, *, sent: int, s
     org_user = db.get(User, org.user_id) if org else None
     if not org_user:
         return
-    from app.core.config import get_settings
-
-    fill = get_settings().custom_fill_minutes
     lines = [
         f"✅ ROOM ID / PASS کاستوم «{html.escape(event.title)}» ارسال شد.",
         "",
@@ -304,8 +319,8 @@ async def _notify_organizer_delivery_done(bot, db, event: Event, *, sent: int, s
         lines.append(f"❌ خطا در ارسال: {failed}")
     lines.append("")
     lines.append(
-        f"تا {fill} دقیقه بعد از ساعت شروع، هر کس شرایط را کامل کند مشخصات برایش می‌رود "
-        "و همین‌جا خبر نهایی را می‌گیرید."
+        "تا وقتی دکمهٔ «کاستوم شروع شد» را نزده‌اید، هر کس شرایط را کامل کند مشخصات برایش می‌رود.\n"
+        "وقتی بازی را شروع کردید، از «کاستوم‌ها و آمار من» آن دکمه را بزنید تا ثبت‌نام بسته شود."
     )
     try:
         await bot.send_message(org_user.telegram_id, "\n".join(lines))
@@ -387,19 +402,17 @@ async def _prompt_organizer_for_creds(bot, db, event: Event) -> None:
     if not user:
         return
     from app.bot.keyboards.common import send_creds_kb
-    from app.core.config import get_settings
     from app.core.time import format_local
 
-    grace = get_settings().credentials_grace_minutes
     try:
         await bot.send_message(
             user.telegram_id,
             f"🎮 ساعت کاستوم «{html.escape(event.title)}» رسید ({format_local(event.starts_at, event.timezone)}).\n\n"
             "اول فقط <b>ROOM ID</b> را بفرستید.\n"
             "بعد ربات از شما <b>PASS</b> را جدا می‌پرسد.\n\n"
-            f"⏳ فقط {grace} دقیقه فرصت دارید. اگر نفرستید اخطار می‌گیرید و بازیکن‌ها می‌توانند گزارش بدهند.\n"
-            f"بعد از ارسال، {get_settings().custom_fill_minutes} دقیقه برای پر شدن کاستوم فرصت هست؛ "
-            "هر کس در این مدت شرایط را کامل کند ROOM ID و PASS برایش ارسال می‌شود.\n"
+            "⏳ عجله‌ای نیست: تا وقتی خودتان «کاستوم شروع شد» را نزده‌اید، ثبت‌نام باز است "
+            "و هر کس شرایط را کامل کند مشخصات برایش می‌رود.\n"
+            "اگر تا آخر هم نفرستید، بازیکن‌ها می‌توانند گزارش بدهند.\n"
             "دکمه سبز را بزنید و اول ROOM ID را بفرستید.",
             reply_markup=send_creds_kb(event.public_token),
         )
@@ -418,7 +431,8 @@ async def _expire_missing_credentials(bot, db, event: Event, job: ScheduledJob) 
     job.last_error = "organizer_did_not_send_credentials"
     job.completed_at = datetime.now(UTC)
     event.status = EventStatus.FINISHED
-    event.finished_at = datetime.now(UTC)
+    event.finished_at = event.finished_at or datetime.now(UTC)
+    event.archived_at = event.archived_at or event.finished_at
 
     org = db.get(Organizer, event.organizer_id)
     if org:

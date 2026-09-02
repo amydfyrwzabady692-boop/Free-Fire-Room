@@ -6,7 +6,7 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -30,11 +30,19 @@ from app.bot.keyboards.common import (
     review_prize_kb,
     review_stars_kb,
     share_link_kb,
+    social_step_kb,
 )
 from app.bot.onboarding import ensure_onboarding
-from app.bot.states.groups import ReportSG, ReviewSG, SupportSG
+from app.bot.states.groups import ReportSG, ReviewSG, SocialProofSG, SupportSG
 from app.core.config import get_settings
-from app.core.enums import EventStatus, EventVisibility, RegistrationStatus, ReportReason, RequirementType
+from app.core.enums import (
+    EventStatus,
+    EventVisibility,
+    RegistrationStatus,
+    ReportReason,
+    RequirementStatus,
+    RequirementType,
+)
 from app.core.errors import AppError
 from app.core.logging import get_logger
 from app.core.rate_limit import hit_rate_limit
@@ -65,11 +73,13 @@ from app.services.reports import (
     format_person,
     format_prize_vote_alert,
     format_report_alert,
+    is_archived,
     join_window_open,
     notify_active_admins,
     notify_telegram_user,
 )
 from app.services.requirements import evaluate_requirements
+from app.services.social import format_social_step, social_required, submit_proof
 from app.services.reviews import (
     can_review,
     create_review,
@@ -202,9 +212,16 @@ async def membership_recheck(cb: CallbackQuery, db: AsyncSession, db_user: User)
 
 
 async def _list_events(db: AsyncSession, *, mode: str = "upcoming") -> list[Event]:
+    """Which customs a player sees.
+
+    A custom leaves the upcoming list when the organizer taps "custom started",
+    not when the clock passes its start time - so a custom that is running late
+    is still joinable. ``auto_archive_hours`` is only the backstop for an
+    organizer who never taps it.
+    """
     now = datetime.now(UTC)
     hours = get_settings().past_events_hours
-    fill = get_settings().custom_fill_minutes + get_settings().credentials_grace_minutes
+    cutoff = now - timedelta(hours=get_settings().auto_archive_hours)
     live = [EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED]
     listed = live + [EventStatus.FINISHED]
     stmt = (
@@ -217,24 +234,22 @@ async def _list_events(db: AsyncSession, *, mode: str = "upcoming") -> list[Even
         .options(*event_public_load_options())
         .limit(20)
     )
+    open_now = and_(Event.archived_at.is_(None), Event.starts_at >= cutoff)
     if mode == "past":
         stmt = stmt.where(
             Event.status.in_(listed),
-            Event.starts_at < now,
-            Event.starts_at >= now - timedelta(hours=hours),
-        ).order_by(Event.starts_at.desc())
+            ~open_now,
+            Event.starts_at >= now - timedelta(hours=hours + get_settings().auto_archive_hours),
+        ).order_by(func.coalesce(Event.archived_at, Event.starts_at).desc())
     elif mode == "today":
         from app.core.time import local_day_bounds
 
         start, end = local_day_bounds()
-        stmt = stmt.where(Event.status.in_(listed), Event.starts_at >= start, Event.starts_at < end).order_by(
-            Event.starts_at.asc()
-        )
-    else:
         stmt = stmt.where(
-            Event.status.in_(live),
-            Event.starts_at >= now - timedelta(minutes=fill),
+            Event.status.in_(listed), Event.starts_at >= start, Event.starts_at < end
         ).order_by(Event.starts_at.asc())
+    else:
+        stmt = stmt.where(Event.status.in_(live), open_now).order_by(Event.starts_at.asc())
     return list((await db.scalars(stmt)).all())
 
 
@@ -255,16 +270,14 @@ def _list_title(e: Event) -> str:
 
 async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> str:
     now = datetime.now(UTC)
-    grace = get_settings().credentials_grace_minutes
-    fill = get_settings().custom_fill_minutes
     extra = (
-        f"🆔 سر همین ساعت برگزارکننده حداکثر {grace} دقیقه فرصت دارد ROOM ID و PASS را داخل ربات بفرستد.\n"
-        f"بعد از ساعت شروع، {fill} دقیقه هم برای پر شدن کاستوم فرصت هست؛ "
-        "اگر در این مدت شرایط را کامل کنید مشخصات برایتان می‌آید."
+        "🆔 برگزارکننده ROOM ID و PASS را داخل ربات می‌فرستد و سر ساعت برای واجدین شرایط می‌رود.\n"
+        "تا وقتی برگزارکننده «کاستوم شروع شد» را نزده، ثبت‌نام باز است؛ "
+        "هر وقت شرایط را کامل کنید مشخصات برایتان می‌آید."
     )
     if missed:
         extra = (
-            f"⚠️ برگزارکننده در مهلت {grace} دقیقه‌ای ROOM ID و PASS را نفرستاد.\n"
+            "⚠️ برگزارکننده ROOM ID و PASS را نفرستاد و کاستوم بسته شد.\n"
             "اگر ثبت‌نام کرده بودید، گزارش بدهید و نظر/امتیاز ثبت کنید."
         )
     elif e.status == EventStatus.CANCELLED:
@@ -272,10 +285,15 @@ async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> st
             "این کاستوم لغو شد. ROOM ID و PASS ارسال نمی‌شود. "
             "اگر ثبت‌نام کرده بودید می‌توانید گزارش بدهید یا نظر بگذارید."
         )
+    elif is_archived(e):
+        extra = (
+            "⏹ برگزارکننده این کاستوم را شروع‌شده اعلام کرد. ثبت‌نام بسته است.\n"
+            "اگر برنده شدید از دکمهٔ «برنده شدم» اسکرین بفرستید."
+        )
     elif e.starts_at <= now:
         extra = (
-            f"🕐 ساعت کاستوم رسیده. برگزارکننده {grace} دقیقه برای ارسال ROOM ID / PASS فرصت دارد "
-            f"و {fill} دقیقه برای پر شدن کاستوم. اگر الان جوین را کامل کنید مشخصات برایتان می‌آید."
+            "🕐 ساعت کاستوم رسیده ولی هنوز بسته نشده. "
+            "اگر همین حالا شرایط را کامل کنید، مشخصات برایتان می‌آید."
         )
     org_line = format_rating_line(await review_summary_for_organizer(db, e.organizer_id), prefix="سابقه برگزارکننده")
     ev_line = format_rating_line(await review_summary_for_event(db, e.id), prefix="امتیاز این کاستوم")
@@ -323,7 +341,7 @@ async def upcoming(event: Message | CallbackQuery, db: AsyncSession, db_user: Us
     kb = event_list_kb([(e.public_token, _list_title(e)) for e in rows], mode="upcoming")
     text = (
         "🔥 <b>کاستوم‌های جایزه‌دار پیش‌رو</b>\n"
-        "روی هر دکمه ساعت و جایزه‌اش نوشته شده. بزنید تا جزئیات کامل، ظرفیت و کانال‌های جوین اجباری را ببینید.\n"
+        "روی هر دکمه ساعت و جایزه‌اش نوشته شده. بزنید تا جزئیات کامل و کانال‌های جوین اجباری را ببینید.\n"
         "بعد عضو کانال‌ها شوید و دکمه سبز «عضو شدم» را بزنید تا سر ساعت ROOM ID و PASS برایتان بیاید.\n"
         f"کاستوم‌های {hours} ساعت گذشته هم از دکمه پایین در دسترس است."
     )
@@ -435,6 +453,7 @@ async def _show_event(
     filling = join_window_open(e)
     allowed, _ = await can_review(db, user, e)
     summary = await review_summary_for_event(db, e.id)
+    social_item = _social_item(checklist.items)
     text = await _event_card(db, e, missed=missed)
     text += "\n━━━━━━━━━━━━━━\n✅ <b>شرایط شرکت</b>\n"
     text += "باید در کانال‌های زیر عضو بمانید تا سر ساعت ROOM ID و PASS برایتان بیاید:\n"
@@ -444,6 +463,12 @@ async def _show_event(
             text += f"{mark} {esc(item.label)}\n"
     else:
         text += "کانال جوین اجباری ثبت نشده است.\n"
+    if social_item is not None:
+        marks = {
+            RequirementStatus.DONE: "✅",
+            RequirementStatus.PENDING_REVIEW: "⏳",
+        }
+        text += f"{marks.get(social_item.status, '❌')} {esc(social_item.label)} — مرحلهٔ آخر\n"
     if missed:
         text += "\nROOM ID / PASS ارسال نشد. گزارش بدهید و اگر ثبت‌نام کرده بودید نظر/امتیاز بگذارید."
     elif cancelled:
@@ -459,6 +484,7 @@ async def _show_event(
         token,
         join_urls=_join_urls(channel_items),
         can_join=open_for_join and not missed,
+        social_url=e.social_url if (social_item is not None and open_for_join) else None,
         can_review=allowed,
         show_reviews=summary["count"] > 0 or started or cancelled,
         can_claim_win=started and not cancelled,
@@ -486,6 +512,13 @@ async def _queue_late_credentials(db: AsyncSession, event: Event) -> None:
     spawn(send_event_credentials, str(event.id))
 
 
+def _social_item(checklist) -> object | None:
+    for item in checklist or []:
+        if item.requirement_type == RequirementType.SOCIAL_FOLLOW:
+            return item
+    return None
+
+
 async def _send_join_result(cb: CallbackQuery, event: Event, token: str, result, db: AsyncSession) -> None:
     if result.registration.status == RegistrationStatus.CONFIRMED:
         await _queue_late_credentials(db, event)
@@ -504,6 +537,31 @@ async def _send_join_result(cb: CallbackQuery, event: Event, token: str, result,
     if result.waitlisted:
         await reply_callback(cb, "ظرفیت پر است. شما در لیست انتظار قرار گرفتید.")
         return
+    social = _social_item(result.checklist)
+    channels_done = all(
+        item.status == RequirementStatus.DONE
+        for item in (result.checklist or [])
+        if item.requirement_type
+        in {RequirementType.CHANNEL_MEMBERSHIP, RequirementType.GLOBAL_CHANNEL_MEMBERSHIP}
+    )
+    # channels first; the follow screenshot is deliberately the last gate
+    if social is not None and channels_done:
+        if social.status == RequirementStatus.PENDING_REVIEW:
+            await reply_callback(
+                cb,
+                "✅ جوین کانال‌ها کامل است.\n"
+                "📸 اسکرین فالو شما رسیده و منتظر تأیید برگزارکننده است. "
+                "به‌محض تأیید، ثبت‌نامتان قطعی می‌شود و همین‌جا خبر می‌گیرید.",
+            )
+            return
+        note = (social.detail or "").strip()
+        await reply_callback(
+            cb,
+            ("✅ جوین کانال‌ها کامل شد.\n\n" + format_social_step(event))
+            + (f"\n\n⚠️ {esc(note)}" if note else ""),
+            reply_markup=social_step_kb(token, event.social_url),
+        )
+        return
     text = "هنوز در این کانال‌ها عضو نیستید:\n"
     for item in result.checklist or []:
         if item.requirement_type not in {
@@ -513,6 +571,8 @@ async def _send_join_result(cb: CallbackQuery, event: Event, token: str, result,
             continue
         mark = "✅" if item.status == "done" else "❌"
         text += f"{mark} {esc(item.label)}\n"
+    if social is not None:
+        text += "\n📸 بعد از جوین، مرحلهٔ آخر ارسال اسکرین فالو است."
     await reply_callback(cb, text, reply_markup=checklist_kb(token, join_urls=_join_urls(result.checklist)))
 
 
@@ -1169,4 +1229,115 @@ async def menu_home(cb: CallbackQuery, db: AsyncSession, db_user: User, state: F
     await replace_callback_view(
         cb,
         "منوی اصلی آماده است.\nاز دکمه‌های پایین استفاده کنید. اگر منو باز است، با فلش کنار کادر پیام جمعش کنید.",
+    )
+
+
+# ---------------------------------------------------------------- follow proof
+
+
+async def _notify_social_reviewers(bot, db: AsyncSession, event: Event, player: User, file_id: str) -> None:
+    """Send the screenshot to the organizer (the bot owner is the fallback)."""
+    from app.bot.keyboards.common import social_review_kb
+    from app.models.admin import Admin
+    from app.services.social import get_proof
+
+    proof = await get_proof(db, event_id=event.id, user_id=player.id)
+    if proof is None:
+        return
+    caption = (
+        "📸 <b>اسکرین فالو</b>\n"
+        f"کاستوم: {esc((event.prize_summary or event.title or '').strip()[:60])}\n"
+        f"بازیکن: {format_person(player)}\n"
+        f"پیج: {esc(event.social_url or '—')}\n\n"
+        "با «تأیید ثبت‌نام» ثبت‌نام این بازیکن قطعی می‌شود و سر ساعت ROOM ID / PASS برایش می‌رود."
+    )[:1024]
+    kb = social_review_kb(str(proof.id))
+    targets: list[int] = []
+    org = await db.get(Organizer, event.organizer_id) if event.organizer_id else None
+    if org:
+        org_user = await db.get(User, org.user_id)
+        if org_user and not org_user.is_bot_blocked:
+            targets.append(org_user.telegram_id)
+    if not targets:
+        admins = (await db.scalars(select(Admin).where(Admin.is_active.is_(True)))).all()
+        for admin in admins:
+            au = await db.get(User, admin.user_id)
+            if au and not au.is_bot_blocked:
+                targets.append(au.telegram_id)
+    for chat_id in targets:
+        try:
+            await bot.send_photo(chat_id, file_id, caption=caption, reply_markup=kb)
+        except Exception:  # noqa: BLE001
+            try:
+                await bot.send_message(chat_id, caption, reply_markup=kb)
+            except Exception:  # noqa: BLE001
+                log.exception("social_proof_notify_failed", chat_id=chat_id)
+
+
+@router.callback_query(F.data.startswith("soc:"))
+async def social_start(cb: CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
+    await ack_callback(cb)
+    token = cb.data.split(":", 1)[1]
+    e = await _event_by_token(db, token)
+    if not e or not social_required(e):
+        await reply_callback(cb, "این کاستوم شرط فالو ندارد.")
+        return
+    if not join_window_open(e):
+        await reply_callback(cb, "مهلت ثبت‌نام این کاستوم بسته شده است.")
+        return
+    await state.set_state(SocialProofSG.screenshot)
+    await state.update_data(event_token=token)
+    await reply_callback(
+        cb,
+        format_social_step(e) + "\n\nحالا فقط <b>عکس</b> اسکرین را همین‌جا بفرستید.",
+    )
+
+
+@router.message(SocialProofSG.screenshot)
+async def social_screenshot(message: Message, db: AsyncSession, db_user: User, state: FSMContext):
+    file_id = None
+    if message.photo:
+        file_id = message.photo[-1].file_id
+    elif message.document and (message.document.mime_type or "").startswith("image/"):
+        file_id = message.document.file_id
+    if not file_id:
+        await message.answer("یک عکس اسکرین بفرستید، یا «لغو» را بزنید.")
+        return
+    try:
+        await hit_rate_limit(f"rl:soc:{db_user.telegram_id}", 5)
+    except AppError as exc:
+        await message.answer(exc.message)
+        return
+    data = await state.get_data()
+    e = await _event_by_token(db, data.get("event_token"))
+    if not e or not social_required(e):
+        await state.clear()
+        await message.answer("این کاستوم دیگر در دسترس نیست.", reply_markup=await menu_for(db, db_user))
+        return
+    try:
+        await register_user(db, user=db_user, event=e, bot=message.bot, source="social", accept_rules=True)
+    except AppError:
+        pass
+    except Exception:  # noqa: BLE001
+        log.exception("social_pre_register_failed")
+        await db.rollback()
+    try:
+        await submit_proof(db, event=e, user=db_user, file_id=file_id)
+        await db.commit()
+    except AppError as exc:
+        await state.clear()
+        await message.answer(exc.message, reply_markup=await menu_for(db, db_user))
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("social_proof_failed")
+        await db.rollback()
+        await message.answer("ثبت اسکرین الان انجام نشد. چند ثانیه بعد دوباره تلاش کنید.")
+        return
+    await _notify_social_reviewers(message.bot, db, e, db_user, file_id)
+    await state.clear()
+    await message.answer(
+        "✅ اسکرین شما برای برگزارکننده ارسال شد.\n"
+        "به‌محض تأیید او، ثبت‌نامتان قطعی می‌شود و همین‌جا خبرش را می‌گیرید.\n"
+        "تا آن موقع در کانال‌های اجباری بمانید.",
+        reply_markup=await menu_for(db, db_user),
     )

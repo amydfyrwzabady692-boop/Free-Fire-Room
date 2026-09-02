@@ -55,8 +55,11 @@ async def create_announcement(db: AsyncSession, user: User, data: dict) -> Custo
 
     starts_at = data["starts_at"]
     now = datetime.now(UTC)
-    if starts_at <= now + timedelta(minutes=5):
-        raise ValidationAppError("starts_too_soon", "زمان کاستوم باید حداقل ۵ دقیقه بعد باشد.")
+    if starts_at < now - timedelta(minutes=1):
+        raise ValidationAppError(
+            "starts_in_past",
+            "این ساعت گذشته است. ساعتی از الان به بعد بفرستید.",
+        )
     if starts_at > now + timedelta(days=14):
         raise ValidationAppError("starts_too_far", "زمان اطلاع‌رسانی حداکثر ۱۴ روز جلوتر است.")
 

@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.bot.access import menu_for
+from app.bot.access import is_active_admin, menu_for
 from app.bot.helpers import event_deep_link, extract_channel_ref, esc, replace_callback_view
 from app.bot.keyboards.common import (
     DANGER,
@@ -26,15 +26,31 @@ from app.bot.keyboards.common import (
     labeled,
     MENU_BUTTON_TEXTS,
     organizer_home_kb,
+    payout_contact_kb,
     pick_date_kb,
+    social_review_kb,
+    winner_claim_review_kb,
+    winner_reply_kb,
     wizard_nav,
 )
 from app.locales.labels import event_status_fa, org_status_fa, reg_status_fa
 from app.locales.style import room_pair
 from app.bot.onboarding import ensure_onboarding, target_message
-from app.bot.states.groups import CredsWaitSG, EventWizardSG
+from app.bot.states.groups import (
+    CredsWaitSG,
+    EventWizardSG,
+    OrganizerSettingsSG,
+    WinnerChatSG,
+)
 from app.core.config import get_settings
-from app.core.enums import BanScope, EventStatus, OrganizerStatus, RegistrationStatus
+from app.core.enums import (
+    BanScope,
+    EventStatus,
+    OrganizerStatus,
+    RegistrationStatus,
+    SocialProofStatus,
+    WinnerClaimStatus,
+)
 from app.core.errors import AppError
 from app.core.time import combine_local_date_and_clock, format_jalali_date, format_local, parse_clock, upcoming_local_dates
 from app.models.channel import Channel, ChannelOwnership
@@ -50,9 +66,42 @@ from app.services.event_display import (
     event_public_load_options,
     format_event_identity_block,
 )
-from app.services.events import MIN_START_LEAD_MINUTES, cancel_event, create_event, submit_for_publish, update_credentials, waiting_live_credential_event
+from app.services.events import (
+    cancel_event,
+    create_event,
+    mark_event_started,
+    submit_for_publish,
+    update_credentials,
+    waiting_live_credential_event,
+)
 from app.services.organizers import get_or_apply
-from app.services.reports import credentials_deadline, credentials_window_open, creds_were_provided
+from app.services.social import (
+    PLATFORM_FA,
+    normalize_social_url,
+    pending_proof_count,
+    pending_proofs_for_event,
+    review_proof,
+    social_required,
+)
+from app.services.winners import (
+    claim_parties,
+    claims_for_organizer,
+    contact_link,
+    format_payout_note,
+    format_relayed_to_winner,
+    normalize_payout_contact,
+    player_dm_link,
+    record_message,
+    resolve_claim,
+    resolve_payout_contact,
+)
+from app.services.registration import register_user
+from app.services.reports import (
+    credentials_window_open,
+    creds_were_provided,
+    format_person,
+    is_archived,
+)
 from app.services.settings import get_setting
 
 router = Router(name="organizer")
@@ -212,9 +261,10 @@ async def wiz_starts(message: Message, state: FSMContext, db: AsyncSession, db_u
     except ValueError:
         await message.answer("ساعت نامعتبر است. نمونه: 22:00 یا 22")
         return
-    if when <= dt.now(UTC) + timedelta(minutes=MIN_START_LEAD_MINUTES):
+    if when < dt.now(UTC) - timedelta(minutes=1):
         await message.answer(
-            f"ساعت باید حداقل {MIN_START_LEAD_MINUTES} دقیقه بعد باشد تا بازیکن‌ها وقت جوین داشته باشند."
+            "این ساعت گذشته است. ساعتی از الان به بعد بفرستید.\n"
+            "محدودیتی ندارید — حتی همین چند دقیقه دیگر هم می‌شود."
         )
         return
     iso = when.isoformat()
@@ -499,6 +549,26 @@ PRIZE_STEP_TEXT = (
 )
 
 
+PAYOUT_STEP_TEXT = (
+    "\U0001F3C6 <b>آیدی دریافت جایزه</b>\n\n"
+    "وقتی برنده‌ای را تأیید کنید، ربات همین آیدی را برایش می‌فرستد "
+    "تا برای گرفتن جایزه به پی‌وی شما بیاید.\n\n"
+    "یک آیدی بفرستید. نمونه: <code>@my_id</code>\n"
+    "اگر قبلاً ثبت کرده‌اید، از دکمهٔ پایین همان را بزنید یا آیدی جدید بنویسید."
+)
+
+
+SOCIAL_STEP_TEXT = (
+    "\U0001F4F8 <b>فالو اینستاگرام یا یوتیوب</b> (اختیاری)\n\n"
+    "اگر می‌خواهید بازیکن‌ها علاوه بر جوین کانال، پیج شما را هم فالو کنند، "
+    "آدرس پیج را همین‌جا بفرستید.\n"
+    "نمونه: <code>https://instagram.com/mypage</code> یا <code>@mypage</code>\n\n"
+    "بعد از آن، مرحلهٔ آخر هر بازیکن این می‌شود که اسکرین‌شات فالو کردن را بفرستد؛ "
+    "اسکرین برای شما می‌آید و تا تأیید نکنید ثبت‌نامش قطعی نمی‌شود.\n\n"
+    "اگر لازم ندارید «رد کردن» را بزنید — هیچ بازیکنی این مرحله را نمی‌بیند."
+)
+
+
 DESCRIPTION_STEP_TEXT = (
     "📝 <b>توضیح کاستوم</b> (اختیاری)\n\n"
     "یک یا دو خط دربارهٔ اینکه این کاستوم چیست و برای چه کسانی است.\n\n"
@@ -525,6 +595,22 @@ async def _ask_description(message: Message, state: FSMContext) -> None:
 async def _ask_prize(message: Message, state: FSMContext) -> None:
     await state.set_state(EventWizardSG.prizes)
     await message.answer(PRIZE_STEP_TEXT, reply_markup=wizard_nav(include_back=True))
+
+
+async def _ask_payout(message: Message, state: FSMContext, db: AsyncSession, db_user: User) -> None:
+    """Who an approved winner is told to message to collect the prize."""
+    org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
+    saved = (org.payout_contact or "").strip() if org else ""
+    await state.set_state(EventWizardSG.payout_contact)
+    await message.answer(
+        PAYOUT_STEP_TEXT,
+        reply_markup=payout_contact_kb(saved=saved or None, username=db_user.username),
+    )
+
+
+async def _ask_social(message: Message, state: FSMContext) -> None:
+    await state.set_state(EventWizardSG.social)
+    await message.answer(SOCIAL_STEP_TEXT, reply_markup=wizard_nav(include_skip=True, include_back=True))
 
 
 async def _ask_banner(message: Message, state: FSMContext) -> None:
@@ -564,6 +650,68 @@ async def wiz_prize(message: Message, state: FSMContext, db: AsyncSession, db_us
         await message.answer("متن جایزه حداکثر ۴۰۰ حرف باشد.", reply_markup=wizard_nav(include_back=True))
         return
     await state.update_data(prize_summary=text)
+    await _ask_payout(message, state, db, db_user)
+
+
+async def _apply_payout(
+    message: Message, state: FSMContext, db: AsyncSession, db_user: User, contact: str
+) -> None:
+    org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
+    if org:
+        org.payout_contact = contact
+        await db.flush()
+    await state.update_data(payout_contact=contact)
+    await message.answer(f"✅ آیدی دریافت جایزه: <b>{esc(contact)}</b>")
+    await _ask_social(message, state)
+
+
+@router.message(EventWizardSG.payout_contact)
+async def wiz_payout(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
+    try:
+        contact = normalize_payout_contact(message.text or "")
+    except AppError as exc:
+        org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
+        saved = (org.payout_contact or "").strip() if org else ""
+        await message.answer(
+            exc.message,
+            reply_markup=payout_contact_kb(saved=saved or None, username=db_user.username),
+        )
+        return
+    await _apply_payout(message, state, db, db_user, contact)
+
+
+@router.callback_query(EventWizardSG.payout_contact, F.data.in_({"payc:saved", "payc:self"}))
+async def wiz_payout_shortcut(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_user: User):
+    contact = ""
+    if cb.data == "payc:self" and db_user.username:
+        contact = f"@{db_user.username.lstrip('@')}"
+    else:
+        org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
+        contact = (org.payout_contact or "").strip() if org else ""
+    if not contact:
+        await cb.answer("آیدی ذخیره‌شده‌ای نیست. خودتان بنویسید.", show_alert=True)
+        return
+    await _apply_payout(cb.message, state, db, db_user, contact)
+    await cb.answer("ثبت شد")
+
+
+@router.message(EventWizardSG.social)
+async def wiz_social(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
+    text = (message.text or "").strip()
+    if text in labeled("-", "رد کردن", "رد", "ندارم"):
+        await state.update_data(social_url=None, social_platform=None)
+        await _ask_description(message, state)
+        return
+    try:
+        url, platform = normalize_social_url(text)
+    except AppError as exc:
+        await message.answer(exc.message, reply_markup=wizard_nav(include_skip=True, include_back=True))
+        return
+    await state.update_data(social_url=url, social_platform=platform)
+    await message.answer(
+        f"✅ شرط فالو {PLATFORM_FA.get(platform, 'پیج')} ثبت شد:\n{esc(url)}\n\n"
+        "هر بازیکن بعد از جوین کانال‌ها باید اسکرین فالو کردن را بفرستد و شما تأییدش کنید."
+    )
     await _ask_description(message, state)
 
 
@@ -602,8 +750,12 @@ async def wiz_back(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_us
             "کانال‌های جوین اجباری را دوباره تنظیم کنید، بعد «تمام شد» را بزنید.",
             reply_markup=await _channel_step_kb(db, db_user, ids, extra=True),
         )
-    elif current == EventWizardSG.description.state:
+    elif current == EventWizardSG.payout_contact.state:
         await _ask_prize(msg, state)
+    elif current == EventWizardSG.social.state:
+        await _ask_payout(msg, state, db, db_user)
+    elif current == EventWizardSG.description.state:
+        await _ask_social(msg, state)
     elif current == EventWizardSG.banner.state:
         await _ask_description(msg, state)
     else:
@@ -615,6 +767,11 @@ async def wiz_back(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_us
 @router.callback_query(F.data == "wiz:skip")
 async def wiz_skip(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_user: User):
     current = await state.get_state()
+    if current == EventWizardSG.social.state:
+        await state.update_data(social_url=None, social_platform=None)
+        await _ask_description(cb.message, state)
+        await cb.answer()
+        return
     if current == EventWizardSG.description.state:
         await state.update_data(custom_description=None)
         await _ask_banner(cb.message, state)
@@ -641,9 +798,7 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
     org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
     title = (data.get("title") or "").strip() or "کاستوم جایزه‌دار"
     starts_at = dt.fromisoformat(data["starts_at"])
-    fill_end = starts_at + timedelta(
-        minutes=get_settings().custom_fill_minutes + get_settings().credentials_grace_minutes
-    )
+    fill_end = starts_at + timedelta(hours=get_settings().auto_archive_hours)
     payload = {
         "title": title[:160],
         "starts_at": starts_at,
@@ -651,7 +806,11 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
         "credentials_send_at": starts_at,
         "channel_id": UUID(data["channel_id"]),
         "required_channel_ids": [UUID(x) for x in data.get("required_channel_ids") or []],
-        "capacity": 100,
+        # no cap: everyone who completes the conditions gets in
+        "capacity": 0,
+        "payout_contact": data.get("payout_contact"),
+        "social_url": data.get("social_url"),
+        "social_platform": data.get("social_platform"),
         "region": "ME",
         "game_mode": "squad",
         "prize_summary": prize,
@@ -672,15 +831,27 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
         )
         link = event_deep_link(event.public_token)
         n_ch = len(payload["required_channel_ids"])
+        social_line = (
+            f"📸 فالو {PLATFORM_FA.get(event.social_platform, 'پیج')}: {esc(event.social_url)}\n"
+            if social_required(event)
+            else ""
+        )
+        payout_line = (
+            f"🏆 آیدی دریافت جایزه: {esc(event.payout_contact)}\n" if event.payout_contact else ""
+        )
         details = (
             f"{format_event_identity_block(event)}\n"
             f"🕐 {format_local(event.starts_at, event.timezone)}\n"
-            f"📢 کانال جوین اجباری: {n_ch} مورد\n\n"
+            f"📢 کانال جوین اجباری: {n_ch} مورد\n"
+            "👥 ظرفیت: بدون محدودیت\n"
+            f"{social_line}{payout_line}\n"
             f"<b>لینک این کاستوم:</b>\n{link}\n\n"
             "📌 لینک را در کانال خودتان بگذارید تا بازیکن‌ها وارد شوند.\n\n"
             "🆔 <b>قدم بعدی:</b> از «ارسال ROOM ID / PASS» می‌توانید <b>همین حالا</b> مشخصات اتاق را ثبت کنید؛ "
-            f"ربات سر ساعت خودکار برای واجدین شرایط می‌فرستد و نتیجه را به شما خبر می‌دهد.\n"
-            f"اگر ترجیح می‌دهید سر ساعت بفرستید، از لحظهٔ شروع {get_settings().credentials_grace_minutes} دقیقه مهلت دارید."
+            "ربات سر ساعت خودکار برای واجدین شرایط می‌فرستد و نتیجه را به شما خبر می‌دهد.\n\n"
+            "⏹ <b>مهم:</b> این کاستوم تا وقتی خودتان دکمهٔ «کاستوم شروع شد» را نزنید "
+            "در فهرست «کاستوم‌های پیش‌رو» می‌ماند و ثبت‌نام باز است. "
+            "هر وقت بازی را شروع کردید، از «کاستوم‌ها و آمار من» آن دکمه را بزنید تا به «گذشته» برود."
         )
         banner = data.get("banner_file_id")
         if banner:
@@ -744,9 +915,21 @@ async def org_mine(cb: CallbackQuery, db: AsyncSession, db_user: User):
             e.status not in {EventStatus.CANCELLED, EventStatus.FINISHED, EventStatus.REJECTED}
             and (credentials_window_open(e) or creds_were_provided(creds))
         )
+        archived = is_archived(e)
+        pending_social = await pending_proof_count(db, e.id) if social_required(e) else 0
         buttons = []
         if can_send:
             buttons.append([ibtn("ارسال ROOM ID / PASS", callback_data=f"orgp:creds:{e.public_token}", style=SUCCESS)])
+        if pending_social:
+            buttons.append(
+                [
+                    ibtn(
+                        f"اسکرین فالو در انتظار ({pending_social})",
+                        callback_data=f"orgp:soc:{e.public_token}",
+                        style=SUCCESS,
+                    )
+                ]
+            )
         buttons.append(
             [
                 ibtn("لینک اختصاصی", callback_data=f"orgp:link:{e.public_token}", style=PRIMARY),
@@ -754,13 +937,23 @@ async def org_mine(cb: CallbackQuery, db: AsyncSession, db_user: User):
             ]
         )
         buttons.append([ibtn("خروجی شرکت‌کننده‌ها", callback_data=f"orgp:csv:{e.public_token}", style=PRIMARY)])
+        if not archived and e.status not in {EventStatus.CANCELLED, EventStatus.FINISHED}:
+            buttons.append(
+                [ibtn("کاستوم شروع شد — انتقال به گذشته", callback_data=f"orgp:start:{e.public_token}", style=DANGER)]
+            )
         if e.status not in {EventStatus.CANCELLED, EventStatus.FINISHED}:
             buttons.append([ibtn("لغو کاستوم", callback_data=f"orgp:cancel:{e.public_token}", style=DANGER)])
         kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+        where = (
+            "\U0001F4E5 در فهرست «گذشته»"
+            if archived
+            else "\U0001F525 در فهرست «کاستوم‌های پیش‌رو» — ثبت‌نام باز است"
+        )
         await cb.message.answer(
             f"{format_event_identity_block(e)}\n"
             f"زمان (شمسی): {format_local(e.starts_at, e.timezone)}\n"
             f"وضعیت: {event_status_fa(e.status)}\n"
+            f"{where}\n"
             f"{format_audience_stats(stats)}\n"
             f"{rating}",
             reply_markup=kb,
@@ -1003,7 +1196,7 @@ async def org_creds_menu(cb: CallbackQuery, db: AsyncSession, db_user: User):
         await cb.message.answer(
             "الان کاستومی برای ارسال ROOM ID / PASS ندارید.\n"
             "اول از «ثبت کاستوم جدید» یک کاستوم بسازید؛ بلافاصله بعدش همین‌جا ظاهر می‌شود "
-            f"و می‌توانید مشخصات را از همان لحظه تا {get_settings().credentials_grace_minutes} دقیقه بعد از ساعت شروع ثبت کنید.",
+            "و از همان لحظه تا وقتی «کاستوم شروع شد» را نزده‌اید می‌توانید مشخصات را ثبت کنید.",
             reply_markup=organizer_home_kb(),
         )
         await cb.answer()
@@ -1048,18 +1241,15 @@ async def ask_live_creds(cb: CallbackQuery, db: AsyncSession, db_user: User, sta
         return
     creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == e.id))
     if not credentials_window_open(e) and not creds_were_provided(creds):
-        await cb.answer(f"مهلت {get_settings().credentials_grace_minutes} دقیقه‌ای تمام شد.", show_alert=True)
+        await cb.answer("این کاستوم بسته شده و دیگر نمی‌شود مشخصات فرستاد.", show_alert=True)
         return
     await state.set_state(CredsWaitSG.room_id)
     await state.update_data(event_token=token, room_id=None)
-    grace = get_settings().credentials_grace_minutes
-    deadline = credentials_deadline(e)
-    remain = max(0, int((deadline - dt.now(UTC)).total_seconds() // 60))
     started = dt.now(UTC) >= e.starts_at
     timing = (
-        f"⏳ ساعت کاستوم رسیده — {remain} دقیقه تا پایان مهلت ارسال."
+        "⏳ ساعت کاستوم رسیده. با تأیید، همین حالا برای واجدین شرایط ارسال می‌شود."
         if started
-        else f"⏳ هنوز به ساعت کاستوم نرسیده‌ایم. با تأیید، مشخصات ذخیره می‌شود و "
+        else "⏳ هنوز به ساعت کاستوم نرسیده‌ایم. با تأیید، مشخصات ذخیره می‌شود و "
         f"سر ساعت {format_local(e.starts_at, e.timezone)} خودکار ارسال می‌شود."
     )
     await cb.message.answer(
@@ -1069,8 +1259,8 @@ async def ask_live_creds(cb: CallbackQuery, db: AsyncSession, db_user: User, sta
         "بعد ربات <b>PASS</b> را جدا می‌پرسد.\n"
         "در پایان پیش‌نمایش می‌بینید و تا تأیید نکنید چیزی ارسال نمی‌شود.\n\n"
         f"{timing}\n"
-        f"⏳ مهلت ثبت مشخصات: تا {grace} دقیقه بعد از ساعت شروع.\n"
-        f"⏳ پر شدن کاستوم: تا {get_settings().custom_fill_minutes} دقیقه بعد از ساعت شروع.",
+        "⏳ عجله‌ای نیست: تا وقتی دکمهٔ «کاستوم شروع شد» را نزده‌اید، هم می‌توانید مشخصات را ثبت کنید "
+        "و هم بازیکن‌های تازه ثبت‌نام می‌شوند.",
         reply_markup=wizard_nav(),
     )
     await cb.answer()
@@ -1160,7 +1350,7 @@ async def _offer_creds_confirm(
     creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == event.id))
     if not credentials_window_open(event) and not creds_were_provided(creds):
         await message.answer(
-            f"فرصت {get_settings().credentials_grace_minutes} دقیقه‌ای تمام شد. دیگر نمی‌توانید ROOM ID و PASS بفرستید."
+            "این کاستوم بسته شده است. دیگر نمی‌توانید ROOM ID و PASS بفرستید."
         )
         return False
     from app.services.reviews import event_audience_stats
@@ -1181,8 +1371,8 @@ async def _offer_creds_confirm(
         else "با تأیید، همین الان برای کسانی که شرایط را کامل کرده‌اند ارسال می‌شود."
     )
     extra = (
-        f"\nتا {get_settings().custom_fill_minutes} دقیقه بعد از شروع، "
-        "اگر کسی دیرتر شرایط را کامل کند، مشخصات برایش هم می‌آید."
+        "\nتا وقتی «کاستوم شروع شد» را نزده‌اید، اگر کسی دیرتر شرایط را کامل کند "
+        "مشخصات برایش هم می‌آید."
         if not scheduled
         else ""
     )
@@ -1227,7 +1417,7 @@ async def _commit_creds_send(
     spawn(send_event_credentials, str(event.id))
     await message.answer(
         "✅ تأیید شد. در حال ارسال برای کسانی که شرایط را کامل کرده‌اند.\n"
-        f"تا {get_settings().custom_fill_minutes} دقیقه بعد هم اگر کسی شرایط را کامل کند، مشخصات برایش می‌آید.\n\n"
+        "تا وقتی «کاستوم شروع شد» را نزده‌اید، هر کس شرایط را کامل کند مشخصات برایش می‌آید.\n\n"
         f"{room_pair(esc(room_id), esc(password))}",
         reply_markup=await menu_for(db, db_user),
     )
@@ -1410,3 +1600,404 @@ async def maybe_live_creds(message: Message, db: AsyncSession, db_user: User, st
         reply_markup=wizard_nav(),
     )
 
+
+# ---------------------------------------------------------------- start / archive
+
+
+@router.callback_query(F.data.startswith("orgp:start:"))
+async def org_mark_started(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    """The organizer, not the clock, decides when a custom is over."""
+    if await _blocked_organize(db, db_user, cb):
+        return
+    token = cb.data.split(":", 2)[-1]
+    e = await _own_event(db, db_user, token)
+    if not e:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    if e.status in {EventStatus.CANCELLED, EventStatus.REJECTED}:
+        await cb.answer("این کاستوم لغو شده است.", show_alert=True)
+        return
+    if e.archived_at is not None:
+        await cb.answer("قبلاً به «گذشته» رفته است.", show_alert=True)
+        return
+    creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == e.id))
+    if not creds_were_provided(creds):
+        await cb.answer(
+            "هنوز ROOM ID / PASS نفرستاده‌اید. اول مشخصات را بفرستید، بعد شروع را بزنید.",
+            show_alert=True,
+        )
+        return
+    await mark_event_started(db, e, db_user.id)
+    await db.commit()
+    await cb.message.answer(
+        f"⏹ کاستوم «{esc(_short_label(e))}» شروع‌شده ثبت شد.\n"
+        "از «کاستوم‌های پیش‌رو» برداشته شد و حالا در «کاستوم‌های ۲۴ ساعت گذشته» دیده می‌شود.\n"
+        "ثبت‌نام جدید و ارسال ROOM ID / PASS برای این کاستوم بسته شد.",
+        reply_markup=organizer_home_kb(),
+    )
+    await cb.answer("ثبت شد")
+
+
+# ---------------------------------------------------------------- follow screenshots
+
+
+def _social_caption(event: Event, player: User) -> str:
+    return (
+        "📸 <b>اسکرین فالو</b>\n"
+        f"کاستوم: {esc(_short_label(event))}\n"
+        f"بازیکن: {format_person(player)}\n"
+        f"پیج: {esc(event.social_url or '—')}\n\n"
+        "اگر درست است «تأیید ثبت‌نام» را بزنید تا ثبت‌نامش قطعی شود و سر ساعت ROOM ID / PASS برایش برود."
+    )
+
+
+@router.callback_query(F.data.startswith("orgp:soc:"))
+async def org_social_queue(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    if await _blocked_organize(db, db_user, cb):
+        return
+    token = cb.data.split(":", 2)[-1]
+    e = await _own_event(db, db_user, token)
+    if not e:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    rows = await pending_proofs_for_event(db, e.id, limit=10)
+    if not rows:
+        await cb.message.answer("اسکرین در انتظاری نیست.", reply_markup=organizer_home_kb())
+        await cb.answer()
+        return
+    await cb.message.answer(
+        f"📸 <b>اسکرین‌های فالو در انتظار</b> — {len(rows)} مورد\n"
+        "هر کدام را ببینید و تأیید یا رد کنید. تا تأیید نکنید ثبت‌نام آن بازیکن قطعی نمی‌شود."
+    )
+    for proof in rows:
+        caption = _social_caption(e, proof.user)
+        try:
+            await cb.message.answer_photo(
+                proof.file_id, caption=caption[:1024], reply_markup=social_review_kb(str(proof.id))
+            )
+        except Exception:  # noqa: BLE001
+            await cb.message.answer(
+                caption + "\n\n<i>اسکرین قابل نمایش نیست.</i>",
+                reply_markup=social_review_kb(str(proof.id)),
+            )
+    await cb.answer()
+
+
+async def _resolve_social(cb: CallbackQuery, db: AsyncSession, db_user: User, *, approved: bool) -> None:
+    from app.models.social import SocialProof
+
+    raw = cb.data.split(":", 1)[-1]
+    try:
+        proof_id = UUID(raw)
+    except ValueError:
+        await cb.answer("نامعتبر", show_alert=True)
+        return
+    proof = await db.get(SocialProof, proof_id)
+    if not proof:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    event = await db.scalar(
+        select(Event).where(Event.id == proof.event_id).options(*event_public_load_options())
+    )
+    if not event:
+        await cb.answer("کاستوم یافت نشد", show_alert=True)
+        return
+    allowed = bool(event.organizer and event.organizer.user_id == db_user.id)
+    if not allowed:
+            allowed = await is_active_admin(db, db_user)
+    if not allowed:
+        await cb.answer("این اسکرین برای کاستوم شما نیست.", show_alert=True)
+        return
+    if proof.status != SocialProofStatus.PENDING:
+        await cb.answer("قبلاً بررسی شده است.", show_alert=True)
+        return
+    await review_proof(db, proof, approved=approved, reviewer_id=db_user.id)
+    player = await db.get(User, proof.user_id)
+    confirmed = False
+    if approved and player:
+        try:
+            result = await register_user(
+                db, user=player, event=event, bot=cb.bot, source="social", accept_rules=True
+            )
+            confirmed = result.registration.status == RegistrationStatus.CONFIRMED
+        except AppError:
+            confirmed = True  # already registered
+        except Exception:  # noqa: BLE001
+            confirmed = False
+    await db.commit()
+    if player and not player.is_bot_blocked:
+        if approved:
+            note = (
+                "✅ اسکرین فالو شما تأیید شد و ثبت‌نامتان در کاستوم "
+                f"«{esc(_short_label(event))}» قطعی شد.\n"
+                "سر ساعت ROOM ID و PASS برایتان می‌آید — فقط تا آن لحظه در کانال‌ها بمانید."
+                if confirmed
+                else "✅ اسکرین فالو شما تأیید شد. برای قطعی شدن ثبت‌نام، دکمهٔ «عضو شدم» را در کارت کاستوم بزنید."
+            )
+        else:
+            note = (
+                f"❌ اسکرین فالو شما برای کاستوم «{esc(_short_label(event))}» تأیید نشد.\n"
+                "دوباره از کارت کاستوم اسکرین درست را بفرستید."
+            )
+        try:
+            await cb.bot.send_message(player.telegram_id, note)
+        except Exception:  # noqa: BLE001
+            pass
+    await cb.answer("تأیید شد" if approved else "رد شد")
+    await cb.message.answer("✅ ثبت‌نام این بازیکن قطعی شد." if approved else "❌ رد شد.")
+
+
+@router.callback_query(F.data.startswith("socok:"))
+async def org_social_ok(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    await _resolve_social(cb, db, db_user, approved=True)
+
+
+@router.callback_query(F.data.startswith("socno:"))
+async def org_social_no(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    await _resolve_social(cb, db, db_user, approved=False)
+
+
+# ---------------------------------------------------------------- winners
+
+
+@router.callback_query(F.data == "orgp:win")
+async def org_winners(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    if await _blocked_organize(db, db_user, cb):
+        return
+    org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
+    if not org:
+        await cb.answer("اول یک کاستوم بسازید.", show_alert=True)
+        return
+    rows = await claims_for_organizer(db, org.id, limit=10)
+    if not rows:
+        await cb.message.answer(
+            "هنوز کسی برای کاستوم‌های شما ادعای برنده ثبت نکرده.\n"
+            "بعد از شروع کاستوم، بازیکن‌ها از دکمهٔ «برنده» اسکرین می‌فرستند و همین‌جا می‌بینید.",
+            reply_markup=organizer_home_kb(),
+        )
+        await cb.answer()
+        return
+    flags = {"pending": "⏳ در انتظار شما", "approved": "✅ تأیید شده", "rejected": "❌ رد شده"}
+    await cb.message.answer(
+        "🏆 <b>برنده‌ها و تحویل جایزه</b>\n"
+        "اسکرین هر بازیکن و آیدی‌اش را می‌بینید. با «تأیید برنده» آیدی دریافت جایزه برایش ارسال می‌شود، "
+        "و از «پیام به برنده» می‌توانید همین‌جا با او حرف بزنید."
+    )
+    for claim in rows:
+        event = claim.event
+        caption = (
+            f"{flags.get(claim.status, '•')}\n"
+            f"کاستوم: {esc(_short_label(event)) if event else '—'}\n"
+            f"بازیکن: {format_person(claim.user)}\n"
+        )
+        kb = winner_claim_review_kb(
+            str(claim.id),
+            approved=claim.status != "pending",
+            player_url=player_dm_link(claim.user),
+        )
+        try:
+            await cb.message.answer_photo(claim.screenshot_file_id, caption=caption[:1024], reply_markup=kb)
+        except Exception:  # noqa: BLE001
+            await cb.message.answer(caption + "\n<i>اسکرین قابل نمایش نیست.</i>", reply_markup=kb)
+    await cb.message.answer("بازگشت به پنل:", reply_markup=organizer_home_kb())
+    await cb.answer()
+
+
+async def _claim_for_organizer(db: AsyncSession, db_user: User, raw: str):
+    from app.models.winner import WinnerClaim
+
+    try:
+        claim_id = UUID(raw)
+    except ValueError:
+        return None, None
+    claim = await db.scalar(
+        select(WinnerClaim)
+        .where(WinnerClaim.id == claim_id)
+        .options(selectinload(WinnerClaim.event), selectinload(WinnerClaim.user))
+    )
+    if not claim:
+        return None, None
+    event = claim.event
+    if event is None:
+        return None, None
+    org = await db.get(Organizer, claim.organizer_id) if claim.organizer_id else None
+    if org and org.user_id == db_user.id:
+        return claim, event
+    if await is_active_admin(db, db_user):
+        return claim, event
+    return None, None
+
+
+async def _resolve_claim_cb(cb: CallbackQuery, db: AsyncSession, db_user: User, *, approved: bool) -> None:
+    claim, event = await _claim_for_organizer(db, db_user, cb.data.split(":")[-1])
+    if not claim:
+        await cb.answer("این ادعا برای کاستوم شما نیست.", show_alert=True)
+        return
+    if claim.status != WinnerClaimStatus.PENDING:
+        await cb.answer("قبلاً بررسی شده است.", show_alert=True)
+        return
+    await resolve_claim(db, claim, approved=approved, reviewer_id=db_user.id)
+    contact = await resolve_payout_contact(db, event) if approved else None
+    if approved and event.organizer_id:
+        org = await db.get(Organizer, event.organizer_id)
+        if org:
+            from app.services import trust as trust_svc
+
+            await trust_svc.record(
+                db, org, "prize_paid_confirmed", related_event_id=event.id, actor_id=db_user.id
+            )
+    await db.commit()
+    winner, _ = await claim_parties(db, claim)
+    if winner and not winner.is_bot_blocked:
+        text = (
+            format_payout_note(event, contact)
+            if approved
+            else (
+                f"ادعای برنده بودن شما در کاستوم «{esc(_short_label(event))}» تأیید نشد.\n"
+                "اگر فکر می‌کنید اشتباه شده، از «پاسخ به برگزارکننده» توضیح بدهید."
+            )
+        )
+        try:
+            await cb.bot.send_message(
+                winner.telegram_id,
+                text,
+                reply_markup=winner_reply_kb(str(claim.id), contact_url=contact_link(contact)),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    await cb.answer("ثبت شد")
+    if approved:
+        shown = esc(contact) if contact else "—"
+        await cb.message.answer(
+            f"✅ برنده تأیید شد و آیدی <b>{shown}</b> برایش ارسال شد.\n"
+            "اگر آیدی درست نیست، از «آیدی دریافت جایزه» در پنل عوضش کنید.",
+            reply_markup=organizer_home_kb(),
+        )
+    else:
+        await cb.message.answer("❌ رد شد و به بازیکن اطلاع داده شد.", reply_markup=organizer_home_kb())
+
+
+@router.callback_query(F.data.startswith("orgw:ok:"))
+async def org_winner_ok(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    await _resolve_claim_cb(cb, db, db_user, approved=True)
+
+
+@router.callback_query(F.data.startswith("orgw:no:"))
+async def org_winner_no(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    await _resolve_claim_cb(cb, db, db_user, approved=False)
+
+
+@router.callback_query(F.data.startswith("orgw:msg:"))
+async def org_winner_message(cb: CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
+    claim, event = await _claim_for_organizer(db, db_user, cb.data.split(":")[-1])
+    if not claim:
+        await cb.answer("این ادعا برای کاستوم شما نیست.", show_alert=True)
+        return
+    await state.set_state(WinnerChatSG.to_winner)
+    await state.update_data(claim_id=str(claim.id))
+    await cb.message.answer(
+        f"✉️ پیام شما برای <b>{format_person(claim.user)}</b> فرستاده می‌شود.\n"
+        "متن را همین‌جا بنویسید. او می‌تواند از داخل ربات جواب بدهد.",
+        reply_markup=wizard_nav(),
+    )
+    await cb.answer()
+
+
+@router.message(WinnerChatSG.to_winner, ~F.text.in_(MENU_BUTTON_TEXTS))
+async def org_winner_message_body(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
+    body = (message.text or "").strip()
+    if not body:
+        await message.answer("متن پیام را بنویسید، یا «لغو» را بزنید.", reply_markup=wizard_nav())
+        return
+    if len(body) > 1000:
+        await message.answer("پیام حداکثر ۱۰۰۰ حرف باشد.", reply_markup=wizard_nav())
+        return
+    data = await state.get_data()
+    claim, event = await _claim_for_organizer(db, db_user, data.get("claim_id") or "")
+    if not claim or not event:
+        await state.clear()
+        await message.answer("این گفت‌وگو دیگر در دسترس نیست.", reply_markup=organizer_home_kb())
+        return
+    winner, _ = await claim_parties(db, claim)
+    delivered = False
+    if winner and not winner.is_bot_blocked:
+        contact = await resolve_payout_contact(db, event)
+        try:
+            await message.bot.send_message(
+                winner.telegram_id,
+                format_relayed_to_winner(event, body),
+                reply_markup=winner_reply_kb(str(claim.id), contact_url=contact_link(contact)),
+            )
+            delivered = True
+        except Exception:  # noqa: BLE001
+            delivered = False
+    await record_message(db, claim=claim, sender_id=db_user.id, body=body, delivered=delivered)
+    await db.commit()
+    await state.clear()
+    await message.answer(
+        "✉️ پیام برای برنده ارسال شد." if delivered else "پیام ثبت شد ولی به بازیکن نرسید (ربات را بلاک کرده).",
+        reply_markup=organizer_home_kb(),
+    )
+
+
+# ---------------------------------------------------------------- payout contact
+
+
+@router.callback_query(F.data == "orgp:payout")
+async def org_payout_settings(cb: CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
+    if await _blocked_organize(db, db_user, cb):
+        return
+    if await _organizer_ready(db, db_user, cb.message) is None:
+        await cb.answer()
+        return
+    org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
+    saved = (org.payout_contact or "").strip() if org else ""
+    current = f"آیدی فعلی: <b>{esc(saved)}</b>" if saved else "هنوز آیدی ثبت نکرده‌اید."
+    await state.set_state(OrganizerSettingsSG.payout_contact)
+    await cb.message.answer(
+        "🏆 <b>آیدی دریافت جایزه</b>\n"
+        f"{current}\n\n"
+        "وقتی برنده‌ای را تأیید می‌کنید، ربات همین آیدی را برایش می‌فرستد تا به پی‌وی شما بیاید.\n"
+        "آیدی جدید را بفرستید. نمونه: <code>@my_id</code>",
+        reply_markup=payout_contact_kb(saved=saved or None, username=db_user.username),
+    )
+    await cb.answer()
+
+
+@router.message(OrganizerSettingsSG.payout_contact, ~F.text.in_(MENU_BUTTON_TEXTS))
+async def org_payout_save(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
+    try:
+        contact = normalize_payout_contact(message.text or "")
+    except AppError as exc:
+        await message.answer(exc.message, reply_markup=wizard_nav())
+        return
+    org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
+    if org:
+        org.payout_contact = contact
+        await db.commit()
+    await state.clear()
+    await message.answer(
+        f"✅ آیدی دریافت جایزه ثبت شد: <b>{esc(contact)}</b>",
+        reply_markup=organizer_home_kb(),
+    )
+
+
+@router.callback_query(OrganizerSettingsSG.payout_contact, F.data.in_({"payc:saved", "payc:self"}))
+async def org_payout_shortcut(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_user: User):
+    org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
+    if cb.data == "payc:self" and db_user.username:
+        contact = f"@{db_user.username.lstrip('@')}"
+    else:
+        contact = (org.payout_contact or "").strip() if org else ""
+    if not contact:
+        await cb.answer("آیدی ذخیره‌شده‌ای نیست. خودتان بنویسید.", show_alert=True)
+        return
+    if org:
+        org.payout_contact = contact
+        await db.commit()
+    await state.clear()
+    await cb.message.answer(
+        f"✅ آیدی دریافت جایزه ثبت شد: <b>{esc(contact)}</b>",
+        reply_markup=organizer_home_kb(),
+    )
+    await cb.answer("ثبت شد")

@@ -54,22 +54,39 @@ def format_person(user: User | None) -> str:
     return f"{esc(name)}{esc(uname)} — {user.telegram_id}"
 
 
+def auto_archive_deadline(event: Event) -> datetime:
+    """When the bot gives up waiting for the organizer to tap "custom started"."""
+    return event.starts_at + timedelta(hours=get_settings().auto_archive_hours)
+
+
+def is_archived(event: Event, now: datetime | None = None) -> bool:
+    """Past means the organizer said so - or the backstop expired."""
+    if getattr(event, "archived_at", None) is not None:
+        return True
+    if event.status in {EventStatus.CANCELLED, EventStatus.REJECTED, EventStatus.FINISHED}:
+        return True
+    now = now or datetime.now(UTC)
+    return now > auto_archive_deadline(event)
+
+
 def credentials_deadline(event: Event) -> datetime:
-    return event.starts_at + timedelta(minutes=get_settings().credentials_grace_minutes)
+    """The organizer can still enter ROOM ID / PASS until this moment."""
+    archived = getattr(event, "archived_at", None)
+    return archived or auto_archive_deadline(event)
 
 
 def fill_deadline(event: Event) -> datetime:
-    settings = get_settings()
-    return event.starts_at + timedelta(minutes=settings.custom_fill_minutes + settings.credentials_grace_minutes)
+    """Players can still complete the conditions until this moment."""
+    return credentials_deadline(event)
 
 
 def credentials_window_open(event: Event, now: datetime | None = None) -> bool:
-    now = now or datetime.now(UTC)
-    return now <= credentials_deadline(event)
+    if event.status in {EventStatus.CANCELLED, EventStatus.REJECTED}:
+        return False
+    return not is_archived(event, now)
 
 
 def join_window_open(event: Event, now: datetime | None = None) -> bool:
-    now = now or datetime.now(UTC)
     if event.status in {
         EventStatus.CANCELLED,
         EventStatus.REJECTED,
@@ -77,7 +94,7 @@ def join_window_open(event: Event, now: datetime | None = None) -> bool:
         EventStatus.FINISHED,
     }:
         return False
-    return now <= fill_deadline(event)
+    return not is_archived(event, now)
 
 
 def creds_were_provided(creds: RoomCredential | None) -> bool:

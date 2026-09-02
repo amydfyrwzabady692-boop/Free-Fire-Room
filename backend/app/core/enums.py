@@ -61,6 +61,7 @@ class RequirementType(StrEnum):
     FF_PLAYER_ID = "ff_player_id"
     NOT_BANNED = "not_banned"
     CAPACITY = "capacity"
+    SOCIAL_FOLLOW = "social_follow"
 
 
 class RequirementStatus(StrEnum):
@@ -172,6 +173,23 @@ class PrizePaidVote(StrEnum):
     YES = "yes"
     NO = "no"
     UNKNOWN = "unknown"
+
+
+class SocialPlatform(StrEnum):
+    INSTAGRAM = "instagram"
+    YOUTUBE = "youtube"
+    OTHER = "other"
+
+
+class SocialProofStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class WinnerMessageDirection(StrEnum):
+    TO_WINNER = "to_winner"
+    TO_ORGANIZER = "to_organizer"
 
 
 class WinnerClaimStatus(StrEnum):

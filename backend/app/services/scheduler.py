@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.enums import JobStatus, JobType
 from app.models.event import Event
 from app.models.jobs import ScheduledJob
@@ -21,7 +22,11 @@ async def schedule_event_jobs(db: AsyncSession, event: Event) -> None:
     jobs = [
         (JobType.SEND_CREDENTIALS, event.credentials_send_at, "creds"),
         (JobType.EVENT_START, event.starts_at, "start"),
-        (JobType.EVENT_FINISH, event.starts_at + timedelta(hours=3), "finish"),
+        (
+            JobType.EVENT_FINISH,
+            event.starts_at + timedelta(hours=get_settings().auto_archive_hours),
+            "finish",
+        ),
         (JobType.PURGE_CREDENTIALS, event.starts_at + timedelta(days=7), "purge"),
         (JobType.RECHECK_REQUIREMENTS, event.credentials_send_at - timedelta(minutes=20), "recheck"),
     ]

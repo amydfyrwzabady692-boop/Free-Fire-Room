@@ -6,12 +6,19 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.bot.access import menu_for
 from app.bot.helpers import ack_callback, reply_callback
-from app.bot.keyboards.common import home_kb, labeled, winner_list_kb
+from app.bot.keyboards.common import (
+    home_kb,
+    labeled,
+    organizer_reply_kb,
+    winner_claim_review_kb,
+    winner_list_kb,
+)
 from app.bot.onboarding import ensure_onboarding
-from app.bot.states.groups import WinnerSG
+from app.bot.states.groups import WinnerChatSG, WinnerSG
 from app.core.config import get_settings
 from app.core.errors import AppError
 from app.core.logging import get_logger
@@ -19,12 +26,17 @@ from app.core.rate_limit import hit_rate_limit
 from app.models.admin import Admin
 from app.models.event import Event
 from app.models.user import User
+from app.core.enums import WinnerMessageDirection
 from app.services.winners import (
     check_winner_eligibility,
+    claim_parties,
     create_winner_claim,
+    format_relayed_to_organizer,
     format_winner_claim_caption,
     list_recent_winner_events,
     organizer_telegram_id,
+    player_dm_link,
+    record_message,
 )
 
 router = Router(name="winner")
@@ -43,8 +55,12 @@ async def _event_by_token(db: AsyncSession, token: str | None) -> Event | None:
     return await db.scalar(select(Event).where(Event.public_token == token, Event.deleted_at.is_(None)))
 
 
-async def _notify_winner_claim(bot, db: AsyncSession, event: Event, player: User, file_id: str) -> None:
+async def _notify_winner_claim(
+    bot, db: AsyncSession, event: Event, player: User, file_id: str, claim
+) -> None:
+    """The organizer gets approve / reject / message right under the screenshot."""
     caption = format_winner_claim_caption(event, player)[:1024]
+    kb = winner_claim_review_kb(str(claim.id), player_url=player_dm_link(player))
     targets: set[int] = set()
     org_tid = await organizer_telegram_id(db, event.organizer_id)
     if org_tid:
@@ -56,10 +72,10 @@ async def _notify_winner_claim(bot, db: AsyncSession, event: Event, player: User
             targets.add(user.telegram_id)
     for chat_id in targets:
         try:
-            await bot.send_photo(chat_id, file_id, caption=caption)
+            await bot.send_photo(chat_id, file_id, caption=caption, reply_markup=kb)
         except Exception:
             try:
-                await bot.send_message(chat_id, caption)
+                await bot.send_message(chat_id, caption, reply_markup=kb)
             except Exception:
                 log.exception("winner_claim_notify_failed", chat_id=chat_id)
 
@@ -126,7 +142,7 @@ async def winner_screenshot(message: Message, db: AsyncSession, db_user: User, s
         await message.answer("کاستوم یافت نشد.", reply_markup=await menu_for(db, db_user))
         return
     try:
-        await create_winner_claim(db, user=db_user, event=e, screenshot_file_id=file_id)
+        claim = await create_winner_claim(db, user=db_user, event=e, screenshot_file_id=file_id)
         await db.commit()
     except AppError as exc:
         await state.clear()
@@ -137,9 +153,98 @@ async def winner_screenshot(message: Message, db: AsyncSession, db_user: User, s
         await db.rollback()
         await message.answer("ثبت اسکرین الان انجام نشد. چند ثانیه بعد دوباره تلاش کنید.")
         return
-    await _notify_winner_claim(message.bot, db, e, db_user, file_id)
+    await _notify_winner_claim(message.bot, db, e, db_user, file_id, claim)
     await state.clear()
     await message.answer(
-        "اسکرین برنده ثبت شد و برای برگزارکننده و مالک ربات ارسال شد.",
+        "🏆 اسکرین برنده ثبت شد و برای برگزارکننده و مالک ربات ارسال شد.\n"
+        "بعد از تأیید، آیدی دریافت جایزه همین‌جا برایتان می‌آید و می‌توانید مستقیم با برگزارکننده پیام بدهید.",
+        reply_markup=await menu_for(db, db_user),
+    )
+
+
+# ---------------------------------------------------------------- winner replies
+
+
+@router.callback_query(F.data.startswith("winr:"))
+async def winner_reply_start(cb: CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
+    """The winner answers the organizer without leaving the bot."""
+    await ack_callback(cb)
+    claim = await _own_claim(db, db_user, cb.data.split(":", 1)[1])
+    if not claim:
+        await reply_callback(cb, "این گفت‌وگو در دسترس نیست.")
+        return
+    await state.set_state(WinnerChatSG.to_organizer)
+    await state.update_data(claim_id=str(claim.id))
+    await reply_callback(
+        cb,
+        "✉️ پیامتان برای برگزارکننده فرستاده می‌شود. متن را همین‌جا بنویسید.\n"
+        "برای انصراف «لغو» را بزنید.",
+    )
+
+
+async def _own_claim(db: AsyncSession, user: User, raw: str):
+    from uuid import UUID
+
+    from app.models.winner import WinnerClaim
+
+    try:
+        claim_id = UUID(raw)
+    except ValueError:
+        return None
+    claim = await db.scalar(
+        select(WinnerClaim)
+        .where(WinnerClaim.id == claim_id, WinnerClaim.user_id == user.id)
+        .options(selectinload(WinnerClaim.event))
+    )
+    return claim
+
+
+@router.message(WinnerChatSG.to_organizer)
+async def winner_reply_body(message: Message, db: AsyncSession, db_user: User, state: FSMContext):
+    body = (message.text or "").strip()
+    if not body:
+        await message.answer("متن پیام را بنویسید، یا «لغو» را بزنید.")
+        return
+    if len(body) > 1000:
+        await message.answer("پیام حداکثر ۱۰۰۰ حرف باشد.")
+        return
+    try:
+        await hit_rate_limit(f"rl:winmsg:{db_user.telegram_id}", 6)
+    except AppError as exc:
+        await message.answer(exc.message)
+        return
+    data = await state.get_data()
+    claim = await _own_claim(db, db_user, data.get("claim_id") or "")
+    if not claim or not claim.event:
+        await state.clear()
+        await message.answer("این گفت‌وگو دیگر در دسترس نیست.", reply_markup=await menu_for(db, db_user))
+        return
+    _, organizer_user = await claim_parties(db, claim)
+    delivered = False
+    if organizer_user and not organizer_user.is_bot_blocked:
+        player_url = player_dm_link(db_user)
+        try:
+            await message.bot.send_message(
+                organizer_user.telegram_id,
+                format_relayed_to_organizer(claim.event, db_user, body),
+                reply_markup=organizer_reply_kb(str(claim.id), player_url=player_url),
+            )
+            delivered = True
+        except Exception:  # noqa: BLE001
+            delivered = False
+    await record_message(
+        db,
+        claim=claim,
+        sender_id=db_user.id,
+        body=body,
+        delivered=delivered,
+        direction=WinnerMessageDirection.TO_ORGANIZER,
+    )
+    await db.commit()
+    await state.clear()
+    await message.answer(
+        "✉️ پیام شما برای برگزارکننده ارسال شد."
+        if delivered
+        else "پیام ثبت شد ولی به برگزارکننده نرسید. از «گزارش به مالک ربات» هم می‌توانید استفاده کنید.",
         reply_markup=await menu_for(db, db_user),
     )

@@ -205,17 +205,21 @@ def _event_filters(q: Select, when: str | None, has_capacity: bool | None, game_
         Event.status.in_([EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED]),
         Event.deep_link_active.is_(True),
     )
+    if when in {"today", "tomorrow", "week", "upcoming"}:
+        # the organizer, not the clock, decides when a custom is over
+        q = q.where(Event.archived_at.is_(None))
     if when == "today":
         q = q.where(Event.starts_at >= now.replace(hour=0, minute=0, second=0, microsecond=0), Event.starts_at < now + timedelta(days=1))
     elif when == "tomorrow":
         start = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         q = q.where(Event.starts_at >= start, Event.starts_at < start + timedelta(days=1))
     elif when == "week":
-        q = q.where(Event.starts_at >= now, Event.starts_at < now + timedelta(days=7))
+        q = q.where(Event.starts_at < now + timedelta(days=7))
     elif when == "upcoming":
-        q = q.where(Event.starts_at >= now)
+        pass
     if has_capacity:
-        q = q.where(Event.confirmed_count < Event.capacity)
+        # capacity 0 means unlimited, so those always have room
+        q = q.where(or_(Event.capacity <= 0, Event.confirmed_count < Event.capacity))
     if game_mode:
         q = q.where(Event.game_mode == game_mode)
     if region:

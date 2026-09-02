@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Shell } from "@/components/Shell";
 import { api } from "@/lib/api";
+import { seats } from "@/lib/format";
 
 const nav = [
   { href: "/organizer", label: "داشبورد" },
@@ -35,7 +36,7 @@ export default function Page() {
         <div key={e.id} className="card mb-2">
           <div className="font-bold">{e.title}</div>
           <div className="text-sm text-white/60">
-            {e.status} | {e.confirmed_count}/{e.capacity} | {e.deep_link}
+            {e.status} | {seats(e)} | {e.deep_link}
           </div>
           <div className="mt-2 flex gap-2">
             <button className="btn-ghost" onClick={() => open(e.id)}>

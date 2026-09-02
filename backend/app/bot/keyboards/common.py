@@ -209,6 +209,7 @@ def event_detail_kb(
     can_review: bool = False,
     show_reviews: bool = False,
     can_claim_win: bool = False,
+    social_url: str | None = None,
     back: str = "upcoming",
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
@@ -218,8 +219,12 @@ def event_detail_kb(
             continue
         seen.add(url)
         rows.append([ibtn(f"عضویت در {title[:28]}", url=url, style=PRIMARY)])
+    if social_url:
+        rows.append([ibtn("فالو پیج برگزارکننده", url=social_url, style=PRIMARY)])
     if can_join:
         rows.append([ibtn("عضو شدم — بررسی و ثبت‌نام", callback_data=f"join:{token}", style=SUCCESS)])
+    if social_url:
+        rows.append([ibtn("ارسال اسکرین‌شات فالو", callback_data=f"soc:{token}", style=SUCCESS)])
     if can_claim_win:
         rows.append([ibtn("برنده شدم", callback_data=f"win:{token}", style=SUCCESS)])
     if can_review:
@@ -393,6 +398,8 @@ def organizer_home_kb() -> InlineKeyboardMarkup:
             [ibtn("ثبت کاستوم جدید", callback_data="orgp:new", style=SUCCESS)],
             [ibtn("ارسال ROOM ID / PASS", callback_data="orgp:creds_menu", style=SUCCESS)],
             [ibtn("کاستوم‌ها و آمار من", callback_data="orgp:mine", style=PRIMARY)],
+            [ibtn("برنده‌ها و تحویل جایزه", callback_data="orgp:win", style=PRIMARY)],
+            [ibtn("آیدی دریافت جایزه", callback_data="orgp:payout", style=PRIMARY)],
             [ibtn("کانال‌های من", callback_data="orgp:ch", style=PRIMARY)],
             [ibtn("راهنمای برگزارکننده", callback_data="help:host", style=PRIMARY)],
             [ibtn("منوی اصلی", callback_data="menu:home", style=DANGER)],
@@ -428,4 +435,75 @@ def announcement_list_kb(items: list[tuple[str, str]]) -> InlineKeyboardMarkup:
     rows = [[ibtn(title[:60], callback_data=f"annv:{aid}", style=PRIMARY)] for aid, title in items]
     rows.append([ibtn("ثبت اطلاع‌رسانی", callback_data="ann:new", style=SUCCESS)])
     rows.append([ibtn("بازگشت", callback_data="menu:home", style=DANGER)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def social_step_kb(token: str, url: str | None) -> InlineKeyboardMarkup:
+    """Last gate before a registration is confirmed: follow, then send a shot."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if url:
+        rows.append([ibtn("باز کردن پیج و فالو کردن", url=url, style=PRIMARY)])
+    rows.append([ibtn("ارسال اسکرین‌شات فالو", callback_data=f"soc:{token}", style=SUCCESS)])
+    rows.append([ibtn("بازگشت به کاستوم", callback_data=f"ev:{token}", style=PRIMARY)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def social_review_kb(proof_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                ibtn("تأیید ثبت‌نام", callback_data=f"socok:{proof_id}", style=SUCCESS),
+                ibtn("رد", callback_data=f"socno:{proof_id}", style=DANGER),
+            ]
+        ]
+    )
+
+
+def payout_contact_kb(*, saved: str | None = None, username: str | None = None) -> InlineKeyboardMarkup:
+    """One tap for the id this organizer used last time, or their own @username."""
+    rows: list[list[InlineKeyboardButton]] = []
+    seen: set[str] = set()
+    if saved:
+        seen.add(saved)
+        rows.append([ibtn(f"همان قبلی: {saved[:32]}", callback_data="payc:saved", style=SUCCESS)])
+    if username:
+        handle = f"@{username.lstrip('@')}"
+        if handle not in seen:
+            rows.append([ibtn(f"آیدی خودم: {handle[:32]}", callback_data="payc:self", style=PRIMARY)])
+    rows.append([ibtn("لغو", callback_data="wiz:cancel", style=DANGER)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def winner_claim_review_kb(
+    claim_id: str, *, approved: bool = False, player_url: str | None = None
+) -> InlineKeyboardMarkup:
+    """What the organizer sees under a winner's screenshot."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if not approved:
+        rows.append(
+            [
+                ibtn("تأیید برنده", callback_data=f"orgw:ok:{claim_id}", style=SUCCESS),
+                ibtn("رد", callback_data=f"orgw:no:{claim_id}", style=DANGER),
+            ]
+        )
+    rows.append([ibtn("پیام به برنده", callback_data=f"orgw:msg:{claim_id}", style=PRIMARY)])
+    if player_url:
+        rows.append([ibtn("رفتن به پی‌وی بازیکن", url=player_url, style=PRIMARY)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def winner_reply_kb(claim_id: str, *, contact_url: str | None = None) -> InlineKeyboardMarkup:
+    """What the winner sees: reply through the bot, or open the DM directly."""
+    rows: list[list[InlineKeyboardButton]] = []
+    rows.append([ibtn("پاسخ به برگزارکننده", callback_data=f"winr:{claim_id}", style=SUCCESS)])
+    if contact_url:
+        rows.append([ibtn("رفتن به پی‌وی برگزارکننده", url=contact_url, style=PRIMARY)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def organizer_reply_kb(claim_id: str, *, player_url: str | None = None) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    rows.append([ibtn("پاسخ به برنده", callback_data=f"orgw:msg:{claim_id}", style=SUCCESS)])
+    if player_url:
+        rows.append([ibtn("رفتن به پی‌وی بازیکن", url=player_url, style=PRIMARY)])
     return InlineKeyboardMarkup(inline_keyboard=rows)

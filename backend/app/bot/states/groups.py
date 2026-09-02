@@ -13,6 +13,8 @@ class EventWizardSG(StatesGroup):
     starts_time = State()
     channel = State()
     extra_channels = State()
+    social = State()
+    payout_contact = State()
     description = State()
     banner = State()
     capacity = State()
@@ -57,6 +59,19 @@ class ReviewSG(StatesGroup):
 
 class WinnerSG(StatesGroup):
     screenshot = State()
+
+
+class SocialProofSG(StatesGroup):
+    screenshot = State()
+
+
+class WinnerChatSG(StatesGroup):
+    to_winner = State()
+    to_organizer = State()
+
+
+class OrganizerSettingsSG(StatesGroup):
+    payout_contact = State()
 
 
 class AdminSG(StatesGroup):

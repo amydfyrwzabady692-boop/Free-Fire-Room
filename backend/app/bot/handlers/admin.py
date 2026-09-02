@@ -13,7 +13,15 @@ from sqlalchemy.orm import selectinload
 
 from app.bot.access import is_active_admin, menu_for
 from app.bot.helpers import esc, extract_channel_ref, replace_callback_view
-from app.bot.keyboards.common import DANGER, PRIMARY, SUCCESS, add_required_channel_kb, ibtn, labeled
+from app.bot.keyboards.common import (
+    DANGER,
+    PRIMARY,
+    SUCCESS,
+    add_required_channel_kb,
+    ibtn,
+    labeled,
+    winner_reply_kb,
+)
 from app.bot.paging import page_header, paged_kb, paginate, parse_page
 from app.bot.states.groups import AdminSG
 from app.core.config import get_settings
@@ -49,6 +57,7 @@ from app.services.funnel import biggest_drop, event_funnel, format_funnel
 from app.services.reports import format_person, report_label
 from app.locales.labels import ban_scope_fa, event_status_fa, setting_fa
 from app.services.users import get_by_telegram
+from app.services.winners import contact_link, format_payout_note, resolve_payout_contact
 
 router = Router(name="admin")
 
@@ -995,10 +1004,12 @@ async def admin_winner_view(cb: CallbackQuery, db: AsyncSession, db_user: User):
     event = await db.get(Event, claim.event_id)
     player = await db.get(User, claim.user_id)
     prize = _event_label(event, 60) if event else "ادعای برنده"
+    contact = await resolve_payout_contact(db, event) if event else None
     caption = (
         f"🏆 <b>{esc(prize)}</b>\n"
         f"کاستوم: {esc(event.title) if event else '—'}\n"
         f"بازیکن: {format_person(player)}\n"
+        f"آیدی دریافت جایزه: {esc(contact) if contact else 'ثبت نشده'}\n"
         f"وضعیت: {esc(claim.status)}"
     )
     kb = InlineKeyboardMarkup(
@@ -1007,6 +1018,7 @@ async def admin_winner_view(cb: CallbackQuery, db: AsyncSession, db_user: User):
                 ibtn("تأیید برنده", callback_data=f"adm:wok:{claim.id}", style=SUCCESS),
                 ibtn("رد", callback_data=f"adm:wno:{claim.id}", style=DANGER),
             ],
+            [ibtn("پیام به برنده", callback_data=f"orgw:msg:{claim.id}", style=PRIMARY)],
             [ibtn("بازگشت به فهرست", callback_data="adm:win:0", style=PRIMARY)],
         ]
     )
@@ -1048,14 +1060,20 @@ async def _resolve_winner(cb: CallbackQuery, db: AsyncSession, db_user: User, ap
                 actor_id=db_user.id,
             )
     player = await db.get(User, claim.user_id)
+    event = await db.get(Event, claim.event_id)
+    contact = await resolve_payout_contact(db, event) if (approved and event) else None
     if player and not player.is_bot_blocked:
         note = (
-            "🏆 برنده بودن شما تأیید شد. برای دریافت جایزه با برگزارکننده هماهنگ کنید."
-            if approved
+            format_payout_note(event, contact)
+            if approved and event
             else "ادعای برنده بودن شما تأیید نشد."
         )
         try:
-            await cb.bot.send_message(player.telegram_id, note)
+            await cb.bot.send_message(
+                player.telegram_id,
+                note,
+                reply_markup=winner_reply_kb(str(claim.id), contact_url=contact_link(contact)),
+            )
         except Exception:  # noqa: BLE001
             pass
     await db.flush()

@@ -3,12 +3,14 @@
 import { useEffect, useState } from "react";
 import { ADMIN_NAV, EmptyBox, ErrorBox, Loading, Shell } from "@/components/Shell";
 import { api } from "@/lib/api";
+import { seats } from "@/lib/format";
 
 type Row = {
   id: string;
   title: string;
   status: string;
   capacity: number;
+  archived_at?: string | null;
   confirmed_count: number;
   organizer_name?: string | null;
   starts_at?: string;
@@ -91,7 +93,7 @@ export default function EventsAdmin() {
               <div>
                 <div className="font-bold">{e.title}</div>
                 <div className="text-sm text-white/50">
-                  {STATUS_FA[e.status] || e.status} · {e.confirmed_count}/{e.capacity} نفر
+                  {STATUS_FA[e.status] || e.status} · {seats(e)}
                   {e.organizer_name ? ` · ${e.organizer_name}` : ""}
                 </div>
               </div>

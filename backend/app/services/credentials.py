@@ -123,6 +123,13 @@ async def deliver_one(bot: Bot, db: Session, event: Event, user: User, creds: Ro
 
     if is_banned_sync(db, user, BanScope.PARTICIPATE):
         ok, reason = False, "banned"
+    if ok:
+        from app.services.social import social_gate_ok_sync
+
+        if not social_gate_ok_sync(db, event, user):
+            # the organizer asked for a follow screenshot and has not approved
+            # this player's yet - not an error, just not their turn
+            ok, reason = False, "social_not_approved"
     if not ok:
         # we could not verify this player: leave their registration alone and
         # let the job retry, instead of demoting them to "ineligible"
@@ -130,6 +137,10 @@ async def deliver_one(bot: Bot, db: Session, event: Event, user: User, creds: Ro
             return "check_failed"
         if reason == CHECK_UNAVAILABLE:
             return "check_unavailable"
+        if reason == "social_not_approved":
+            # keep their registration: the organizer may still approve the
+            # screenshot, and the next sweep will deliver
+            return "social_pending"
         _upsert_delivery(db, user=user, event=event, job=job, idem=idem, status=DeliveryStatus.SKIPPED, error=reason)
         reg = db.scalar(
             select(Registration).where(Registration.event_id == event.id, Registration.user_id == user.id)

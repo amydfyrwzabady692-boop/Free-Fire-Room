@@ -74,7 +74,8 @@ async def evaluate_requirements(
         )
     )
 
-    if event.confirmed_count >= event.capacity and (
+    unlimited = int(event.capacity or 0) <= 0
+    if not unlimited and event.confirmed_count >= event.capacity and (
         registration is None or registration.status != "confirmed"
     ):
         cap_status = RequirementStatus.NOT_DONE
@@ -202,7 +203,52 @@ async def evaluate_requirements(
             continue
         checklist.add(await _membership_item(bot, user, channel, global_flag=False))
 
+    social = await _social_item(db, user, event)
+    if social:
+        checklist.add(social)
+
     return checklist
+
+
+async def _social_item(db: AsyncSession, user: User, event: Event) -> CheckItem | None:
+    """Follow the organizer's page and prove it - only when they asked for it."""
+    from app.core.enums import SocialProofStatus
+    from app.services.social import get_proof, platform_label, social_required
+
+    if not social_required(event):
+        return None
+    label = f"فالو {platform_label(event)} + ارسال اسکرین‌شات"
+    proof = await get_proof(db, event_id=event.id, user_id=user.id)
+    if proof is None:
+        return CheckItem(
+            RequirementType.SOCIAL_FOLLOW,
+            label,
+            RequirementStatus.NOT_DONE,
+            "پیج را فالو کنید و اسکرین‌شات آن را بفرستید.",
+            action="social_proof",
+            url=event.social_url,
+        )
+    if proof.status == SocialProofStatus.APPROVED:
+        return CheckItem(
+            RequirementType.SOCIAL_FOLLOW, label, RequirementStatus.DONE, url=event.social_url
+        )
+    if proof.status == SocialProofStatus.REJECTED:
+        detail = (proof.review_note or "").strip() or "اسکرین شما تأیید نشد. دوباره بفرستید."
+        return CheckItem(
+            RequirementType.SOCIAL_FOLLOW,
+            label,
+            RequirementStatus.NOT_DONE,
+            detail,
+            action="social_proof",
+            url=event.social_url,
+        )
+    return CheckItem(
+        RequirementType.SOCIAL_FOLLOW,
+        label,
+        RequirementStatus.PENDING_REVIEW,
+        "اسکرین شما رسید و منتظر تأیید برگزارکننده است.",
+        url=event.social_url,
+    )
 
 
 async def _membership_item(bot, user: User, channel: Channel, global_flag: bool) -> CheckItem:
@@ -237,6 +283,8 @@ async def _membership_item(bot, user: User, channel: Channel, global_flag: bool)
 
 def evaluate_capacity_only(event: Event, already_confirmed: bool) -> bool:
     if already_confirmed:
+        return True
+    if int(event.capacity or 0) <= 0:
         return True
     return event.confirmed_count < event.capacity
 

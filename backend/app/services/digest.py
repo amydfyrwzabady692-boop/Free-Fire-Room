@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import html
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.enums import EventStatus, EventVisibility
 from app.services.event_display import (
     event_public_load_options,
@@ -31,7 +32,9 @@ def upcoming_prize_customs_sync(db: Session, *, limit: int = DIGEST_LIMIT) -> li
                 Event.deleted_at.is_(None),
                 Event.visibility == EventVisibility.PUBLIC,
                 Event.status.in_([EventStatus.PUBLISHED, EventStatus.FULL]),
-                Event.starts_at >= now,
+                # still open: the organizer has not tapped "custom started"
+                Event.archived_at.is_(None),
+                Event.starts_at >= now - timedelta(hours=get_settings().auto_archive_hours),
                 Event.deep_link_active.is_(True),
             )
             .options(*event_public_load_options())

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import selectinload
 
@@ -150,9 +150,16 @@ LIST_LABEL_LIMIT = 64
 
 def format_event_list_label(event: Event) -> str:
     """Button label. The prize is why anyone taps, so it always shows."""
+    from app.core.config import get_settings
+
     prize_text = event_prize_text(event)
-    if event.starts_at < datetime.now(UTC):
+    now = datetime.now(UTC)
+    backstop = event.starts_at + timedelta(hours=get_settings().auto_archive_hours)
+    if getattr(event, "archived_at", None) is not None or now > backstop:
         head = "گذشته"
+    elif event.starts_at < now:
+        # the clock passed but the organizer has not closed it: still joinable
+        head = "🔴 در حال برگزاری"
     else:
         head = f"🕐 {format_local(event.starts_at, event.timezone, compact=True)}"
     budget = LIST_LABEL_LIMIT - len(head) - len(" · 🎁 ")
@@ -179,7 +186,8 @@ def format_capacity_line(event: Event) -> str:
     capacity = int(event.capacity or 0)
     taken = max(0, int(event.confirmed_count or 0))
     if capacity <= 0:
-        return f"👥 ثبت‌نام قطعی: {taken}"
+        # 0 means unlimited: nobody is turned away for being late
+        return f"👥 ظرفیت: بدون محدودیت — {taken} نفر ثبت‌نام قطعی"
     free = max(0, capacity - taken)
     if free == 0:
         return f"👥 ظرفیت: {taken}/{capacity} — تکمیل"

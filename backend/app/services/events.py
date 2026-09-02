@@ -16,7 +16,16 @@ from app.services.audit import write_audit
 from app.services.scheduler import cancel_event_jobs, schedule_event_jobs
 from app.services.settings import get_setting
 
-MIN_START_LEAD_MINUTES = 10
+#: The custom may start the moment it is created. The organizer decides when
+#: joining closes by tapping "custom started"; the clock no longer does it.
+MIN_START_LEAD_MINUTES = 0
+
+#: capacity 0 means "as many players as show up"
+UNLIMITED_CAPACITY = 0
+
+
+def capacity_is_unlimited(event: Event) -> bool:
+    return int(event.capacity or 0) <= 0
 
 
 def _validate_times(starts_at, registration_ends_at, credentials_send_at) -> None:
@@ -24,10 +33,10 @@ def _validate_times(starts_at, registration_ends_at, credentials_send_at) -> Non
     registration_ends_at = as_utc(registration_ends_at)
     credentials_send_at = as_utc(credentials_send_at)
     now = datetime.now(UTC)
-    if starts_at <= now + timedelta(minutes=MIN_START_LEAD_MINUTES):
+    if starts_at < now - timedelta(minutes=1):
         raise ValidationAppError(
-            "starts_too_soon",
-            f"زمان برگزاری باید حداقل {MIN_START_LEAD_MINUTES} دقیقه بعد باشد تا بازیکن‌ها وقت جوین داشته باشند.",
+            "starts_in_past",
+            "این ساعت گذشته است. ساعتی از الان به بعد بفرستید.",
         )
     if credentials_send_at > starts_at:
         raise ValidationAppError("creds_after_start", "ارسال ROOM ID / PASS نمی‌تواند بعد از شروع بازی باشد.")
@@ -61,9 +70,9 @@ async def create_event(db: AsyncSession, organizer: Organizer, data: dict, actor
     credentials_send_at = as_utc(data["credentials_send_at"])
     _validate_times(starts_at, registration_ends_at, credentials_send_at)
 
-    capacity = int(data["capacity"])
-    if capacity < 1 or capacity > 100:
-        raise ValidationAppError("bad_capacity", "ظرفیت باید بین ۱ تا ۱۰۰ باشد.")
+    # 0 (the default) means unlimited: everyone who completes the conditions
+    # gets in and gets the ROOM ID / PASS.
+    capacity = max(0, int(data.get("capacity") or 0))
 
     event = Event(
         public_token=generate_unguessable_token(18),
@@ -93,6 +102,10 @@ async def create_event(db: AsyncSession, organizer: Organizer, data: dict, actor
         personalize_delivery=bool(data.get("personalize_delivery", True)),
         reminder_offsets_minutes=data.get("reminder_offsets_minutes") or [60, 15, 5],
         prize_summary=data.get("prize_summary"),
+        payout_contact=(data.get("payout_contact") or None),
+        social_url=(data.get("social_url") or None),
+        social_platform=(data.get("social_platform") or None),
+        social_note=(data.get("social_note") or None),
         deep_link_active=True,
     )
     db.add(event)
@@ -136,6 +149,14 @@ async def create_event(db: AsyncSession, organizer: Organizer, data: dict, actor
     return event
 
 
+def _requirement_config(event: Event, rtype: str) -> dict | None:
+    if rtype == RequirementType.REFERRALS:
+        return {"required_referrals": event.required_referrals}
+    if rtype == RequirementType.SOCIAL_FOLLOW:
+        return {"url": event.social_url, "platform": event.social_platform, "note": event.social_note}
+    return None
+
+
 def _seed_requirements(db: AsyncSession, event: Event, data: dict) -> None:
     items = [
         (RequirementType.NOT_BANNED, "عدم محدودیت حساب", 0),
@@ -150,6 +171,8 @@ def _seed_requirements(db: AsyncSession, event: Event, data: dict) -> None:
     if event.required_referrals:
         items.append((RequirementType.REFERRALS, f"دعوت {event.required_referrals} نفر", 5))
     items.append((RequirementType.GLOBAL_CHANNEL_MEMBERSHIP, "عضویت کانال‌های اجباری ربات", 6))
+    if (event.social_url or "").strip():
+        items.append((RequirementType.SOCIAL_FOLLOW, "فالو پیج برگزارکننده + اسکرین‌شات", 7))
     for rtype, label, order in items:
         db.add(
             EventRequirement(
@@ -158,7 +181,7 @@ def _seed_requirements(db: AsyncSession, event: Event, data: dict) -> None:
                 label=label,
                 sort_order=order,
                 is_active=True,
-                config={"required_referrals": event.required_referrals} if rtype == RequirementType.REFERRALS else None,
+                config=_requirement_config(event, rtype),
             )
         )
     for cid in data.get("required_channel_ids") or []:
@@ -214,10 +237,37 @@ async def reject_event(db: AsyncSession, event: Event, actor_id, reason: str) ->
     return event
 
 
+async def mark_event_started(db: AsyncSession, event: Event, actor_id) -> Event:
+    """The organizer says the match has begun.
+
+    Nothing about a custom is decided by the clock any more: this is what moves
+    it out of the upcoming list into "past", and closes joining and ROOM ID /
+    PASS entry for good.
+    """
+    if event.archived_at is not None:
+        return event
+    now = datetime.now(UTC)
+    event.archived_at = now
+    event.finished_at = event.finished_at or now
+    if event.status in {EventStatus.PUBLISHED, EventStatus.FULL}:
+        event.status = EventStatus.STARTED
+    await cancel_event_jobs(db, event.id)
+    await write_audit(
+        db,
+        action="event_started_by_organizer",
+        entity_type="event",
+        entity_id=event.id,
+        actor_id=actor_id,
+    )
+    await db.flush()
+    return event
+
+
 async def cancel_event(db: AsyncSession, event: Event, actor_id, reason: str) -> Event:
     event.status = EventStatus.CANCELLED
     event.cancel_reason = reason
     event.cancelled_at = datetime.now(UTC)
+    event.archived_at = event.archived_at or event.cancelled_at
     event.deep_link_active = False
     await cancel_event_jobs(db, event.id)
     await write_audit(
@@ -302,8 +352,9 @@ async def waiting_live_credential_event(db: AsyncSession, user_id) -> Event | No
                 Event.status.in_(
                     [EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED]
                 ),
+                Event.archived_at.is_(None),
                 Event.starts_at <= now + timedelta(minutes=20),
-                Event.starts_at >= now - timedelta(minutes=get_settings().credentials_grace_minutes),
+                Event.starts_at >= now - timedelta(hours=get_settings().auto_archive_hours),
             )
             .order_by(Event.starts_at.asc())
         )
@@ -337,6 +388,10 @@ async def copy_event(db: AsyncSession, event: Event, organizer: Organizer, actor
         "winner_method": event.winner_method,
         "custom_credentials_message": event.custom_credentials_message,
         "prize_summary": event.prize_summary,
+        "payout_contact": event.payout_contact,
+        "social_url": event.social_url,
+        "social_platform": event.social_platform,
+        "social_note": event.social_note,
         "channel_id": event.channel_id,
         "required_channel_ids": [rc.channel_id for rc in event.required_channels],
         "prizes": [{"place": p.place, "title": p.title, "description": p.description} for p in event.prizes],
@@ -367,6 +422,11 @@ def public_event_dict(event: Event, include_secrets: bool = False) -> dict:
         "status": event.status,
         "featured": event.featured,
         "prize_summary": event.prize_summary,
+        "unlimited_capacity": capacity_is_unlimited(event),
+        "archived_at": event.archived_at.isoformat() if event.archived_at else None,
+        "payout_contact": event.payout_contact,
+        "social_url": event.social_url,
+        "social_platform": event.social_platform,
         "visibility": event.visibility,
         "required_referrals": event.required_referrals,
         "waitlist_enabled": event.waitlist_enabled,

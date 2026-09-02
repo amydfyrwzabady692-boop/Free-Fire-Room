@@ -59,7 +59,8 @@ class EventCreateIn(BaseModel):
     timezone: str = "Asia/Tehran"
     region: str = "ME"
     game_mode: str = "squad"
-    capacity: int = Field(ge=1, le=100)
+    #: 0 = unlimited, which is the default for customs made in the bot
+    capacity: int = Field(default=0, ge=0, le=10000)
     waitlist_enabled: bool = True
     visibility: str = "public"
     require_rules_accept: bool = True
@@ -73,6 +74,10 @@ class EventCreateIn(BaseModel):
     personalize_delivery: bool = True
     reminder_offsets_minutes: list[int] = Field(default_factory=lambda: [60, 15])
     prize_summary: str | None = None
+    payout_contact: str | None = Field(default=None, max_length=128)
+    social_url: str | None = Field(default=None, max_length=300)
+    social_platform: str | None = Field(default=None, max_length=32)
+    social_note: str | None = Field(default=None, max_length=500)
     prizes: list[dict[str, Any]] = Field(default_factory=list)
     required_channel_ids: list[UUID] = Field(default_factory=list)
     channel_id: UUID | None = None

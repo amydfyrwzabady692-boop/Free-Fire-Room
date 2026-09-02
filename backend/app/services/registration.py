@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from app.core.enums import EventStatus, RegistrationStatus, RequirementStatus
+from app.core.enums import EventStatus, RegistrationStatus, RequirementStatus, RequirementType
 from app.core.errors import ConflictError, NotFoundError, ValidationAppError
 from app.core.logging import get_logger
 from app.models.event import Event
@@ -40,6 +40,8 @@ class RegisterResult:
     promoted_from_waitlist: bool = False
     waitlisted: bool = False
     checklist: list | None = None
+    #: every condition is met and only the organizer's screenshot review is left
+    awaiting_review: bool = False
 
 
 async def get_event_or_404(db: AsyncSession, event_id: UUID) -> Event:
@@ -114,22 +116,33 @@ async def register_user(
         for i in checklist.items
         if i.status in {RequirementStatus.NOT_DONE, RequirementStatus.EXPIRED} and i.requirement_type != "capacity"
     ]
-    if hard_missing:
+    # A screenshot still waiting for the organizer is not "done": confirming
+    # here would hand the ROOM ID / PASS to someone nobody has checked yet.
+    awaiting_review = [
+        i
+        for i in checklist.items
+        if i.status == RequirementStatus.PENDING_REVIEW
+        and i.requirement_type == RequirementType.SOCIAL_FOLLOW
+    ]
+    if hard_missing or awaiting_review:
         holder.status = RegistrationStatus.PENDING
         await db.flush()
-        return RegisterResult(holder, checklist=checklist.items)
+        return RegisterResult(
+            holder, checklist=checklist.items, awaiting_review=bool(awaiting_review and not hard_missing)
+        )
 
     # Capacity lock
     locked = await db.scalar(select(Event).where(Event.id == event.id).with_for_update())
     if locked is None:
         raise NotFoundError("event_not_found", "کاستوم یافت نشد.")
 
-    if locked.confirmed_count < locked.capacity:
+    unlimited = int(locked.capacity or 0) <= 0
+    if unlimited or locked.confirmed_count < locked.capacity:
         holder.status = RegistrationStatus.CONFIRMED
         holder.confirmed_at = now
         holder.conditions_met_at = now
         locked.confirmed_count += 1
-        if locked.confirmed_count >= locked.capacity and locked.status == EventStatus.PUBLISHED:
+        if not unlimited and locked.confirmed_count >= locked.capacity and locked.status == EventStatus.PUBLISHED:
             locked.status = EventStatus.FULL
         await write_audit(
             db,
@@ -175,7 +188,9 @@ async def mark_ineligible(db: AsyncSession, registration: Registration, reason: 
         event = await db.get(Event, registration.event_id)
         if event and event.confirmed_count > 0:
             event.confirmed_count -= 1
-            if event.status == EventStatus.FULL and event.confirmed_count < event.capacity:
+            if event.status == EventStatus.FULL and (
+                int(event.capacity or 0) <= 0 or event.confirmed_count < event.capacity
+            ):
                 event.status = EventStatus.PUBLISHED
         registration.status = RegistrationStatus.INELIGIBLE
         registration.ineligible_reason = reason
@@ -196,7 +211,9 @@ async def mark_ineligible(db: AsyncSession, registration: Registration, reason: 
 
 async def promote_waitlist(db: AsyncSession, event_id: UUID) -> Registration | None:
     event = await db.scalar(select(Event).where(Event.id == event_id).with_for_update())
-    if not event or event.confirmed_count >= event.capacity:
+    if not event:
+        return None
+    if int(event.capacity or 0) > 0 and event.confirmed_count >= event.capacity:
         return None
     entry = await db.scalar(
         select(WaitlistEntry)
@@ -217,7 +234,7 @@ async def promote_waitlist(db: AsyncSession, event_id: UUID) -> Registration | N
     event.confirmed_count += 1
     entry.is_active = False
     entry.promoted_at = now
-    if event.confirmed_count >= event.capacity:
+    if int(event.capacity or 0) > 0 and event.confirmed_count >= event.capacity:
         if event.status == EventStatus.PUBLISHED:
             event.status = EventStatus.FULL
     elif event.status == EventStatus.FULL:
@@ -241,11 +258,12 @@ def try_confirm_with_lock_sync(db: Session, user_id, event_id) -> str:
         existing = Registration(event_id=event_id, user_id=user_id, status=RegistrationStatus.PENDING)
         db.add(existing)
         db.flush()
-    if event.confirmed_count < event.capacity:
+    unlimited = int(event.capacity or 0) <= 0
+    if unlimited or event.confirmed_count < event.capacity:
         existing.status = RegistrationStatus.CONFIRMED
         existing.confirmed_at = now
         event.confirmed_count += 1
-        if event.confirmed_count >= event.capacity:
+        if not unlimited and event.confirmed_count >= event.capacity:
             event.status = EventStatus.FULL
         db.flush()
         return "confirmed"

@@ -27,6 +27,9 @@ class Organizer(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     reviewed_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     suspended_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: last contact id this organizer gave for prize payouts, offered back
+    #: as a one-tap default the next time they create a custom
+    payout_contact: Mapped[str | None] = mapped_column(String(128))
 
     user: Mapped["User"] = relationship(back_populates="organizer", foreign_keys=[user_id])
     events: Mapped[list["Event"]] = relationship(back_populates="organizer")
