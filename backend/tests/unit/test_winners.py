@@ -36,7 +36,7 @@ def test_join_window_stays_open_while_the_organizer_has_not_started(db):
     host = make_user(db, 702)
     org = make_organizer(db, host)
     event = make_event(db, org)
-    event.starts_at = datetime.now(UTC) - timedelta(minutes=40)
+    event.starts_at = datetime.now(UTC) - timedelta(minutes=20)
     event.status = EventStatus.STARTED
     db.flush()
     assert join_window_open(event) is True
@@ -60,8 +60,8 @@ def test_join_window_closes_at_the_backstop(db):
     host = make_user(db, 705)
     org = make_organizer(db, host)
     event = make_event(db, org)
-    hours = get_settings().auto_archive_hours
-    event.starts_at = datetime.now(UTC) - timedelta(hours=hours + 1)
+    minutes = get_settings().auto_archive_minutes
+    event.starts_at = datetime.now(UTC) - timedelta(minutes=minutes + 5)
     event.status = EventStatus.STARTED
     db.flush()
     assert is_archived(event) is True

@@ -371,27 +371,158 @@ async def _remind_organizer_before_start(bot, db, event: Event) -> None:
         log.exception("organizer_pre_start_reminder_failed", event_id=str(event.id))
 
 
+def _minutes_before(event: Event, job: ScheduledJob | None = None) -> int:
+    """The lead this reminder was scheduled for.
+
+    Taken from the job ("rem60") rather than the clock: the dispatcher ticks
+    once a minute, so measuring would announce "59 minutes" for the one-hour
+    reminder every single time.
+    """
+    offset = str((job.payload or {}).get("offset") or "") if job else ""
+    if offset.startswith("rem") and offset[3:].isdigit():
+        return int(offset[3:])
+    seconds = (event.starts_at - datetime.now(UTC)).total_seconds()
+    return max(0, int(round(seconds / 60)))
+
+
+def _lead_label(minutes: int) -> str:
+    if minutes >= 60:
+        hours = minutes // 60
+        rest = minutes % 60
+        return f"{hours} ساعت و {rest} دقیقه" if rest else f"{hours} ساعت"
+    return f"{max(1, minutes)} دقیقه"
+
+
+def _reminder_for_registered(event: Event, minutes: int) -> str:
+    return (
+        f"\U0001F514 <b>یادآوری کاستوم جایزه\u200cدار</b>\n"
+        f"«{html.escape(event.title)}» تا {_lead_label(minutes)} دیگر شروع می\u200cشود.\n\n"
+        "شما ثبت\u200cنام کرده\u200cاید. فقط تا لحظه ارسال در کانال\u200cهای اجباری بمانید "
+        "تا ROOM ID و PASS برایتان بیاید."
+    )
+
+
+def _reminder_for_everyone(event: Event, minutes: int) -> str:
+    from app.services.event_display import event_prize_text
+    from app.core.time import format_local
+
+    return (
+        f"\U0001F525 <b>کاستوم جایزه\u200cدار تا {_lead_label(minutes)} دیگر</b>\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        f"\U0001F48E <b>جایزه</b>\n{html.escape(event_prize_text(event))}\n"
+        f"\U0001F550 {format_local(event.starts_at, event.timezone)}\n\n"
+        "دکمه زیر را بزنید، کانال\u200cهای جوین اجباری را عضو شوید و «عضو شدم» را بزنید "
+        "تا سر ساعت ROOM ID و PASS برایتان بیاید."
+    )
+
+
 async def _send_reminders(bot, db, job: ScheduledJob) -> None:
+    from app.services.reports import is_archived
+
     event = db.get(Event, job.entity_id)
     if not event:
         return
     if event.status in {EventStatus.CANCELLED, EventStatus.REJECTED, EventStatus.FINISHED}:
         return
+    if is_archived(event):
+        return
     await _remind_organizer_before_start(bot, db, event)
-    regs = db.scalars(select(Registration).where(Registration.event_id == event.id, Registration.status == "confirmed")).all()
-    text = (
-        f"🔔 یادآوری: کاستوم «{html.escape(event.title)}» به‌زودی شروع می‌شود.\n"
-        "اگر کانال‌های جوین اجباری را عضو شده باشید، سر ساعت ROOM ID و PASS برایتان می‌آید."
-    )
+
+    minutes = _minutes_before(event, job)
+    registered_text = _reminder_for_registered(event, minutes)
+    regs = db.scalars(
+        select(Registration).where(
+            Registration.event_id == event.id, Registration.status == "confirmed"
+        )
+    ).all()
+    already: set = set()
     for reg in regs:
+        already.add(reg.user_id)
         user = db.get(User, reg.user_id)
         if not user or user.is_bot_blocked:
             continue
         try:
-            await bot.send_message(user.telegram_id, text)
+            await bot.send_message(user.telegram_id, registered_text)
         except Exception:
             continue
-        await asyncio.sleep(0.04)
+        await asyncio.sleep(1 / max(get_outbound_rate(), 1))
+
+    # everyone else who uses the bot: this is the only way most players hear
+    # about a custom before it starts
+    await _broadcast_event_reminder(bot, db, event, job, minutes, already)
+
+
+async def _broadcast_event_reminder(
+    bot, db, event: Event, job: ScheduledJob, minutes: int, already: set
+) -> None:
+    from redis import Redis
+    from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+
+    from app.bot.keyboards.common import event_list_kb
+    from app.core.config import get_settings
+    from app.core.enums import EventStatus as _EventStatus
+    from app.core.enums import EventVisibility, UserStatus
+
+    settings = get_settings()
+    if not settings.event_reminder_broadcast:
+        return
+    if event.visibility != EventVisibility.PUBLIC or not event.deep_link_active:
+        return
+    if event.status not in {_EventStatus.PUBLISHED, _EventStatus.FULL}:
+        return
+
+    offset = str((job.payload or {}).get("offset") or job.idempotency_key)
+    redis = Redis.from_url(settings.redis_url)
+    lock_key = f"lock:event_reminder:{event.id}:{offset}"
+    try:
+        if not redis.set(lock_key, WORKER_ID, nx=True, ex=6 * 3600):
+            log.info("event_reminder_already_broadcast", event_id=str(event.id), offset=offset)
+            return
+    except Exception:  # noqa: BLE001 - a broadcast is better than a silent skip
+        log.exception("event_reminder_lock_failed", event_id=str(event.id))
+
+    text = _reminder_for_everyone(event, minutes)
+    markup = event_list_kb([(event.public_token, "ورود به این کاستوم")], mode="digest")
+    users = db.scalars(
+        select(User).where(
+            User.deleted_at.is_(None),
+            User.is_bot_blocked.is_(False),
+            User.notification_enabled.is_(True),
+            User.status == UserStatus.ACTIVE,
+        )
+    ).all()
+    sent = failed = skipped = 0
+    for user in users:
+        if not user.telegram_id or user.id in already:
+            skipped += 1
+            continue
+        try:
+            await bot.send_message(user.telegram_id, text, reply_markup=markup)
+            sent += 1
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(exc.retry_after + 0.5)
+            try:
+                await bot.send_message(user.telegram_id, text, reply_markup=markup)
+                sent += 1
+            except Exception:  # noqa: BLE001
+                failed += 1
+        except TelegramForbiddenError:
+            user.is_bot_blocked = True
+            skipped += 1
+        except Exception:  # noqa: BLE001
+            failed += 1
+        await asyncio.sleep(1 / max(get_outbound_rate(), 1))
+        if (sent + failed + skipped) % 50 == 0:
+            db.commit()
+    log.info(
+        "event_reminder_broadcast",
+        event_id=str(event.id),
+        offset=offset,
+        minutes=minutes,
+        sent=sent,
+        failed=failed,
+        skipped=skipped,
+    )
 
 
 async def _prompt_organizer_for_creds(bot, db, event: Event) -> None:

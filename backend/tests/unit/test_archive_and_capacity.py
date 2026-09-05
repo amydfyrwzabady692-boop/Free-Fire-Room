@@ -85,8 +85,8 @@ async def test_a_real_capacity_still_fills(async_db):
 
 
 async def test_start_button_is_what_moves_a_custom_to_the_past(async_db):
-    org, event = await _seed(async_db, minutes_ago=90)
-    # 90 minutes past its start time and still open, because nobody closed it
+    org, event = await _seed(async_db, minutes_ago=20)
+    # 20 minutes past its start time and still open, because nobody closed it
     assert is_archived(event) is False
     assert join_window_open(event) is True
     assert credentials_window_open(event) is True
@@ -122,7 +122,7 @@ def test_list_label_shows_running_not_past_until_archived(db):
     host = make_user(db, 8002)
     org = make_organizer(db, host)
     event = make_event(db, org, capacity=0, prize_summary="۱۰۰ الماس")
-    event.starts_at = datetime.now(UTC) - timedelta(minutes=30)
+    event.starts_at = datetime.now(UTC) - timedelta(minutes=10)
     db.flush()
     assert "در حال برگزاری" in format_event_list_label(event)
 
@@ -135,6 +135,69 @@ def test_list_label_falls_back_to_past_at_the_backstop(db):
     host = make_user(db, 8003)
     org = make_organizer(db, host)
     event = make_event(db, org, capacity=0, prize_summary="۱۰۰ الماس")
-    event.starts_at = datetime.now(UTC) - timedelta(hours=get_settings().auto_archive_hours + 1)
+    event.starts_at = datetime.now(UTC) - timedelta(minutes=get_settings().auto_archive_minutes + 5)
     db.flush()
     assert format_event_list_label(event).startswith("گذشته")
+
+
+async def _with_creds(async_db, event):
+    from app.core.security import encrypt_secret
+    from app.models.event import RoomCredential
+
+    async_db.add(
+        RoomCredential(
+            event_id=event.id,
+            room_id_encrypted=encrypt_secret("12345678"),
+            room_password_encrypted=encrypt_secret("pass"),
+        )
+    )
+    await async_db.flush()
+
+
+async def test_a_newcomer_gets_the_room_right_up_to_the_start_button(async_db, monkeypatch):
+    """The whole point: joining late is not a reason to miss the room.
+
+    Someone who hears about the custom only after a friend forwarded them the
+    ROOM ID must still get their own copy from the bot, on the spot.
+    """
+    from app.services.credentials import queue_late_credentials
+
+    queued: list[str] = []
+    from app.workers import enqueue
+
+    monkeypatch.setattr(enqueue, "spawn", lambda task, *a: queued.append(a[0]))
+
+    org, event = await _seed(async_db, minutes_ago=25)
+    await _with_creds(async_db, event)
+
+    # 25 minutes past the start, still open: the room goes out
+    assert await queue_late_credentials(async_db, event) is True
+    assert queued == [str(event.id)]
+
+    # the organizer taps "custom started" - and it stops, immediately
+    queued.clear()
+    await mark_event_started(async_db, event, org.user_id)
+    assert await queue_late_credentials(async_db, event) is False
+    assert queued == []
+
+
+async def test_nothing_is_queued_before_the_organizer_gives_the_room(async_db, monkeypatch):
+    from app.services.credentials import queue_late_credentials
+
+    queued: list[str] = []
+    from app.workers import enqueue
+
+    monkeypatch.setattr(enqueue, "spawn", lambda task, *a: queued.append(a[0]))
+
+    _, event = await _seed(async_db)
+    assert await queue_late_credentials(async_db, event) is False
+    assert queued == []
+
+
+async def test_the_backstop_closes_the_room_too(async_db, monkeypatch):
+    from app.services.credentials import queue_late_credentials
+
+    monkeypatch.setattr("app.workers.enqueue.spawn", lambda task, *a: None)
+    _, event = await _seed(async_db, minutes_ago=get_settings().auto_archive_minutes + 5)
+    await _with_creds(async_db, event)
+    assert await queue_late_credentials(async_db, event) is False

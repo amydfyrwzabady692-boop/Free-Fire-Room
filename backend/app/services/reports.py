@@ -56,7 +56,7 @@ def format_person(user: User | None) -> str:
 
 def auto_archive_deadline(event: Event) -> datetime:
     """When the bot gives up waiting for the organizer to tap "custom started"."""
-    return event.starts_at + timedelta(hours=get_settings().auto_archive_hours)
+    return event.starts_at + timedelta(minutes=get_settings().auto_archive_minutes)
 
 
 def is_archived(event: Event, now: datetime | None = None) -> bool:

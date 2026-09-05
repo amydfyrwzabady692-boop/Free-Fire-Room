@@ -107,7 +107,7 @@ class FakeState:
         self.data = {}
 
 
-async def _seed(async_db, *, social=False, minutes_ago=30, with_creds=True):
+async def _seed(async_db, *, social=False, minutes_ago=10, with_creds=True):
     from app.core.security import generate_unguessable_token
     from app.models.event import Event
 
@@ -391,3 +391,48 @@ async def test_claim_notification_offers_the_players_dm(async_db):
     assert str(player.telegram_id) in caption
     urls = [b.url for row in markup.inline_keyboard for b in row if b.url]
     assert "https://t.me/lucky" in urls
+
+
+@pytest.mark.asyncio
+async def test_approving_a_follow_screenshot_sends_the_room_straight_away(async_db, monkeypatch):
+    """Approval is the moment they qualify, so the room must go out then.
+
+    Waiting for the periodic sweep would leave a player who did everything
+    right staring at nothing while the match starts.
+    """
+    org, event, host, player = await _seed(async_db, social=True)
+    proof = SocialProof(
+        event_id=event.id, user_id=player.id, file_id="shot", status=SocialProofStatus.PENDING
+    )
+    async_db.add(proof)
+    await async_db.commit()
+
+    queued: list[str] = []
+    from app.workers import enqueue
+
+    monkeypatch.setattr(enqueue, "spawn", lambda task, *a: queued.append(a[0]))
+
+    rec = Recorder()
+    await org_panel.org_social_ok(FakeCb(f"socok:{proof.id}", rec), async_db, host)
+
+    assert queued == [str(event.id)], "the credentials send was never queued"
+
+
+@pytest.mark.asyncio
+async def test_no_send_is_queued_when_the_custom_is_already_closed(async_db, monkeypatch):
+    org, event, host, player = await _seed(async_db, social=True)
+    event.archived_at = datetime.now(UTC)
+    proof = SocialProof(
+        event_id=event.id, user_id=player.id, file_id="shot", status=SocialProofStatus.PENDING
+    )
+    async_db.add(proof)
+    await async_db.commit()
+
+    queued: list[str] = []
+    from app.workers import enqueue
+
+    monkeypatch.setattr(enqueue, "spawn", lambda task, *a: queued.append(a[0]))
+
+    rec = Recorder()
+    await org_panel.org_social_ok(FakeCb(f"socok:{proof.id}", rec), async_db, host)
+    assert queued == []

@@ -100,7 +100,7 @@ async def create_event(db: AsyncSession, organizer: Organizer, data: dict, actor
         custom_credentials_message=data.get("custom_credentials_message"),
         reveal_button_enabled=bool(data.get("reveal_button_enabled", True)),
         personalize_delivery=bool(data.get("personalize_delivery", True)),
-        reminder_offsets_minutes=data.get("reminder_offsets_minutes") or [60, 15, 5],
+        reminder_offsets_minutes=data.get("reminder_offsets_minutes") or [60, 10],
         prize_summary=data.get("prize_summary"),
         payout_contact=(data.get("payout_contact") or None),
         social_url=(data.get("social_url") or None),
@@ -354,7 +354,7 @@ async def waiting_live_credential_event(db: AsyncSession, user_id) -> Event | No
                 ),
                 Event.archived_at.is_(None),
                 Event.starts_at <= now + timedelta(minutes=20),
-                Event.starts_at >= now - timedelta(hours=get_settings().auto_archive_hours),
+                Event.starts_at >= now - timedelta(minutes=get_settings().auto_archive_minutes),
             )
             .order_by(Event.starts_at.asc())
         )
@@ -395,7 +395,7 @@ async def copy_event(db: AsyncSession, event: Event, organizer: Organizer, actor
         "channel_id": event.channel_id,
         "required_channel_ids": [rc.channel_id for rc in event.required_channels],
         "prizes": [{"place": p.place, "title": p.title, "description": p.description} for p in event.prizes],
-        "reminder_offsets_minutes": event.reminder_offsets_minutes or [60, 15, 5],
+        "reminder_offsets_minutes": event.reminder_offsets_minutes or [60, 10],
     }
     copy = await create_event(db, organizer, data, actor_id)
     copy.status = EventStatus.DRAFT

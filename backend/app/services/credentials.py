@@ -175,3 +175,33 @@ async def deliver_one(bot: Bot, db: Session, event: Event, user: User, creds: Ro
     except Exception as exc:  # noqa: BLE001
         _upsert_delivery(db, user=user, event=event, job=job, idem=idem, status=DeliveryStatus.FAILED, error=str(exc))
         return "failed"
+
+
+async def queue_late_credentials(db, event) -> bool:
+    """Send ROOM ID / PASS to whoever just became eligible.
+
+    The scheduled sweep is only a safety net. This is the real path for a
+    player who completes the conditions after the first send - by joining the
+    channels, or by having their follow screenshot approved - and it is why
+    "everyone who qualifies before the organizer taps start gets the room"
+    holds without keeping a job hot for the whole window.
+
+    Returns True when a send was queued.
+    """
+    from sqlalchemy import select as _select
+
+    from app.models.event import RoomCredential as _RoomCredential
+    from app.services.reports import creds_were_provided, join_window_open
+
+    if not join_window_open(event):
+        return False
+    creds = await db.scalar(_select(_RoomCredential).where(_RoomCredential.event_id == event.id))
+    if not creds_were_provided(creds):
+        return False
+    # the worker opens its own session, so the registration has to be visible
+    await db.commit()
+    from app.workers.enqueue import spawn
+    from app.workers.tasks import send_event_credentials
+
+    spawn(send_event_credentials, str(event.id))
+    return True

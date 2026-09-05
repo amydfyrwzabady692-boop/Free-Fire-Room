@@ -19,7 +19,7 @@ DEFAULTS: dict[str, Any] = {
     "maintenance_mode": False,
     "default_timezone": "Asia/Tehran",
     "support_contact": "@support",
-    "reminder_offsets_minutes": [60, 15, 5],
+    "reminder_offsets_minutes": [60, 10],
     "feature_flags": {
         "waitlist": True,
         "reveal_button": True,

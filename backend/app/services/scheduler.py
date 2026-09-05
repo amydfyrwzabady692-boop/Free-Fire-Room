@@ -18,13 +18,13 @@ def _key(job_type: str, event_id: UUID, extra: str = "") -> str:
 
 
 async def schedule_event_jobs(db: AsyncSession, event: Event) -> None:
-    offsets = event.reminder_offsets_minutes or [60, 15, 5]
+    offsets = event.reminder_offsets_minutes or [60, 10]
     jobs = [
         (JobType.SEND_CREDENTIALS, event.credentials_send_at, "creds"),
         (JobType.EVENT_START, event.starts_at, "start"),
         (
             JobType.EVENT_FINISH,
-            event.starts_at + timedelta(hours=get_settings().auto_archive_hours),
+            event.starts_at + timedelta(minutes=get_settings().auto_archive_minutes),
             "finish",
         ),
         (JobType.PURGE_CREDENTIALS, event.starts_at + timedelta(days=7), "purge"),
@@ -89,7 +89,7 @@ def cancel_event_jobs_sync(db: Session, event_id: UUID) -> int:
 
 
 def schedule_event_jobs_sync(db: Session, event: Event) -> None:
-    offsets = event.reminder_offsets_minutes or [60, 15, 5]
+    offsets = event.reminder_offsets_minutes or [60, 10]
     jobs = [
         (JobType.SEND_CREDENTIALS, event.credentials_send_at, "creds"),
         (JobType.EVENT_START, event.starts_at, "start"),

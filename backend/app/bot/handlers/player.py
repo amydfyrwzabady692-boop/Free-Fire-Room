@@ -49,7 +49,7 @@ from app.core.rate_limit import hit_rate_limit
 from app.core.time import format_local
 from app.locales import fa as T
 from app.locales.labels import event_status_fa, reg_status_fa
-from app.models.event import Event, RoomCredential
+from app.models.event import Event
 from app.models.organizer import Organizer
 from app.services.funnel import record_view
 from app.services.trust import format_trust_line, is_risky
@@ -67,7 +67,6 @@ from app.services.referrals import apply_start_referral, get_or_create_link
 from app.services.registration import register_user
 from app.services.reports import (
     create_player_report,
-    creds_were_provided,
     event_missed_credentials,
     format_cheater_alert_for_organizer,
     format_person,
@@ -78,6 +77,7 @@ from app.services.reports import (
     notify_active_admins,
     notify_telegram_user,
 )
+from app.services.credentials import queue_late_credentials
 from app.services.requirements import evaluate_requirements
 from app.services.social import format_social_step, social_required, submit_proof
 from app.services.reviews import (
@@ -216,12 +216,12 @@ async def _list_events(db: AsyncSession, *, mode: str = "upcoming") -> list[Even
 
     A custom leaves the upcoming list when the organizer taps "custom started",
     not when the clock passes its start time - so a custom that is running late
-    is still joinable. ``auto_archive_hours`` is only the backstop for an
+    is still joinable. ``auto_archive_minutes`` is only the backstop for an
     organizer who never taps it.
     """
     now = datetime.now(UTC)
     hours = get_settings().past_events_hours
-    cutoff = now - timedelta(hours=get_settings().auto_archive_hours)
+    cutoff = now - timedelta(minutes=get_settings().auto_archive_minutes)
     live = [EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED]
     listed = live + [EventStatus.FINISHED]
     stmt = (
@@ -239,7 +239,7 @@ async def _list_events(db: AsyncSession, *, mode: str = "upcoming") -> list[Even
         stmt = stmt.where(
             Event.status.in_(listed),
             ~open_now,
-            Event.starts_at >= now - timedelta(hours=hours + get_settings().auto_archive_hours),
+            Event.starts_at >= now - timedelta(hours=hours + 1),
         ).order_by(func.coalesce(Event.archived_at, Event.starts_at).desc())
     elif mode == "today":
         from app.core.time import local_day_bounds
@@ -273,7 +273,7 @@ async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> st
     extra = (
         "🆔 برگزارکننده ROOM ID و PASS را داخل ربات می‌فرستد و سر ساعت برای واجدین شرایط می‌رود.\n"
         "تا وقتی برگزارکننده «کاستوم شروع شد» را نزده، ثبت‌نام باز است؛ "
-        "هر وقت شرایط را کامل کنید مشخصات برایتان می‌آید."
+        "هر وقت شرایط را کامل کنید — حتی بعد از ساعت شروع — مشخصات برایتان می‌آید."
     )
     if missed:
         extra = (
@@ -293,7 +293,7 @@ async def _event_card(db: AsyncSession, e: Event, *, missed: bool = False) -> st
     elif e.starts_at <= now:
         extra = (
             "🕐 ساعت کاستوم رسیده ولی هنوز بسته نشده. "
-            "اگر همین حالا شرایط را کامل کنید، مشخصات برایتان می‌آید."
+            "اگر همین حالا شرایط را کامل کنید، مشخصات بلافاصله برایتان می‌آید."
         )
     org_line = format_rating_line(await review_summary_for_organizer(db, e.organizer_id), prefix="سابقه برگزارکننده")
     ev_line = format_rating_line(await review_summary_for_event(db, e.id), prefix="امتیاز این کاستوم")
@@ -500,16 +500,7 @@ async def _show_event(
 
 
 async def _queue_late_credentials(db: AsyncSession, event: Event) -> None:
-    if not join_window_open(event):
-        return
-    creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == event.id))
-    if not creds_were_provided(creds):
-        return
-    await db.commit()
-    from app.workers.enqueue import spawn
-    from app.workers.tasks import send_event_credentials
-
-    spawn(send_event_credentials, str(event.id))
+    await queue_late_credentials(db, event)
 
 
 def _social_item(checklist) -> object | None:

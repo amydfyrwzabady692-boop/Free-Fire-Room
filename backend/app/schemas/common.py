@@ -72,7 +72,8 @@ class EventCreateIn(BaseModel):
     custom_credentials_message: str | None = None
     reveal_button_enabled: bool = True
     personalize_delivery: bool = True
-    reminder_offsets_minutes: list[int] = Field(default_factory=lambda: [60, 15])
+    #: notify everyone 1 hour and 10 minutes before a custom starts
+    reminder_offsets_minutes: list[int] = Field(default_factory=lambda: [60, 10])
     prize_summary: str | None = None
     payout_contact: str | None = Field(default=None, max_length=128)
     social_url: str | None = Field(default=None, max_length=300)

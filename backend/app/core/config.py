@@ -79,11 +79,15 @@ class Settings(BaseSettings):
     custom_fill_minutes: int = 20
     #: A custom stays open until the organizer taps "custom started". This is
     #: only the backstop for an organizer who never taps it, so nothing sits
-    #: in the upcoming list forever.
-    auto_archive_hours: int = 12
+    #: in the upcoming list forever. Measured from the start time.
+    auto_archive_minutes: int = 30
     #: how long after the first send the worker keeps sweeping for late
     #: joiners. Someone who joins later still triggers a send on the spot.
     late_delivery_sweep_minutes: int = 45
+    #: tell every bot user about a prize custom this many minutes before it
+    #: starts. Set EVENT_REMINDER_BROADCAST=false to keep reminders to the
+    #: players who already registered.
+    event_reminder_broadcast: bool = True
     event_retention_hours: int = 24
     past_events_hours: int = 24
     maintenance_mode: bool = False

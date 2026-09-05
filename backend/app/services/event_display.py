@@ -154,7 +154,7 @@ def format_event_list_label(event: Event) -> str:
 
     prize_text = event_prize_text(event)
     now = datetime.now(UTC)
-    backstop = event.starts_at + timedelta(hours=get_settings().auto_archive_hours)
+    backstop = event.starts_at + timedelta(minutes=get_settings().auto_archive_minutes)
     if getattr(event, "archived_at", None) is not None or now > backstop:
         head = "گذشته"
     elif event.starts_at < now:

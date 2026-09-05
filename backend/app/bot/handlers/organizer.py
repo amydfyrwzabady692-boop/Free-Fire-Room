@@ -61,6 +61,7 @@ from app.models.registration import Registration
 from app.models.user import User
 from app.services.bans import is_banned
 from app.services.channels import connect_organizer_channel, list_owned_channels
+from app.services.credentials import queue_late_credentials
 from app.services.event_display import (
     default_custom_description,
     event_public_load_options,
@@ -798,7 +799,7 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
     org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
     title = (data.get("title") or "").strip() or "کاستوم جایزه‌دار"
     starts_at = dt.fromisoformat(data["starts_at"])
-    fill_end = starts_at + timedelta(hours=get_settings().auto_archive_hours)
+    fill_end = starts_at + timedelta(minutes=get_settings().auto_archive_minutes)
     payload = {
         "title": title[:160],
         "starts_at": starts_at,
@@ -850,8 +851,11 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
             "🆔 <b>قدم بعدی:</b> از «ارسال ROOM ID / PASS» می‌توانید <b>همین حالا</b> مشخصات اتاق را ثبت کنید؛ "
             "ربات سر ساعت خودکار برای واجدین شرایط می‌فرستد و نتیجه را به شما خبر می‌دهد.\n\n"
             "⏹ <b>مهم:</b> این کاستوم تا وقتی خودتان دکمهٔ «کاستوم شروع شد» را نزنید "
-            "در فهرست «کاستوم‌های پیش‌رو» می‌ماند و ثبت‌نام باز است. "
-            "هر وقت بازی را شروع کردید، از «کاستوم‌ها و آمار من» آن دکمه را بزنید تا به «گذشته» برود."
+            "در فهرست «کاستوم‌های پیش‌رو» می‌ماند و ثبت‌نام باز است — هر کس در این مدت "
+            "شرایط را کامل کند، ROOM ID و PASS خودکار برایش می‌رود.\n"
+            "هر وقت بازی را شروع کردید، از «کاستوم‌ها و آمار من» آن دکمه را بزنید تا به «گذشته» برود.\n"
+            f"اگر یادتان رفت، {get_settings().auto_archive_minutes} دقیقه بعد از ساعت شروع خودکار بسته می‌شود.\n\n"
+            "🔔 ربات یک ساعت قبل و ده دقیقه قبل از شروع، این کاستوم را به کاربران خبر می‌دهد."
         )
         banner = data.get("banner_file_id")
         if banner:
@@ -1259,8 +1263,9 @@ async def ask_live_creds(cb: CallbackQuery, db: AsyncSession, db_user: User, sta
         "بعد ربات <b>PASS</b> را جدا می‌پرسد.\n"
         "در پایان پیش‌نمایش می‌بینید و تا تأیید نکنید چیزی ارسال نمی‌شود.\n\n"
         f"{timing}\n"
-        "⏳ عجله‌ای نیست: تا وقتی دکمهٔ «کاستوم شروع شد» را نزده‌اید، هم می‌توانید مشخصات را ثبت کنید "
-        "و هم بازیکن‌های تازه ثبت‌نام می‌شوند.",
+        "⏳ تا وقتی دکمهٔ «کاستوم شروع شد» را نزده‌اید، هم می‌توانید مشخصات را ثبت کنید "
+        "و هم هر بازیکن تازه‌ای که شرایط را کامل کند خودکار مشخصات می‌گیرد.\n"
+        f"اگر آن دکمه را نزنید، {get_settings().auto_archive_minutes} دقیقه بعد از ساعت شروع خودکار بسته می‌شود.",
         reply_markup=wizard_nav(),
     )
     await cb.answer()
@@ -1417,7 +1422,8 @@ async def _commit_creds_send(
     spawn(send_event_credentials, str(event.id))
     await message.answer(
         "✅ تأیید شد. در حال ارسال برای کسانی که شرایط را کامل کرده‌اند.\n"
-        "تا وقتی «کاستوم شروع شد» را نزده‌اید، هر کس شرایط را کامل کند مشخصات برایش می‌آید.\n\n"
+        "تا وقتی «کاستوم شروع شد» را نزده‌اید، هر بازیکن تازه‌ای هم که شرایط را کامل کند "
+        "بلافاصله مشخصات برایش می‌رود.\n\n"
         f"{room_pair(esc(room_id), esc(password))}",
         reply_markup=await menu_for(db, db_user),
     )
@@ -1631,7 +1637,7 @@ async def org_mark_started(cb: CallbackQuery, db: AsyncSession, db_user: User):
     await db.commit()
     await cb.message.answer(
         f"⏹ کاستوم «{esc(_short_label(e))}» شروع‌شده ثبت شد.\n"
-        "از «کاستوم‌های پیش‌رو» برداشته شد و حالا در «کاستوم‌های ۲۴ ساعت گذشته» دیده می‌شود.\n"
+        "از «کاستوم‌های پیش‌رو» برداشته شد و حالا در «کاستوم‌های گذشته» دیده می‌شود.\n"
         "ثبت‌نام جدید و ارسال ROOM ID / PASS برای این کاستوم بسته شد.",
         reply_markup=organizer_home_kb(),
     )
@@ -1724,7 +1730,12 @@ async def _resolve_social(cb: CallbackQuery, db: AsyncSession, db_user: User, *,
             confirmed = True  # already registered
         except Exception:  # noqa: BLE001
             confirmed = False
-    await db.commit()
+    # approving is the moment this player becomes eligible, so the room has
+    # to go out now - the sweep alone would leave them waiting
+    if confirmed and not await queue_late_credentials(db, event):
+        await db.commit()
+    elif not confirmed:
+        await db.commit()
     if player and not player.is_bot_blocked:
         if approved:
             note = (

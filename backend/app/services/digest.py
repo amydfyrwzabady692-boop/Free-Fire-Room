@@ -34,7 +34,7 @@ def upcoming_prize_customs_sync(db: Session, *, limit: int = DIGEST_LIMIT) -> li
                 Event.status.in_([EventStatus.PUBLISHED, EventStatus.FULL]),
                 # still open: the organizer has not tapped "custom started"
                 Event.archived_at.is_(None),
-                Event.starts_at >= now - timedelta(hours=get_settings().auto_archive_hours),
+                Event.starts_at >= now - timedelta(minutes=get_settings().auto_archive_minutes),
                 Event.deep_link_active.is_(True),
             )
             .options(*event_public_load_options())
