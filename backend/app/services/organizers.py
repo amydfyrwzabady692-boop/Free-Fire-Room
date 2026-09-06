@@ -87,3 +87,143 @@ def explain_trust(org: Organizer, events: list[OrganizerTrustEvent]) -> dict:
             for e in events
         ],
     }
+
+
+# ------------------------------------------------------------------ public profile
+
+
+async def organizer_stats(db: AsyncSession, organizer_id) -> dict:
+    """The numbers a player would want before trusting a stranger's custom.
+
+    "Delivered" counts customs whose ROOM ID / PASS actually went out, not ones
+    that merely finished - that is the promise an organizer is judged on.
+    """
+    from sqlalchemy import func
+
+    from app.core.enums import EventStatus
+    from app.models.event import Event, RoomCredential
+
+    live_statuses = [
+        EventStatus.PUBLISHED,
+        EventStatus.FULL,
+        EventStatus.STARTED,
+        EventStatus.FINISHED,
+    ]
+    held = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(Event)
+            .where(
+                Event.organizer_id == organizer_id,
+                Event.deleted_at.is_(None),
+                Event.status.in_(live_statuses),
+            )
+        )
+        or 0
+    )
+    delivered = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(Event)
+            .join(RoomCredential, RoomCredential.event_id == Event.id)
+            .where(
+                Event.organizer_id == organizer_id,
+                Event.deleted_at.is_(None),
+                RoomCredential.sent_at.is_not(None),
+            )
+        )
+        or 0
+    )
+    cancelled = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(Event)
+            .where(
+                Event.organizer_id == organizer_id,
+                Event.deleted_at.is_(None),
+                Event.status == EventStatus.CANCELLED,
+            )
+        )
+        or 0
+    )
+    players = int(
+        await db.scalar(
+            select(func.coalesce(func.sum(Event.confirmed_count), 0)).where(
+                Event.organizer_id == organizer_id,
+                Event.deleted_at.is_(None),
+                Event.status.in_(live_statuses),
+            )
+        )
+        or 0
+    )
+    return {
+        "held": held,
+        "delivered": delivered,
+        "cancelled": cancelled,
+        "players": players,
+    }
+
+
+async def upcoming_events_for(db: AsyncSession, organizer_id, *, limit: int = 5):
+    """Their open customs, for the buttons under the profile."""
+    from app.core.enums import EventStatus, EventVisibility
+    from app.models.event import Event
+    from app.services.event_display import event_public_load_options
+
+    rows = (
+        await db.scalars(
+            select(Event)
+            .where(
+                Event.organizer_id == organizer_id,
+                Event.deleted_at.is_(None),
+                Event.archived_at.is_(None),
+                Event.visibility == EventVisibility.PUBLIC,
+                Event.deep_link_active.is_(True),
+                Event.status.in_([EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED]),
+            )
+            .options(*event_public_load_options())
+            .order_by(Event.starts_at.asc())
+            .limit(limit)
+        )
+    ).all()
+    return list(rows)
+
+
+def organizer_deep_link(organizer_id) -> str:
+    from app.core.config import get_settings
+
+    return f"https://t.me/{get_settings().bot_username}?start=org_{organizer_id}"
+
+
+async def format_organizer_profile(db: AsyncSession, org: Organizer) -> str:
+    """One card a stranger can read before deciding to trust this organizer."""
+    from app.bot.helpers import esc
+    from app.services.event_display import organizer_public_name
+    from app.services.reviews import format_rating_line, review_summary_for_organizer
+    from app.services.trust import badge, is_risky
+
+    user = await db.get(User, org.user_id)
+    stats = await organizer_stats(db, org.id)
+    rating = format_rating_line(
+        await review_summary_for_organizer(db, org.id), prefix="امتیاز از بازیکن‌ها"
+    )
+    verified = " ✅" if org.verified_badge else ""
+    lines = [
+        f"👑 <b>{esc(organizer_public_name(org, user))}</b>{verified}",
+        "━━━━━━━━━━━━━━",
+        f"🛡 اعتبار: {badge(org.trust_score)} ({int(org.trust_score or 0)}/100)",
+        rating,
+        "",
+        f"🎮 کاستوم برگزار کرده: <b>{stats['held']}</b>",
+        f"🆔 ROOM ID / PASS فرستاده: <b>{stats['delivered']}</b>",
+        f"👥 مجموع شرکت‌کننده: <b>{stats['players']}</b>",
+    ]
+    if stats["cancelled"]:
+        lines.append(f"❌ لغو کرده: {stats['cancelled']}")
+    if (org.bio or "").strip():
+        lines.append("")
+        lines.append(f"📝 {esc(org.bio.strip())}")
+    if is_risky(org):
+        lines.append("")
+        lines.append("⚠️ <b>اعتبار این برگزارکننده پایین است. با احتیاط شرکت کنید.</b>")
+    return "\n".join(line for line in lines if line is not None)

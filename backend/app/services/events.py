@@ -440,3 +440,84 @@ def public_event_dict(event: Event, include_secrets: bool = False) -> dict:
         if get_settings().bot_username
         else None,
     }
+
+
+async def repeat_event(
+    db: AsyncSession, source: Event, organizer: Organizer, actor_id, starts_at
+) -> Event:
+    """A fresh custom with everything the last one had, at a new time.
+
+    Everything except the room itself: ROOM ID / PASS is deliberately not
+    copied, because reusing a room the previous players already have would hand
+    them the new one for free.
+    """
+    from app.models.event import EventPrize as _EventPrize
+    from app.models.event import EventRequiredChannel as _EventRequiredChannel
+    from app.services.social import list_tasks
+
+    pages = await list_tasks(db, source.id)
+    # read the children with their own queries: the caller may hand us an
+    # Event whose relationships were never eager-loaded, and touching one
+    # under an AsyncSession raises MissingGreenlet
+    channel_rows = (
+        await db.scalars(
+            select(_EventRequiredChannel).where(
+                _EventRequiredChannel.event_id == source.id,
+                _EventRequiredChannel.is_active.is_(True),
+            )
+        )
+    ).all()
+    prize_rows = (
+        await db.scalars(
+            select(_EventPrize)
+            .where(_EventPrize.event_id == source.id)
+            .order_by(_EventPrize.sort_order.asc())
+        )
+    ).all()
+    starts_at = as_utc(starts_at)
+    fill_end = starts_at + timedelta(minutes=get_settings().auto_archive_minutes)
+    data = {
+        "title": source.title,
+        "description": source.description,
+        "banner_file_id": source.banner_file_id,
+        "starts_at": starts_at,
+        "registration_ends_at": fill_end,
+        "credentials_send_at": starts_at,
+        "timezone": source.timezone,
+        "region": source.region,
+        "game_mode": source.game_mode,
+        "capacity": source.capacity,
+        "waitlist_enabled": source.waitlist_enabled,
+        "visibility": source.visibility,
+        "require_rules_accept": source.require_rules_accept,
+        "require_ff_player_id": source.require_ff_player_id,
+        "require_profile_complete": source.require_profile_complete,
+        "required_referrals": source.required_referrals,
+        "rules_text": source.rules_text,
+        "winner_method": source.winner_method,
+        "custom_credentials_message": source.custom_credentials_message,
+        "prize_summary": source.prize_summary,
+        "payout_contact": source.payout_contact,
+        "social_url": source.social_url,
+        "social_platform": source.social_platform,
+        "social_note": source.social_note,
+        "social_pages": [{"url": t.url, "platform": t.platform} for t in pages],
+        "channel_id": source.channel_id,
+        "required_channel_ids": [rc.channel_id for rc in channel_rows],
+        "prizes": [
+            {"place": p.place, "title": p.title, "description": p.description}
+            for p in prize_rows
+        ],
+        "reminder_offsets_minutes": source.reminder_offsets_minutes or [60, 10],
+    }
+    copy = await create_event(db, organizer, data, actor_id)
+    await write_audit(
+        db,
+        action="event_repeated",
+        entity_type="event",
+        entity_id=copy.id,
+        actor_id=actor_id,
+        extra={"source_event_id": str(source.id)},
+    )
+    await db.flush()
+    return copy

@@ -143,6 +143,16 @@ async def cmd_start(message: Message, command: CommandObject, db: AsyncSession, 
 
 async def _welcome_after_onboarding(message: Message, db: AsyncSession, db_user: User) -> None:
     kind, token = _parse_start(db_user.start_payload)
+    if kind == "org" and token:
+        await _send_fresh_menu(
+            message,
+            db,
+            db_user,
+            "از لینک یک برگزارکننده آمدید.\n"
+            "👑 سابقه و کاستوم‌های بازش را ببینید.",
+        )
+        await _show_organizer(message, db, token)
+        return
     if kind == "event" and token:
         await _send_fresh_menu(
             message,
@@ -486,6 +496,7 @@ async def _show_event(
         join_urls=_join_urls(channel_items),
         can_join=open_for_join and not missed,
         social_url=e.social_url if (social_item is not None and open_for_join) else None,
+        organizer_id=str(e.organizer_id) if e.organizer_id else None,
         can_review=allowed,
         show_reviews=summary["count"] > 0 or started or cancelled,
         can_claim_win=started and not cancelled,
@@ -1368,3 +1379,76 @@ async def social_screenshot(message: Message, db: AsyncSession, db_user: User, s
             "تا زمان تأیید در کانال‌های اجباری بمانید تا سر ساعت ROOM ID و PASS برایتان بیاید.",
             reply_markup=await menu_for(db, db_user),
         )
+
+
+# ---------------------------------------------------------------- organizer profile
+
+
+async def _organizer_by_token(db: AsyncSession, token: str | None):
+    """The profile link carries the organizer id, which is already unguessable."""
+    from app.models.organizer import Organizer
+
+    if not token:
+        return None
+    try:
+        organizer_id = UUID(token)
+    except ValueError:
+        return None
+    return await db.get(Organizer, organizer_id)
+
+
+async def _show_organizer(message: Message, db: AsyncSession, token: str, *, back: str = "menu:home") -> None:
+    from app.bot.keyboards.common import organizer_profile_kb
+    from app.services.event_display import format_event_list_label
+    from app.services.organizers import format_organizer_profile, upcoming_events_for
+
+    org = await _organizer_by_token(db, token)
+    if not org:
+        await message.answer("این برگزارکننده یافت نشد.", reply_markup=home_kb())
+        return
+    text = await format_organizer_profile(db, org)
+    events = await upcoming_events_for(db, org.id)
+    if not events:
+        text += "\n\nالان کاستوم بازی ندارد."
+    await message.answer(
+        text,
+        reply_markup=organizer_profile_kb(
+            str(org.id),
+            [(e.public_token, format_event_list_label(e)) for e in events],
+            back=back,
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("orgprof:"))
+async def show_organizer_cb(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    await ack_callback(cb)
+    token = cb.data.split(":", 1)[1]
+    await _show_organizer(cb.message, db, token)
+
+
+@router.callback_query(F.data.startswith("orgrev:"))
+async def show_organizer_reviews(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    """Every review this organizer has, not just the ones on one custom."""
+    from app.models.review import EventReview
+    from app.services.reviews import format_review_item
+
+    await ack_callback(cb)
+    org = await _organizer_by_token(db, cb.data.split(":", 1)[1])
+    if not org:
+        await reply_callback(cb, "این برگزارکننده یافت نشد.")
+        return
+    rows = (
+        await db.scalars(
+            select(EventReview)
+            .where(EventReview.organizer_id == org.id)
+            .options(selectinload(EventReview.reviewer))
+            .order_by(EventReview.created_at.desc())
+            .limit(10)
+        )
+    ).all()
+    if not rows:
+        await reply_callback(cb, "هنوز کسی برای این برگزارکننده نظر نگذاشته است.")
+        return
+    body = "⭐ <b>نظر بازیکن‌ها</b>\n\n" + "\n\n".join(format_review_item(r) for r in rows)
+    await cb.message.answer(body[:4000], reply_markup=home_kb())

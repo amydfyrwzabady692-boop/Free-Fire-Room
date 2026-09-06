@@ -24,6 +24,11 @@ class EventWizardSG(StatesGroup):
     preview = State()
 
 
+class RepeatSG(StatesGroup):
+    day = State()
+    time = State()
+
+
 class CredsWaitSG(StatesGroup):
     room_id = State()
     password = State()

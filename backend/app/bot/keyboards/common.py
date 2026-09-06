@@ -210,6 +210,7 @@ def event_detail_kb(
     show_reviews: bool = False,
     can_claim_win: bool = False,
     social_url: str | None = None,
+    organizer_id: str | None = None,
     back: str = "upcoming",
 ) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
@@ -227,6 +228,10 @@ def event_detail_kb(
         rows.append([ibtn("ارسال اسکرین‌شات فالو", callback_data=f"soc:{token}", style=SUCCESS)])
     if can_claim_win:
         rows.append([ibtn("برنده شدم", callback_data=f"win:{token}", style=SUCCESS)])
+    if organizer_id:
+        rows.append(
+            [ibtn("دربارهٔ برگزارکننده", callback_data=f"orgprof:{organizer_id}", style=PRIMARY)]
+        )
     if can_review:
         rows.append([ibtn("نظر و امتیاز", callback_data=f"rev:{token}", style=PRIMARY)])
     if show_reviews:
@@ -401,6 +406,7 @@ def organizer_home_kb() -> InlineKeyboardMarkup:
             [ibtn("کاستوم‌ها و آمار من", callback_data="orgp:mine", style=PRIMARY)],
             [ibtn("برنده‌ها و تحویل جایزه", callback_data="orgp:win", style=PRIMARY)],
             [ibtn("آیدی دریافت جایزه", callback_data="orgp:payout", style=PRIMARY)],
+            [ibtn("پروفایل عمومی من", callback_data="orgp:me", style=PRIMARY)],
             [ibtn("کانال‌های من", callback_data="orgp:ch", style=PRIMARY)],
             [ibtn("راهنمای برگزارکننده", callback_data="help:host", style=PRIMARY)],
             [ibtn("منوی اصلی", callback_data="menu:home", style=DANGER)],
@@ -528,3 +534,21 @@ def start_confirm_kb(token: str) -> InlineKeyboardMarkup:
             [ibtn("هنوز نه — بازگشت", callback_data="orgp:startmenu", style=PRIMARY)],
         ]
     )
+
+
+def organizer_profile_kb(
+    organizer_id: str,
+    events: list,
+    *,
+    share_link: str | None = None,
+    back: str = "menu:home",
+) -> InlineKeyboardMarkup:
+    """The profile card's buttons: their open customs first, then sharing."""
+    rows: list[list[InlineKeyboardButton]] = []
+    for token, label in events:
+        rows.append([ibtn(label, callback_data=f"ev:{token}", style=SUCCESS)])
+    rows.append([ibtn("نظرات بازیکن‌ها", callback_data=f"orgrev:{organizer_id}", style=PRIMARY)])
+    if share_link:
+        rows.append([ibtn("کپی لینک پروفایل", copy_text=share_link, style=PRIMARY)])
+    rows.append([ibtn("بازگشت", callback_data=back, style=DANGER)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

@@ -28,6 +28,7 @@ from app.bot.keyboards.common import (
     organizer_home_kb,
     payout_contact_kb,
     pick_date_kb,
+    organizer_profile_kb,
     social_bulk_kb,
     social_review_kb,
     start_confirm_kb,
@@ -41,6 +42,7 @@ from app.bot.onboarding import ensure_onboarding, target_message
 from app.bot.states.groups import (
     CredsWaitSG,
     EventWizardSG,
+    RepeatSG,
     OrganizerSettingsSG,
     WinnerChatSG,
 )
@@ -67,13 +69,16 @@ from app.services.channels import connect_organizer_channel, list_owned_channels
 from app.services.credentials import queue_late_credentials
 from app.services.event_display import (
     default_custom_description,
+    event_prize_text,
     event_public_load_options,
     format_event_identity_block,
+    format_event_list_label,
 )
 from app.services.events import (
     cancel_event,
     create_event,
     mark_event_started,
+    repeat_event,
     submit_for_publish,
     update_credentials,
     waiting_live_credential_event,
@@ -82,6 +87,7 @@ from app.services.organizers import get_or_apply
 from app.services.social import (
     MAX_SOCIAL_TASKS,
     PLATFORM_FA,
+    list_tasks as list_social_tasks,
     normalize_social_url,
     pending_proof_count,
     pending_proofs_for_event,
@@ -1005,7 +1011,12 @@ async def org_mine(cb: CallbackQuery, db: AsyncSession, db_user: User):
                 ibtn("قیف و آمار", callback_data=f"orgp:fun:{e.public_token}", style=PRIMARY),
             ]
         )
-        buttons.append([ibtn("خروجی شرکت‌کننده‌ها", callback_data=f"orgp:csv:{e.public_token}", style=PRIMARY)])
+        buttons.append(
+            [
+                ibtn("خروجی شرکت‌کننده‌ها", callback_data=f"orgp:csv:{e.public_token}", style=PRIMARY),
+                ibtn("تکرار", callback_data=f"orgp:rep:{e.public_token}", style=SUCCESS),
+            ]
+        )
         if not archived and e.status not in {EventStatus.CANCELLED, EventStatus.FINISHED}:
             buttons.append(
                 [ibtn("کاستوم شروع شد — انتقال به گذشته", callback_data=f"orgp:start:{e.public_token}", style=DANGER)]
@@ -2269,4 +2280,195 @@ async def org_start_pick(cb: CallbackQuery, db: AsyncSession, db_user: User):
         f"{warn}",
         reply_markup=start_confirm_kb(e.public_token),
     )
+    await cb.answer()
+
+
+# ---------------------------------------------------------------- repeat a custom
+
+
+REPEAT_TIME_TEXT = (
+    "🔁 <b>تکرار کاستوم</b>\n"
+    "همهٔ تنظیمات از کاستوم قبلی کپی می‌شود: کانال‌های جوین اجباری، جایزه، پیج‌های فالو، "
+    "آیدی دریافت جایزه، توضیح و بنر.\n\n"
+    "فقط ساعت را بفرستید. نمونه: <code>22:00</code> یا <code>22</code>"
+)
+
+
+async def _repeat_source(db: AsyncSession, db_user: User, token: str) -> Event | None:
+    return await db.scalar(
+        select(Event)
+        .where(Event.public_token == token, Event.deleted_at.is_(None))
+        .options(
+            *event_public_load_options(),
+            selectinload(Event.required_channels),
+            selectinload(Event.prizes),
+        )
+    )
+
+
+@router.callback_query(F.data.startswith("orgp:rep:"))
+async def org_repeat_start(cb: CallbackQuery, db: AsyncSession, db_user: User, state: FSMContext):
+    """Most organizers run the same custom every night; this is that night."""
+    if await _blocked_organize(db, db_user, cb):
+        return
+    token = cb.data.split(":", 2)[-1]
+    e = await _repeat_source(db, db_user, token)
+    if not e or not e.organizer or e.organizer.user_id != db_user.id:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(RepeatSG.day)
+    await state.update_data(source_token=token)
+    n_ch = len([c for c in (e.required_channels or []) if c.is_active])
+    pages = await list_social_tasks(db, e.id)
+    summary = (
+        f"🔁 <b>تکرار «{esc(_short_label(e, 40))}»</b>\n"
+        f"🎁 {esc(event_prize_text(e))}\n"
+        f"📢 {n_ch} کانال جوین اجباری\n"
+    )
+    if pages:
+        summary += f"📸 {len(pages)} پیج فالو\n"
+    if e.payout_contact:
+        summary += f"🏆 آیدی جایزه: {esc(e.payout_contact)}\n"
+    await cb.message.answer(
+        summary + "\nروز کاستوم جدید را انتخاب کنید.",
+        reply_markup=pick_date_kb("repd"),
+    )
+    await cb.answer()
+
+
+@router.callback_query(RepeatSG.day, F.data.startswith("repd:"))
+async def org_repeat_day(cb: CallbackQuery, state: FSMContext):
+    try:
+        offset = int(cb.data.split(":")[1])
+    except (IndexError, ValueError):
+        await cb.answer("نامعتبر", show_alert=True)
+        return
+    choices = upcoming_local_dates(5)
+    if offset < 0 or offset >= len(choices):
+        await cb.answer("این روز در دسترس نیست.", show_alert=True)
+        return
+    day = choices[offset]["date"]
+    await state.update_data(picked_date=day.isoformat())
+    await state.set_state(RepeatSG.time)
+    await cb.message.answer(
+        f"🕐 تاریخ: {format_jalali_date(day)}\n\n" + REPEAT_TIME_TEXT,
+        reply_markup=wizard_nav(),
+    )
+    await cb.answer()
+
+
+@router.message(RepeatSG.day)
+async def org_repeat_need_day(message: Message):
+    await message.answer("یکی از روزهای زیر را انتخاب کنید.", reply_markup=pick_date_kb("repd"))
+
+
+@router.message(RepeatSG.time, ~F.text.in_(MENU_BUTTON_TEXTS))
+async def org_repeat_time(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
+    data = await state.get_data()
+    picked = data.get("picked_date")
+    token = data.get("source_token")
+    if not picked or not token:
+        await state.clear()
+        await message.answer("دوباره از «تکرار» شروع کنید.", reply_markup=organizer_home_kb())
+        return
+    try:
+        hour, minute = parse_clock(message.text or "")
+        when = combine_local_date_and_clock(date.fromisoformat(picked), hour, minute)
+    except ValueError:
+        await message.answer("ساعت نامعتبر است. نمونه: 22:00 یا 22", reply_markup=wizard_nav())
+        return
+    if when < dt.now(UTC) - timedelta(minutes=1):
+        await message.answer(
+            "این ساعت گذشته است. ساعتی از الان به بعد بفرستید.", reply_markup=wizard_nav()
+        )
+        return
+    source = await _repeat_source(db, db_user, token)
+    if not source or not source.organizer or source.organizer.user_id != db_user.id:
+        await state.clear()
+        await message.answer("کاستوم اصلی یافت نشد.", reply_markup=organizer_home_kb())
+        return
+    org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
+    try:
+        event = await repeat_event(db, source, org, db_user.id, when)
+        await submit_for_publish(db, event, db_user.id)
+        await db.commit()
+    except AppError as exc:
+        await message.answer(exc.message, reply_markup=organizer_home_kb())
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("repeat_event_failed", token=token)
+        await db.rollback()
+        await message.answer(
+            "تکرار کاستوم الان انجام نشد. چند ثانیه بعد دوباره تلاش کنید.",
+            reply_markup=organizer_home_kb(),
+        )
+        return
+    await state.clear()
+    event = await db.scalar(
+        select(Event).where(Event.id == event.id).options(*event_public_load_options())
+    )
+    link = event_deep_link(event.public_token)
+    if event.status == EventStatus.PUBLISHED:
+        from app.workers.enqueue import spawn
+        from app.workers.tasks import announce_new_event
+
+        spawn(announce_new_event, str(event.id))
+    await message.answer(
+        f"✅ <b>کاستوم تکرار شد</b>\n"
+        f"{format_event_identity_block(event)}\n"
+        f"🕐 {format_local(event.starts_at, event.timezone)}\n\n"
+        f"<b>لینک این کاستوم:</b>\n{link}\n\n"
+        "🆔 ROOM ID / PASS این کاستوم را جدا بفرستید — از کاستوم قبلی کپی نمی‌شود.",
+        reply_markup=event_share_kb(link),
+    )
+    await message.answer("بازگشت به پنل:", reply_markup=organizer_home_kb())
+
+
+# ---------------------------------------------------------------- public profile
+
+
+async def _profile_view(target, db: AsyncSession, org, *, own: bool, back: str) -> None:
+    from app.services.organizers import (
+        format_organizer_profile,
+        organizer_deep_link,
+        upcoming_events_for,
+    )
+
+    text = await format_organizer_profile(db, org)
+    events = await upcoming_events_for(db, org.id)
+    link = organizer_deep_link(org.id)
+    if own:
+        text += (
+            "\n\n━━━━━━━━━━━━━━\n"
+            "🔗 <b>لینک پروفایل شما</b>\n"
+            f"{link}\n"
+            "این را در بیوی کانالتان بگذارید تا هر کس بزند، همین کارت و کاستوم‌های بازتان را ببیند."
+        )
+    elif not events:
+        text += "\n\nالان کاستوم بازی ندارد."
+    await target(
+        text,
+        organizer_profile_kb(
+            str(org.id),
+            [(e.public_token, format_event_list_label(e)) for e in events],
+            share_link=link if own else None,
+            back=back,
+        ),
+    )
+
+
+@router.callback_query(F.data == "orgp:me")
+async def org_my_profile(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    if await _blocked_organize(db, db_user, cb):
+        return
+    org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
+    if not org:
+        await cb.answer("اول یک کاستوم بسازید.", show_alert=True)
+        return
+
+    async def _say(text, kb):
+        await cb.message.answer(text, reply_markup=kb)
+
+    await _profile_view(_say, db, org, own=True, back="orgp:home")
     await cb.answer()

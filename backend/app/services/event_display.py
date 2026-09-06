@@ -162,8 +162,12 @@ def format_event_list_label(event: Event) -> str:
         head = "🔴 در حال برگزاری"
     else:
         head = f"🕐 {format_local(event.starts_at, event.timezone, compact=True)}"
-    budget = LIST_LABEL_LIMIT - len(head) - len(" · 🎁 ")
-    return f"{head} · 🎁 {_one_line(prize_text, max(8, budget))}"
+    # a busy custom is the strongest signal a player has that it is real,
+    # so the headcount rides on the button next to the prize
+    taken = max(0, int(getattr(event, "confirmed_count", 0) or 0))
+    tail = f" · 👥 {taken}" if taken else ""
+    budget = LIST_LABEL_LIMIT - len(head) - len(" · 🎁 ") - len(tail)
+    return f"{head} · 🎁 {_one_line(prize_text, max(8, budget))}{tail}"
 
 
 def format_time_left(starts_at: datetime, now: datetime | None = None) -> str:
