@@ -14,7 +14,7 @@ DEFAULTS: dict[str, Any] = {
     "auto_approve_organizers": True,
     "max_announcements_per_day": 5,
     "max_events_per_organizer": 10,
-    "max_required_channels_per_event": 5,
+    "max_required_channels_per_event": 8,
     "max_required_referrals": 20,
     "maintenance_mode": False,
     "default_timezone": "Asia/Tehran",

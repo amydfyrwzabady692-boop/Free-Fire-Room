@@ -9,7 +9,7 @@ from app.models.organizer import Organizer, OrganizerTrustEvent
 from app.models.referral import Referral, ReferralLink
 from app.models.registration import Registration, RegistrationRequirementStatus, WaitlistEntry
 from app.models.report import Report
-from app.models.social import SocialProof
+from app.models.social import EventSocialTask, SocialProof
 from app.models.review import EventReview
 from app.models.user import Ban, Permission, Role, RolePermission, User, UserNote, UserProfile, UserRole
 from app.models.winner import WinnerClaim, WinnerMessage
@@ -55,5 +55,6 @@ __all__ = [
     "WinnerClaim",
     "WinnerMessage",
     "SocialProof",
+    "EventSocialTask",
     "EventView",
 ]

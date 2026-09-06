@@ -119,7 +119,7 @@ def format_jalali_date(value: date, tz_name: str = DEFAULT_TZ) -> str:
     return to_fa_digits(text)
 
 
-def upcoming_local_dates(days: int = 3, tz_name: str = DEFAULT_TZ) -> list[dict]:
+def upcoming_local_dates(days: int = 5, tz_name: str = DEFAULT_TZ) -> list[dict]:
     now = datetime.now(ZoneInfo(tz_name))
     names = ("امروز", "فردا", "پس‌فردا")
     items = []

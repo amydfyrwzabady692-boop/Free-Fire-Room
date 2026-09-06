@@ -896,3 +896,104 @@ async def _send_daily_custom_digest(bot, db) -> None:
         if (sent + failed + skipped) % 50 == 0:
             db.commit()
     log.info("daily_digest_sent", day=day_key, users=len(users), sent=sent, failed=failed, skipped=skipped)
+
+
+def _announcement_text(event: Event) -> str:
+    from app.core.time import format_local
+    from app.services.event_display import event_prize_text
+
+    return (
+        "\U0001F195 <b>کاستوم جایزه‌دار جدید ثبت شد</b>\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        f"\U0001F48E <b>جایزه</b>\n{html.escape(event_prize_text(event))}\n"
+        f"\U0001F550 {format_local(event.starts_at, event.timezone)}\n\n"
+        "دکمهٔ زیر را بزنید، شرایطش را ببینید و انجام دهید تا سر ساعت "
+        "ROOM ID و PASS برایتان بیاید.\n"
+        "\U0001F514 یک ساعت قبل و ده دقیقه قبل از شروع هم یادآوری می‌شود."
+    )
+
+
+@celery_app.task(name="app.workers.tasks.announce_new_event")
+def announce_new_event(event_id: str):
+    """Tell every bot user about a custom as soon as it is published.
+
+    The organizer's own channel only reaches their followers; this is what
+    gives a brand-new organizer an audience on the first custom.
+    """
+    db = SyncSessionLocal()
+    try:
+        event = db.get(Event, UUID(event_id))
+        if not event:
+            return
+        _run_with_bot(lambda bot: _broadcast_new_event(bot, db, event))
+        db.commit()
+    finally:
+        db.close()
+
+
+async def _broadcast_new_event(bot, db, event: Event) -> None:
+    from redis import Redis
+    from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
+
+    from app.bot.keyboards.common import event_list_kb
+    from app.core.config import get_settings
+    from app.core.enums import EventVisibility, UserStatus
+
+    settings = get_settings()
+    if not settings.event_reminder_broadcast:
+        return
+    if event.visibility != EventVisibility.PUBLIC or not event.deep_link_active:
+        return
+    if event.status not in {EventStatus.PUBLISHED, EventStatus.FULL}:
+        return
+
+    redis = Redis.from_url(settings.redis_url)
+    lock_key = f"lock:event_announce:{event.id}"
+    try:
+        if not redis.set(lock_key, WORKER_ID, nx=True, ex=24 * 3600):
+            log.info("event_already_announced", event_id=str(event.id))
+            return
+    except Exception:  # noqa: BLE001
+        log.exception("event_announce_lock_failed", event_id=str(event.id))
+
+    organizer_user_id = None
+    org = db.get(Organizer, event.organizer_id) if event.organizer_id else None
+    if org:
+        organizer_user_id = org.user_id
+
+    text = _announcement_text(event)
+    markup = event_list_kb([(event.public_token, "دیدن کاستوم و ثبت‌نام")], mode="digest")
+    users = db.scalars(
+        select(User).where(
+            User.deleted_at.is_(None),
+            User.is_bot_blocked.is_(False),
+            User.notification_enabled.is_(True),
+            User.status == UserStatus.ACTIVE,
+        )
+    ).all()
+    sent = failed = skipped = 0
+    for user in users:
+        if not user.telegram_id or user.id == organizer_user_id:
+            skipped += 1
+            continue
+        try:
+            await bot.send_message(user.telegram_id, text, reply_markup=markup)
+            sent += 1
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(exc.retry_after + 0.5)
+            try:
+                await bot.send_message(user.telegram_id, text, reply_markup=markup)
+                sent += 1
+            except Exception:  # noqa: BLE001
+                failed += 1
+        except TelegramForbiddenError:
+            user.is_bot_blocked = True
+            skipped += 1
+        except Exception:  # noqa: BLE001
+            failed += 1
+        await asyncio.sleep(1 / max(get_outbound_rate(), 1))
+        if (sent + failed + skipped) % 50 == 0:
+            db.commit()
+    log.info(
+        "event_announced", event_id=str(event.id), sent=sent, failed=failed, skipped=skipped
+    )

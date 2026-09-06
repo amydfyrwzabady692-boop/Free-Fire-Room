@@ -103,6 +103,8 @@ async def create_event(db: AsyncSession, organizer: Organizer, data: dict, actor
         reminder_offsets_minutes=data.get("reminder_offsets_minutes") or [60, 10],
         prize_summary=data.get("prize_summary"),
         payout_contact=(data.get("payout_contact") or None),
+        # the first page is denormalised so "does this custom need a follow"
+        # stays one column read; the full list lives in event_social_tasks
         social_url=(data.get("social_url") or None),
         social_platform=(data.get("social_platform") or None),
         social_note=(data.get("social_note") or None),
@@ -124,6 +126,10 @@ async def create_event(db: AsyncSession, organizer: Organizer, data: dict, actor
         )
 
     _seed_requirements(db, event, data)
+
+    from app.services.social import seed_tasks
+
+    seed_tasks(db, event, data.get("social_pages") or [])
 
     room_id = data.get("room_id")
     room_password = data.get("room_password")

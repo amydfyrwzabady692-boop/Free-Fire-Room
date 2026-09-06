@@ -28,7 +28,9 @@ from app.bot.keyboards.common import (
     organizer_home_kb,
     payout_contact_kb,
     pick_date_kb,
+    social_bulk_kb,
     social_review_kb,
+    start_confirm_kb,
     winner_claim_review_kb,
     winner_reply_kb,
     wizard_nav,
@@ -52,6 +54,7 @@ from app.core.enums import (
     WinnerClaimStatus,
 )
 from app.core.errors import AppError
+from app.core.logging import get_logger
 from app.core.time import combine_local_date_and_clock, format_jalali_date, format_local, parse_clock, upcoming_local_dates
 from app.models.channel import Channel, ChannelOwnership
 from app.models.event import Event, RoomCredential
@@ -77,12 +80,15 @@ from app.services.events import (
 )
 from app.services.organizers import get_or_apply
 from app.services.social import (
+    MAX_SOCIAL_TASKS,
     PLATFORM_FA,
     normalize_social_url,
     pending_proof_count,
     pending_proofs_for_event,
     review_proof,
+    social_gate_ok,
     social_required,
+    task_label,
 )
 from app.services.winners import (
     claim_parties,
@@ -106,6 +112,7 @@ from app.services.reports import (
 from app.services.settings import get_setting
 
 router = Router(name="organizer")
+log = get_logger(__name__)
 
 def _short_label(e: Event, limit: int = 50) -> str:
     return ((e.prize_summary or e.title or "کاستوم").strip())[:limit]
@@ -227,7 +234,7 @@ async def wiz_pick_date(cb: CallbackQuery, state: FSMContext):
     except (IndexError, ValueError):
         await cb.answer("نامعتبر", show_alert=True)
         return
-    choices = upcoming_local_dates(3)
+    choices = upcoming_local_dates(5)
     if offset < 0 or offset >= len(choices):
         await cb.answer("این روز در دسترس نیست.", show_alert=True)
         return
@@ -333,7 +340,7 @@ async def _attach_wizard_channel(
 ) -> None:
     data = await state.get_data()
     ids: list[str] = list(data.get("required_channel_ids") or [])
-    max_ch = int(await get_setting(db, "max_required_channels_per_event", 5))
+    max_ch = int(await get_setting(db, "max_required_channels_per_event", 8))
     if extra and len(ids) >= max_ch and str(ch.id) not in ids:
         await bot.send_message(telegram_id, f"سقف کانال اجباری {max_ch} است. «تمام شد» را بزنید.")
         return
@@ -344,7 +351,7 @@ async def _attach_wizard_channel(
         payload["channel_id"] = str(ch.id)
         payload["title"] = f"کاستوم {ch.title}"[:160]
     await state.update_data(**payload)
-    max_ch = int(await get_setting(db, "max_required_channels_per_event", 5))
+    max_ch = int(await get_setting(db, "max_required_channels_per_event", 8))
     if not extra:
         await state.set_state(EventWizardSG.extra_channels)
         await bot.send_message(
@@ -402,7 +409,7 @@ async def wiz_extra(message: Message, state: FSMContext, db: AsyncSession, db_us
             return
         await _ask_prize(message, state)
         return
-    max_ch = int(await get_setting(db, "max_required_channels_per_event", 5))
+    max_ch = int(await get_setting(db, "max_required_channels_per_event", 8))
     if len(ids) >= max_ch:
         await message.answer(f"سقف کانال اجباری {max_ch} است. «تمام شد» را بزنید.")
         return
@@ -564,8 +571,10 @@ SOCIAL_STEP_TEXT = (
     "اگر می‌خواهید بازیکن‌ها علاوه بر جوین کانال، پیج شما را هم فالو کنند، "
     "آدرس پیج را همین‌جا بفرستید.\n"
     "نمونه: <code>https://instagram.com/mypage</code> یا <code>@mypage</code>\n\n"
-    "بعد از آن، مرحلهٔ آخر هر بازیکن این می‌شود که اسکرین‌شات فالو کردن را بفرستد؛ "
-    "اسکرین برای شما می‌آید و تا تأیید نکنید ثبت‌نامش قطعی نمی‌شود.\n\n"
+    f"می‌توانید تا {MAX_SOCIAL_TASKS} پیج بدهید — بعد از هر آدرس، آدرس بعدی را بفرستید "
+    "و آخرش «تمام شد» را بزنید.\n\n"
+    "بازیکن برای <b>هر پیج یک اسکرین جدا</b> می‌فرستد؛ اسکرین‌ها برای شما می‌آید و تا "
+    "تأیید نکنید ثبت‌نامش قطعی نمی‌شود.\n\n"
     "اگر لازم ندارید «رد کردن» را بزنید — هیچ بازیکنی این مرحله را نمی‌بیند."
 )
 
@@ -611,6 +620,7 @@ async def _ask_payout(message: Message, state: FSMContext, db: AsyncSession, db_
 
 async def _ask_social(message: Message, state: FSMContext) -> None:
     await state.set_state(EventWizardSG.social)
+    await state.update_data(social_pages=[])
     await message.answer(SOCIAL_STEP_TEXT, reply_markup=wizard_nav(include_skip=True, include_back=True))
 
 
@@ -696,24 +706,68 @@ async def wiz_payout_shortcut(cb: CallbackQuery, state: FSMContext, db: AsyncSes
     await cb.answer("ثبت شد")
 
 
+def _social_pages(data: dict) -> list[dict]:
+    return list(data.get("social_pages") or [])
+
+
+def _social_done_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [ibtn("تمام شد — ادامه", callback_data="socdone", style=SUCCESS)],
+            [ibtn("لغو", callback_data="wiz:cancel", style=DANGER)],
+        ]
+    )
+
+
+async def _finish_social_step(message: Message, state: FSMContext) -> None:
+    pages = _social_pages(await state.get_data())
+    if pages:
+        first = pages[0]
+        await state.update_data(social_url=first["url"], social_platform=first["platform"])
+    else:
+        await state.update_data(social_url=None, social_platform=None)
+    await _ask_description(message, state)
+
+
 @router.message(EventWizardSG.social)
 async def wiz_social(message: Message, state: FSMContext, db: AsyncSession, db_user: User):
     text = (message.text or "").strip()
-    if text in labeled("-", "رد کردن", "رد", "ندارم"):
-        await state.update_data(social_url=None, social_platform=None)
-        await _ask_description(message, state)
+    data = await state.get_data()
+    pages = _social_pages(data)
+    if text in labeled("-", "رد کردن", "رد", "ندارم", "تمام شد", "ادامه"):
+        await _finish_social_step(message, state)
+        return
+    if len(pages) >= MAX_SOCIAL_TASKS:
+        await message.answer(
+            f"سقف {MAX_SOCIAL_TASKS} پیج است. «تمام شد» را بزنید.",
+            reply_markup=_social_done_kb(),
+        )
         return
     try:
         url, platform = normalize_social_url(text)
     except AppError as exc:
         await message.answer(exc.message, reply_markup=wizard_nav(include_skip=True, include_back=True))
         return
-    await state.update_data(social_url=url, social_platform=platform)
-    await message.answer(
-        f"✅ شرط فالو {PLATFORM_FA.get(platform, 'پیج')} ثبت شد:\n{esc(url)}\n\n"
-        "هر بازیکن بعد از جوین کانال‌ها باید اسکرین فالو کردن را بفرستد و شما تأییدش کنید."
+    if any(p["url"] == url for p in pages):
+        await message.answer("این پیج را قبلاً اضافه کرده‌اید.", reply_markup=_social_done_kb())
+        return
+    pages.append({"url": url, "platform": platform})
+    await state.update_data(social_pages=pages)
+    listing = "\n".join(
+        f"{i}) {PLATFORM_FA.get(p['platform'], 'پیج')} — {esc(p['url'])}"
+        for i, p in enumerate(pages, start=1)
     )
-    await _ask_description(message, state)
+    await message.answer(
+        f"✅ ثبت شد ({len(pages)}/{MAX_SOCIAL_TASKS}):\n{listing}\n\n"
+        "پیج بعدی را بفرستید، یا «تمام شد» را بزنید.",
+        reply_markup=_social_done_kb(),
+    )
+
+
+@router.callback_query(EventWizardSG.social, F.data == "socdone")
+async def wiz_social_done(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_user: User):
+    await _finish_social_step(cb.message, state)
+    await cb.answer()
 
 
 @router.message(EventWizardSG.banner)
@@ -754,6 +808,7 @@ async def wiz_back(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_us
     elif current == EventWizardSG.payout_contact.state:
         await _ask_prize(msg, state)
     elif current == EventWizardSG.social.state:
+        await state.update_data(social_pages=[])
         await _ask_payout(msg, state, db, db_user)
     elif current == EventWizardSG.description.state:
         await _ask_social(msg, state)
@@ -769,8 +824,8 @@ async def wiz_back(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_us
 async def wiz_skip(cb: CallbackQuery, state: FSMContext, db: AsyncSession, db_user: User):
     current = await state.get_state()
     if current == EventWizardSG.social.state:
-        await state.update_data(social_url=None, social_platform=None)
-        await _ask_description(cb.message, state)
+        await state.update_data(social_pages=[])
+        await _finish_social_step(cb.message, state)
         await cb.answer()
         return
     if current == EventWizardSG.description.state:
@@ -812,6 +867,7 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
         "payout_contact": data.get("payout_contact"),
         "social_url": data.get("social_url"),
         "social_platform": data.get("social_platform"),
+        "social_pages": _social_pages(data),
         "region": "ME",
         "game_mode": "squad",
         "prize_summary": prize,
@@ -832,9 +888,12 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
         )
         link = event_deep_link(event.public_token)
         n_ch = len(payload["required_channel_ids"])
+        pages = _social_pages(data)
         social_line = (
-            f"📸 فالو {PLATFORM_FA.get(event.social_platform, 'پیج')}: {esc(event.social_url)}\n"
-            if social_required(event)
+            "📸 فالو اجباری: "
+            + "، ".join(f"{PLATFORM_FA.get(p['platform'], 'پیج')}" for p in pages)
+            + f" ({len(pages)} پیج)\n"
+            if pages
             else ""
         )
         payout_line = (
@@ -865,8 +924,14 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
                 pass
         await message.answer(details, reply_markup=event_share_kb(link))
         if event.status == EventStatus.PUBLISHED:
+            # everyone hears about it now, not only when a reminder fires
+            await db.commit()
+            from app.workers.enqueue import spawn
+            from app.workers.tasks import announce_new_event
+
+            spawn(announce_new_event, str(event.id))
             await message.answer(
-                "کاستوم در فهرست همه قرار گرفت.",
+                "کاستوم در فهرست همه قرار گرفت و به کاربران ربات خبر داده شد.",
                 reply_markup=await menu_for(db, db_user),
             )
         else:
@@ -1647,13 +1712,16 @@ async def org_mark_started(cb: CallbackQuery, db: AsyncSession, db_user: User):
 # ---------------------------------------------------------------- follow screenshots
 
 
-def _social_caption(event: Event, player: User) -> str:
+def _social_caption(event: Event, proof) -> str:
+    page = proof.task.url if proof.task else (event.social_url or "—")
+    label = task_label(proof.task)
     return (
         "📸 <b>اسکرین فالو</b>\n"
         f"کاستوم: {esc(_short_label(event))}\n"
-        f"بازیکن: {format_person(player)}\n"
-        f"پیج: {esc(event.social_url or '—')}\n\n"
-        "اگر درست است «تأیید ثبت‌نام» را بزنید تا ثبت‌نامش قطعی شود و سر ساعت ROOM ID / PASS برایش برود."
+        f"بازیکن: {format_person(proof.user)}\n"
+        f"پیج ({esc(label)}): {esc(page)}\n\n"
+        "اگر درست است «تأیید» را بزنید. وقتی اسکرین همهٔ پیج‌ها تأیید شد، "
+        "ثبت‌نامش قطعی می‌شود و ROOM ID / PASS برایش می‌رود."
     )
 
 
@@ -1666,17 +1734,20 @@ async def org_social_queue(cb: CallbackQuery, db: AsyncSession, db_user: User):
     if not e:
         await cb.answer("یافت نشد", show_alert=True)
         return
+    total = await pending_proof_count(db, e.id)
     rows = await pending_proofs_for_event(db, e.id, limit=10)
     if not rows:
         await cb.message.answer("اسکرین در انتظاری نیست.", reply_markup=organizer_home_kb())
         await cb.answer()
         return
+    more = f"\n({len(rows)} تای اول را می‌بینید؛ بقیه بعد از بررسی همین‌ها می‌آید.)" if total > len(rows) else ""
     await cb.message.answer(
-        f"📸 <b>اسکرین‌های فالو در انتظار</b> — {len(rows)} مورد\n"
-        "هر کدام را ببینید و تأیید یا رد کنید. تا تأیید نکنید ثبت‌نام آن بازیکن قطعی نمی‌شود."
+        f"📸 <b>اسکرین‌های فالو در انتظار</b> — {total} مورد{more}\n"
+        "می‌توانید دانه‌دانه تأیید/رد کنید، یا از دکمه‌های پایین همه را یک‌جا.",
+        reply_markup=social_bulk_kb(e.public_token, total),
     )
     for proof in rows:
-        caption = _social_caption(e, proof.user)
+        caption = _social_caption(e, proof)
         try:
             await cb.message.answer_photo(
                 proof.file_id, caption=caption[:1024], reply_markup=social_review_kb(str(proof.id))
@@ -1686,6 +1757,10 @@ async def org_social_queue(cb: CallbackQuery, db: AsyncSession, db_user: User):
                 caption + "\n\n<i>اسکرین قابل نمایش نیست.</i>",
                 reply_markup=social_review_kb(str(proof.id)),
             )
+    await cb.message.answer(
+        "بعد از بررسی، از دکمه‌های زیر استفاده کنید:",
+        reply_markup=social_bulk_kb(e.public_token, total),
+    )
     await cb.answer()
 
 
@@ -2012,3 +2087,186 @@ async def org_payout_shortcut(cb: CallbackQuery, state: FSMContext, db: AsyncSes
         reply_markup=organizer_home_kb(),
     )
     await cb.answer("ثبت شد")
+
+
+# ---------------------------------------------------------------- bulk follow review
+
+
+async def _notify_social_result(bot, db: AsyncSession, event: Event, player: User, approved: bool) -> None:
+    if not player or player.is_bot_blocked:
+        return
+    if approved:
+        ok = await social_gate_ok(db, event, player)
+        note = (
+            "✅ اسکرین‌های فالو شما تأیید شد و ثبت‌نامتان در کاستوم "
+            f"«{esc(_short_label(event))}» قطعی شد.\n"
+            "سر ساعت ROOM ID و PASS برایتان می‌آید — فقط تا آن لحظه در کانال‌ها بمانید."
+            if ok
+            else "✅ این اسکرین تأیید شد. هنوز چند پیج مانده؛ اسکرین بقیه را هم بفرستید."
+        )
+    else:
+        note = (
+            f"❌ اسکرین فالو شما برای کاستوم «{esc(_short_label(event))}» تأیید نشد.\n"
+            "دوباره از کارت کاستوم اسکرین درست را بفرستید."
+        )
+    try:
+        await bot.send_message(player.telegram_id, note)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _bulk_review_social(cb: CallbackQuery, db: AsyncSession, db_user: User, *, approved: bool) -> None:
+    """Settle every pending screenshot for one custom in a single tap."""
+    if await _blocked_organize(db, db_user, cb):
+        return
+    token = cb.data.split(":", 2)[-1]
+    e = await _own_event(db, db_user, token)
+    if not e:
+        allowed = await is_active_admin(db, db_user)
+        if not allowed:
+            await cb.answer("یافت نشد", show_alert=True)
+            return
+        e = await db.scalar(
+            select(Event).where(Event.public_token == token).options(*event_public_load_options())
+        )
+        if not e:
+            await cb.answer("یافت نشد", show_alert=True)
+            return
+    rows = await pending_proofs_for_event(db, e.id, limit=200)
+    if not rows:
+        await cb.answer("اسکرین در انتظاری نیست.", show_alert=True)
+        return
+    players: dict = {}
+    for proof in rows:
+        await review_proof(db, proof, approved=approved, reviewer_id=db_user.id)
+        players[proof.user_id] = proof.user
+    confirmed = 0
+    if approved:
+        for player in players.values():
+            if player is None:
+                continue
+            try:
+                result = await register_user(
+                    db, user=player, event=e, bot=cb.bot, source="social", accept_rules=True
+                )
+                if result.registration.status == RegistrationStatus.CONFIRMED:
+                    confirmed += 1
+            except AppError:
+                confirmed += 1  # already registered
+            except Exception:  # noqa: BLE001
+                log.exception("bulk_social_register_failed", user_id=str(player.id))
+    # one send for the whole batch, not one per player
+    if confirmed and await queue_late_credentials(db, e):
+        pass
+    else:
+        await db.commit()
+    for player in players.values():
+        await _notify_social_result(cb.bot, db, e, player, approved)
+    await cb.answer("انجام شد")
+    await cb.message.answer(
+        f"✅ {len(rows)} اسکرین تأیید شد و {confirmed} ثبت‌نام قطعی شد."
+        if approved
+        else f"❌ {len(rows)} اسکرین رد شد و به بازیکن‌ها اطلاع داده شد.",
+        reply_markup=organizer_home_kb(),
+    )
+
+
+@router.callback_query(F.data.startswith("socall:ok:"))
+async def org_social_all_ok(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    await _bulk_review_social(cb, db, db_user, approved=True)
+
+
+@router.callback_query(F.data.startswith("socall:no:"))
+async def org_social_all_no(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    await _bulk_review_social(cb, db, db_user, approved=False)
+
+
+# ---------------------------------------------------------------- start menu
+
+
+@router.callback_query(F.data == "orgp:startmenu")
+async def org_start_menu(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    """Pick which custom to declare started, then press the button."""
+    if await _blocked_organize(db, db_user, cb):
+        return
+    if await _organizer_ready(db, db_user, cb.message) is None:
+        await cb.answer()
+        return
+    org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
+    if not org:
+        await cb.answer("اول یک کاستوم بسازید.", show_alert=True)
+        return
+    rows = (
+        await db.scalars(
+            select(Event)
+            .where(
+                Event.organizer_id == org.id,
+                Event.deleted_at.is_(None),
+                Event.archived_at.is_(None),
+                Event.status.in_([EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED]),
+            )
+            .options(*event_public_load_options())
+            .order_by(Event.starts_at.asc())
+            .limit(10)
+        )
+    ).all()
+    live = [e for e in rows if not is_archived(e)]
+    if not live:
+        await cb.message.answer(
+            "الان کاستوم بازی ندارید.\n"
+            "کاستوم‌هایی که هنوز شروع نشده‌اند اینجا می‌آیند تا با یک دکمه شروع‌شده اعلامشان کنید.",
+            reply_markup=organizer_home_kb(),
+        )
+        await cb.answer()
+        return
+    buttons = [
+        [
+            ibtn(
+                f"{format_local(e.starts_at, e.timezone, compact=True)} · {_short_label(e, 30)}",
+                callback_data=f"orgp:startpick:{e.public_token}",
+                style=PRIMARY,
+            )
+        ]
+        for e in live
+    ]
+    buttons.append([ibtn("بازگشت به پنل", callback_data="orgp:home", style=DANGER)])
+    await cb.message.answer(
+        "⏹ <b>شروع کاستوم</b>\n"
+        "کاستومی که بازی‌اش را شروع کرده‌اید انتخاب کنید.\n\n"
+        "تا وقتی این کار را نکنید، کاستوم در «پیش‌رو» می‌ماند و هر بازیکن تازه‌ای که "
+        "شرایط را کامل کند ROOM ID / PASS می‌گیرد.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("orgp:startpick:"))
+async def org_start_pick(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    """Show what stopping this custom will do, before it is irreversible."""
+    token = cb.data.split(":", 2)[-1]
+    e = await _own_event(db, db_user, token)
+    if not e:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    from app.services.reviews import event_audience_stats, format_audience_stats
+
+    stats = await event_audience_stats(db, e.id)
+    creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == e.id))
+    warn = (
+        ""
+        if creds_were_provided(creds)
+        else "\n\n⚠️ هنوز ROOM ID / PASS نفرستاده‌اید. اول مشخصات را بفرستید."
+    )
+    await cb.message.answer(
+        f"{format_event_identity_block(e)}\n"
+        f"🕐 {format_local(e.starts_at, e.timezone)}\n"
+        f"{format_audience_stats(stats)}\n"
+        "━━━━━━━━━━━━━━\n"
+        "با زدن دکمهٔ زیر:\n"
+        "• این کاستوم از «پیش‌رو» به «گذشته» می‌رود\n"
+        "• ثبت‌نام جدید بسته می‌شود\n"
+        "• ارسال ROOM ID / PASS تمام می‌شود"
+        f"{warn}",
+        reply_markup=start_confirm_kb(e.public_token),
+    )
+    await cb.answer()

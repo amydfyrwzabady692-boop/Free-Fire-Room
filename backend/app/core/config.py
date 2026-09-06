@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     event_approval_required: bool = False
     auto_approve_organizers: bool = True
     max_events_per_organizer: int = 10
-    max_required_channels_per_event: int = 5
+    max_required_channels_per_event: int = 8
     max_required_referrals: int = 20
     credentials_grace_minutes: int = 5
     custom_fill_minutes: int = 20

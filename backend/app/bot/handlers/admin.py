@@ -445,7 +445,13 @@ async def admin_event_approve(cb: CallbackQuery, db: AsyncSession, db_user: User
     await _notify_organizer(
         cb, db, event, f"✅ کاستوم «{esc(event.title)}» تأیید و منتشر شد.\nلینکش را در کانالتان بگذارید."
     )
-    await cb.answer("منتشر شد")
+    # approval is the moment it becomes public, so this is when everyone hears
+    await db.commit()
+    from app.workers.enqueue import spawn
+    from app.workers.tasks import announce_new_event
+
+    spawn(announce_new_event, str(event.id))
+    await cb.answer("منتشر شد و به کاربران خبر رفت")
     await admin_events(cb, db, db_user)
 
 

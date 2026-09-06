@@ -347,7 +347,7 @@ def pick_date_kb(prefix: str) -> InlineKeyboardMarkup:
     from app.core.time import upcoming_local_dates
 
     rows = []
-    for item in upcoming_local_dates(3):
+    for item in upcoming_local_dates(5):
         style = SUCCESS if item["offset"] == 0 else PRIMARY
         rows.append([ibtn(item["label"], callback_data=f"{prefix}:{item['offset']}", style=style)])
     rows.append([ibtn("لغو", callback_data="wiz:cancel", style=DANGER)])
@@ -397,6 +397,7 @@ def organizer_home_kb() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [ibtn("ثبت کاستوم جدید", callback_data="orgp:new", style=SUCCESS)],
             [ibtn("ارسال ROOM ID / PASS", callback_data="orgp:creds_menu", style=SUCCESS)],
+            [ibtn("⏹ شروع کاستوم (انتقال به گذشته)", callback_data="orgp:startmenu", style=DANGER)],
             [ibtn("کاستوم‌ها و آمار من", callback_data="orgp:mine", style=PRIMARY)],
             [ibtn("برنده‌ها و تحویل جایزه", callback_data="orgp:win", style=PRIMARY)],
             [ibtn("آیدی دریافت جایزه", callback_data="orgp:payout", style=PRIMARY)],
@@ -507,3 +508,23 @@ def organizer_reply_kb(claim_id: str, *, player_url: str | None = None) -> Inlin
     if player_url:
         rows.append([ibtn("رفتن به پی‌وی بازیکن", url=player_url, style=PRIMARY)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def social_bulk_kb(token: str, pending: int) -> InlineKeyboardMarkup:
+    """Settle a whole queue of follow screenshots in one tap."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [ibtn(f"تأیید همه ({pending})", callback_data=f"socall:ok:{token}", style=SUCCESS)],
+            [ibtn(f"رد همه ({pending})", callback_data=f"socall:no:{token}", style=DANGER)],
+            [ibtn("بازگشت به پنل", callback_data="orgp:home", style=PRIMARY)],
+        ]
+    )
+
+
+def start_confirm_kb(token: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [ibtn("⏹ بله، کاستوم شروع شد", callback_data=f"orgp:start:{token}", style=DANGER)],
+            [ibtn("هنوز نه — بازگشت", callback_data="orgp:startmenu", style=PRIMARY)],
+        ]
+    )

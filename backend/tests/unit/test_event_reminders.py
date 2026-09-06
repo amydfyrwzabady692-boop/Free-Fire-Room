@@ -188,3 +188,57 @@ def _stub_setting(monkeypatch, **overrides):
             return getattr(real, name)
 
     monkeypatch.setattr("app.core.config.get_settings", lambda: _S())
+
+
+@pytest.mark.asyncio
+async def test_a_new_custom_is_announced_to_everyone(db, monkeypatch):
+    """The organizer's own channel only reaches their followers."""
+    host = make_user(db, 5050)
+    org = make_organizer(db, host)
+    event = _live_event(db, org, minutes_ahead=180)
+    stranger = make_user(db, 5051)
+
+    monkeypatch.setattr(tasks, "get_outbound_rate", lambda: 10_000)
+    _stub_redis(monkeypatch, taken=False)
+
+    bot = FakeBot()
+    await tasks._broadcast_new_event(bot, db, event)
+
+    by_chat = {chat: text for chat, text in bot.sent}
+    assert stranger.telegram_id in by_chat
+    assert "۱۰۰۰ الماس" in by_chat[stranger.telegram_id]
+    assert "کاستوم جایزه‌دار جدید" in by_chat[stranger.telegram_id]
+    # the organizer does not get told about their own custom
+    assert host.telegram_id not in by_chat
+
+
+@pytest.mark.asyncio
+async def test_a_custom_is_announced_once(db, monkeypatch):
+    host = make_user(db, 5060)
+    org = make_organizer(db, host)
+    event = _live_event(db, org)
+    make_user(db, 5061)
+
+    monkeypatch.setattr(tasks, "get_outbound_rate", lambda: 10_000)
+    _stub_redis(monkeypatch, taken=True)
+
+    bot = FakeBot()
+    await tasks._broadcast_new_event(bot, db, event)
+    assert bot.sent == []
+
+
+@pytest.mark.asyncio
+async def test_an_unlisted_custom_is_not_announced(db, monkeypatch):
+    host = make_user(db, 5070)
+    org = make_organizer(db, host)
+    event = _live_event(db, org)
+    event.visibility = "unlisted"
+    db.flush()
+    make_user(db, 5071)
+
+    monkeypatch.setattr(tasks, "get_outbound_rate", lambda: 10_000)
+    _stub_redis(monkeypatch, taken=False)
+
+    bot = FakeBot()
+    await tasks._broadcast_new_event(bot, db, event)
+    assert bot.sent == []

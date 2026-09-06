@@ -157,7 +157,7 @@ async def ann_pick_date(cb: CallbackQuery, state: FSMContext):
     except (IndexError, ValueError):
         await cb.answer("نامعتبر", show_alert=True)
         return
-    choices = upcoming_local_dates(3)
+    choices = upcoming_local_dates(5)
     if offset < 0 or offset >= len(choices):
         await cb.answer("این روز در دسترس نیست.", show_alert=True)
         return

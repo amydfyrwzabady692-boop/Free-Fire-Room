@@ -18,6 +18,8 @@ from app.bot.handlers.organizer import router as organizer_router
 from app.bot.handlers.player import router as player_router
 from app.bot.handlers.winner import router as winner_router
 from app.bot.keyboards.common import (
+    social_bulk_kb,
+    start_confirm_kb,
     event_detail_kb,
     organizer_home_kb,
     organizer_reply_kb,
@@ -81,6 +83,8 @@ ALL_KEYBOARDS = {
     "winner_claim_reviewed": winner_claim_review_kb(CLAIM, approved=True),
     "winner_reply": winner_reply_kb(CLAIM, contact_url="https://t.me/x"),
     "organizer_reply": organizer_reply_kb(CLAIM, player_url="https://t.me/y"),
+    "social_bulk": social_bulk_kb(TOKEN, 3),
+    "start_confirm": start_confirm_kb(TOKEN),
     "event_detail_with_social": event_detail_kb(
         TOKEN,
         can_join=True,
@@ -119,6 +123,11 @@ def test_the_check_can_actually_fail():
         f"soc:{TOKEN}",
         "payc:saved",
         "payc:self",
+        "orgp:startmenu",
+        f"orgp:startpick:{TOKEN}",
+        f"socall:ok:{TOKEN}",
+        f"socall:no:{TOKEN}",
+        "socdone",
     ],
 )
 def test_new_callbacks_are_routed(data):

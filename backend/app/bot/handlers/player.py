@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
@@ -546,11 +547,15 @@ async def _send_join_result(cb: CallbackQuery, event: Event, token: str, result,
             )
             return
         note = (social.detail or "").strip()
+        from app.services.social import list_tasks, social_done_count
+
+        tasks = await list_tasks(db, event.id)
+        done = await social_done_count(db, event_id=event.id, user_id=result.registration.user_id)
         await reply_callback(
             cb,
-            ("✅ جوین کانال‌ها کامل شد.\n\n" + format_social_step(event))
+            ("✅ جوین کانال‌ها کامل شد.\n\n" + format_social_step(event, tasks, done=done))
             + (f"\n\n⚠️ {esc(note)}" if note else ""),
-            reply_markup=social_step_kb(token, event.social_url),
+            reply_markup=social_step_kb(token, tasks[0].url if tasks else event.social_url),
         )
         return
     text = "هنوز در این کانال‌ها عضو نیستید:\n"
@@ -1226,21 +1231,21 @@ async def menu_home(cb: CallbackQuery, db: AsyncSession, db_user: User, state: F
 # ---------------------------------------------------------------- follow proof
 
 
-async def _notify_social_reviewers(bot, db: AsyncSession, event: Event, player: User, file_id: str) -> None:
+async def _notify_social_reviewers(bot, db: AsyncSession, event: Event, player: User, proof) -> None:
     """Send the screenshot to the organizer (the bot owner is the fallback)."""
     from app.bot.keyboards.common import social_review_kb
     from app.models.admin import Admin
-    from app.services.social import get_proof
+    from app.services.social import task_label
 
-    proof = await get_proof(db, event_id=event.id, user_id=player.id)
     if proof is None:
         return
+    page = proof.task.url if proof.task else (event.social_url or "—")
     caption = (
         "📸 <b>اسکرین فالو</b>\n"
         f"کاستوم: {esc((event.prize_summary or event.title or '').strip()[:60])}\n"
         f"بازیکن: {format_person(player)}\n"
-        f"پیج: {esc(event.social_url or '—')}\n\n"
-        "با «تأیید ثبت‌نام» ثبت‌نام این بازیکن قطعی می‌شود و سر ساعت ROOM ID / PASS برایش می‌رود."
+        f"پیج ({esc(task_label(proof.task))}): {esc(page)}\n\n"
+        "با «تأیید» این پیج تأیید می‌شود؛ وقتی همهٔ پیج‌ها تأیید شد ثبت‌نامش قطعی می‌شود."
     )[:1024]
     kb = social_review_kb(str(proof.id))
     targets: list[int] = []
@@ -1257,12 +1262,32 @@ async def _notify_social_reviewers(bot, db: AsyncSession, event: Event, player: 
                 targets.append(au.telegram_id)
     for chat_id in targets:
         try:
-            await bot.send_photo(chat_id, file_id, caption=caption, reply_markup=kb)
+            await bot.send_photo(chat_id, proof.file_id, caption=caption, reply_markup=kb)
         except Exception:  # noqa: BLE001
             try:
                 await bot.send_message(chat_id, caption, reply_markup=kb)
             except Exception:  # noqa: BLE001
                 log.exception("social_proof_notify_failed", chat_id=chat_id)
+
+
+async def _social_prompt(target, db: AsyncSession, event: Event, user: User, state: FSMContext) -> bool:
+    """Ask for the next page's screenshot. False once nothing is left."""
+    from app.services.social import list_tasks, next_task_for
+
+    task, done, total = await next_task_for(db, event=event, user=user)
+    tasks = await list_tasks(db, event.id)
+    if task is None:
+        await state.clear()
+        await target(
+            "✅ اسکرین همهٔ پیج‌ها فرستاده شد.\n"
+            "منتظر تأیید برگزارکننده بمانید — به‌محض تأیید، همین‌جا خبرش را می‌گیرید."
+        )
+        return False
+    await state.set_state(SocialProofSG.screenshot)
+    await state.update_data(event_token=event.public_token, task_id=str(task.id))
+    step = f"\n\n👇 <b>الان اسکرین این پیج را بفرستید ({done + 1} از {total}):</b>\n{esc(task.url)}"
+    await target(format_social_step(event, tasks, done=done) + step)
+    return True
 
 
 @router.callback_query(F.data.startswith("soc:"))
@@ -1276,12 +1301,11 @@ async def social_start(cb: CallbackQuery, db: AsyncSession, db_user: User, state
     if not join_window_open(e):
         await reply_callback(cb, "مهلت ثبت‌نام این کاستوم بسته شده است.")
         return
-    await state.set_state(SocialProofSG.screenshot)
-    await state.update_data(event_token=token)
-    await reply_callback(
-        cb,
-        format_social_step(e) + "\n\nحالا فقط <b>عکس</b> اسکرین را همین‌جا بفرستید.",
-    )
+
+    async def _say(text: str) -> None:
+        await reply_callback(cb, text)
+
+    await _social_prompt(_say, db, e, db_user, state)
 
 
 @router.message(SocialProofSG.screenshot)
@@ -1312,8 +1336,17 @@ async def social_screenshot(message: Message, db: AsyncSession, db_user: User, s
     except Exception:  # noqa: BLE001
         log.exception("social_pre_register_failed")
         await db.rollback()
+    from app.models.social import EventSocialTask
+
+    task = None
+    raw_task = data.get("task_id")
+    if raw_task:
+        try:
+            task = await db.get(EventSocialTask, UUID(raw_task))
+        except ValueError:
+            task = None
     try:
-        await submit_proof(db, event=e, user=db_user, file_id=file_id)
+        proof = await submit_proof(db, event=e, user=db_user, file_id=file_id, task=task)
         await db.commit()
     except AppError as exc:
         await state.clear()
@@ -1324,11 +1357,14 @@ async def social_screenshot(message: Message, db: AsyncSession, db_user: User, s
         await db.rollback()
         await message.answer("ثبت اسکرین الان انجام نشد. چند ثانیه بعد دوباره تلاش کنید.")
         return
-    await _notify_social_reviewers(message.bot, db, e, db_user, file_id)
-    await state.clear()
-    await message.answer(
-        "✅ اسکرین شما برای برگزارکننده ارسال شد.\n"
-        "به‌محض تأیید او، ثبت‌نامتان قطعی می‌شود و همین‌جا خبرش را می‌گیرید.\n"
-        "تا آن موقع در کانال‌های اجباری بمانید.",
-        reply_markup=await menu_for(db, db_user),
-    )
+    await _notify_social_reviewers(message.bot, db, e, db_user, proof)
+
+    async def _say(text: str) -> None:
+        await message.answer(text)
+
+    more = await _social_prompt(_say, db, e, db_user, state)
+    if not more:
+        await message.answer(
+            "تا زمان تأیید در کانال‌های اجباری بمانید تا سر ساعت ROOM ID و PASS برایتان بیاید.",
+            reply_markup=await menu_for(db, db_user),
+        )
