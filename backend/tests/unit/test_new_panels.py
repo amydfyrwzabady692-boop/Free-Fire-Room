@@ -651,3 +651,32 @@ async def test_confirming_reject_all_voids_the_confirmed_seats(async_db):
     assert proof.status == SocialProofStatus.REJECTED
     assert reg.status == RegistrationStatus.INELIGIBLE
     assert event.confirmed_count == 0
+
+
+@pytest.mark.asyncio
+async def test_the_archive_lists_every_screenshot_not_only_the_unreviewed(async_db):
+    """Once nothing is pending the old queue vanished; the archive must not."""
+    org, event, host, player = await _seed(async_db, social=True)
+    proof = await _seeded_proof(async_db, event, player, status=SocialProofStatus.APPROVED)
+    await async_db.commit()
+
+    rec = Recorder()
+    await org_panel.org_social_queue(FakeCb(f"orgp:soc:{event.public_token}", rec), async_db, host)
+
+    text = rec.last
+    assert "بررسی‌نشده: 0" in text
+    assert "همه: 1" in text
+    kb = rec.views[-1][1]
+    callbacks = [b.callback_data for row in kb.inline_keyboard for b in row if b.callback_data]
+    assert f"socv:{proof.id.hex}" in callbacks, "the screenshot itself must be reachable"
+
+
+@pytest.mark.asyncio
+async def test_the_archive_does_not_claim_the_organizer_is_blocking_anyone(async_db):
+    org, event, host, player = await _seed(async_db, social=True)
+    await _seeded_proof(async_db, event, player)
+    await async_db.commit()
+
+    rec = Recorder()
+    await org_panel.org_social_queue(FakeCb(f"orgp:soc:{event.public_token}", rec), async_db, host)
+    assert "لازم نیست چیزی را تأیید کنید" in rec.last
