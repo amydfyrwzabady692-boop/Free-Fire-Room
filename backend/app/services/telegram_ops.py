@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 
 from aiogram import Bot
@@ -17,6 +18,22 @@ from aiogram.enums import ChatMemberStatus
 #: eligibility is unknown, so callers must retry instead of treating them as
 #: "left the channel".
 CHECK_UNAVAILABLE = "check_unavailable"
+
+
+def outbound_rate() -> int:
+    from app.core.config import get_settings
+
+    return max(1, int(get_settings().telegram_outbound_per_second or 1))
+
+
+async def pace() -> None:
+    """Space out a burst of sends from a handler.
+
+    The workers have had this for a while; a bot handler that fans a claim out
+    to the organizer and every admin needs it too, and it lives here so a
+    handler never has to import the Celery module to get it.
+    """
+    await asyncio.sleep(1 / outbound_rate())
 
 ADMIN_STATUSES = {
     ChatMemberStatus.CREATOR,

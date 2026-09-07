@@ -127,9 +127,9 @@ async def deliver_one(bot: Bot, db: Session, event: Event, user: User, creds: Ro
         from app.services.social import social_gate_ok_sync
 
         if not social_gate_ok_sync(db, event, user):
-            # the organizer asked for a follow screenshot and has not approved
-            # this player's yet - not an error, just not their turn
-            ok, reason = False, "social_not_approved"
+            # either a required page has no screenshot at all, or the organizer
+            # rejected one. Both mean "not yet", never "cheated"
+            ok, reason = False, "social_missing"
     if not ok:
         # we could not verify this player: leave their registration alone and
         # let the job retry, instead of demoting them to "ineligible"
@@ -137,9 +137,10 @@ async def deliver_one(bot: Bot, db: Session, event: Event, user: User, creds: Ro
             return "check_failed"
         if reason == CHECK_UNAVAILABLE:
             return "check_unavailable"
-        if reason == "social_not_approved":
-            # keep their registration: the organizer may still approve the
-            # screenshot, and the next sweep will deliver
+        if reason == "social_missing":
+            # keep their registration: they can still send the screenshot (or
+            # resend a rejected one) and the next sweep will deliver. Demoting
+            # them here would hand their seat to the waitlist over a fixable gap
             return "social_pending"
         _upsert_delivery(db, user=user, event=event, job=job, idem=idem, status=DeliveryStatus.SKIPPED, error=reason)
         reg = db.scalar(
@@ -182,7 +183,7 @@ async def queue_late_credentials(db, event) -> bool:
 
     The scheduled sweep is only a safety net. This is the real path for a
     player who completes the conditions after the first send - by joining the
-    channels, or by having their follow screenshot approved - and it is why
+    channels, or by sending the follow screenshot - and it is why
     "everyone who qualifies before the organizer taps start gets the room"
     holds without keeping a job hot for the whole window.
 

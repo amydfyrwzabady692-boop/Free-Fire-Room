@@ -468,38 +468,46 @@ async def _show_event(
     text = await _event_card(db, e, missed=missed)
     text += "\n━━━━━━━━━━━━━━\n✅ <b>شرایط شرکت</b>\n"
     text += "باید در کانال‌های زیر عضو بمانید تا سر ساعت ROOM ID و PASS برایتان بیاید:\n"
+    channels_done = True
     if channel_items:
         for item in channel_items:
-            mark = "✅" if item.status == "done" else "❌"
-            text += f"{mark} {esc(item.label)}\n"
+            done = item.status == RequirementStatus.DONE
+            channels_done = channels_done and done
+            text += f"{'✅' if done else '❌'} {esc(item.label)}\n"
     else:
         text += "کانال جوین اجباری ثبت نشده است.\n"
     if social_item is not None:
-        marks = {
-            RequirementStatus.DONE: "✅",
-            RequirementStatus.PENDING_REVIEW: "⏳",
-        }
-        text += f"{marks.get(social_item.status, '❌')} {esc(social_item.label)} — مرحلهٔ آخر\n"
+        mark = "✅" if social_item.status == RequirementStatus.DONE else "❌"
+        text += f"{mark} {esc(social_item.label)} — مرحلهٔ بعد از جوین کانال‌ها\n"
     if missed:
         text += "\nROOM ID / PASS ارسال نشد. گزارش بدهید و اگر ثبت‌نام کرده بودید نظر/امتیاز بگذارید."
     elif cancelled:
         text += "\nاین کاستوم لغو شده است."
+    elif filling and social_item is not None and not channels_done:
+        text += "\n۱) کانال‌ها را جوین کنید و «عضو شدم» را بزنید.\n۲) بعد اسکرین فالو را می‌خواهد."
     elif filling:
-        text += "\nبعد از جوین، دکمه سبز «عضو شدم» را بزنید. تا پر شدن کاستوم اگر شرایط را کامل کنید مشخصات برایتان می‌آید."
+        text += "\nبعد از جوین، دکمه سبز «عضو شدم» را بزنید. تا وقتی کاستوم شروع نشده، هر کس شرایط را کامل کند مشخصات برایش می‌رود."
     elif not started:
         text += "\nبعد از جوین، دکمه سبز «عضو شدم» را بزنید."
     else:
         text += "\nاگر ROOM ID / PASS نیامد یا جایزه نداد: «گزارش به مالک ربات»."
     open_for_join = e.status in {EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED} and filling
+    # While a player is still working through the conditions the card carries
+    # nothing but the conditions. Reporting, the organizer's profile and the
+    # reviews are all after-the-fact and only turn up once the custom is done
+    # with them.
+    show_aftercare = bool(missed or cancelled or started or not open_for_join)
     kb = event_detail_kb(
         token,
-        join_urls=_join_urls(channel_items),
+        join_urls=_join_urls(channel_items) if not channels_done else [],
         can_join=open_for_join and not missed,
         social_url=e.social_url if (social_item is not None and open_for_join) else None,
+        channels_done=channels_done,
         organizer_id=str(e.organizer_id) if e.organizer_id else None,
         can_review=allowed,
         show_reviews=summary["count"] > 0 or started or cancelled,
         can_claim_win=started and not cancelled,
+        show_aftercare=show_aftercare,
         back=back,
     )
     photo = e.banner_file_id
@@ -549,14 +557,6 @@ async def _send_join_result(cb: CallbackQuery, event: Event, token: str, result,
     )
     # channels first; the follow screenshot is deliberately the last gate
     if social is not None and channels_done:
-        if social.status == RequirementStatus.PENDING_REVIEW:
-            await reply_callback(
-                cb,
-                "✅ جوین کانال‌ها کامل است.\n"
-                "📸 اسکرین فالو شما رسیده و منتظر تأیید برگزارکننده است. "
-                "به‌محض تأیید، ثبت‌نامتان قطعی می‌شود و همین‌جا خبر می‌گیرید.",
-            )
-            return
         note = (social.detail or "").strip()
         from app.services.social import list_tasks, social_done_count
 
@@ -1242,8 +1242,46 @@ async def menu_home(cb: CallbackQuery, db: AsyncSession, db_user: User, state: F
 # ---------------------------------------------------------------- follow proof
 
 
+CHANNELS_FIRST_TEXT = (
+    "اول باید عضو کانال‌های زیر شوید. مرحلهٔ اسکرین فالو بعد از این است:\n"
+)
+
+
+async def _channels_left(db: AsyncSession, user: User, event: Event, bot) -> list:
+    """The mandatory channels this player has not joined yet.
+
+    Channels come first, always. The follow step is only ever offered to
+    somebody who is already inside every channel.
+    """
+    reg = await db.scalar(
+        select(Registration).where(
+            Registration.event_id == event.id, Registration.user_id == user.id
+        )
+    )
+    checklist = await evaluate_requirements(db, user=user, event=event, bot=bot, registration=reg)
+    return [
+        item
+        for item in checklist.items
+        if item.requirement_type
+        in {RequirementType.CHANNEL_MEMBERSHIP, RequirementType.GLOBAL_CHANNEL_MEMBERSHIP}
+        and item.status != RequirementStatus.DONE
+    ]
+
+
+def _channels_first_message(items: list) -> str:
+    text = CHANNELS_FIRST_TEXT
+    for item in items:
+        text += f"❌ {esc(item.label)}\n"
+    return text
+
+
 async def _notify_social_reviewers(bot, db: AsyncSession, event: Event, player: User, proof) -> None:
-    """Send the screenshot to the organizer (the bot owner is the fallback)."""
+    """Send the screenshot to the organizer (the bot owner is the fallback).
+
+    This is a receipt, not a request: the player is already registered by the
+    time it goes out. The one button on it is there for the case where the
+    screenshot shows something else entirely.
+    """
     from app.bot.keyboards.common import social_review_kb
     from app.models.admin import Admin
     from app.services.social import task_label
@@ -1256,9 +1294,10 @@ async def _notify_social_reviewers(bot, db: AsyncSession, event: Event, player: 
         f"کاستوم: {esc((event.prize_summary or event.title or '').strip()[:60])}\n"
         f"بازیکن: {format_person(player)}\n"
         f"پیج ({esc(task_label(proof.task))}): {esc(page)}\n\n"
-        "با «تأیید» این پیج تأیید می‌شود؛ وقتی همهٔ پیج‌ها تأیید شد ثبت‌نامش قطعی می‌شود."
+        "ثبت‌نام این بازیکن انجام شده و ROOM ID / PASS برایش می‌رود. "
+        "فقط اگر این اسکرین بی‌ربط یا جعلی است «رد» را بزنید — آن وقت تا اسکرین درست نفرستد چیزی نمی‌گیرد."
     )[:1024]
-    kb = social_review_kb(str(proof.id))
+    kb = social_review_kb(str(proof.id), status=proof.status)
     targets: list[int] = []
     org = await db.get(Organizer, event.organizer_id) if event.organizer_id else None
     if org:
@@ -1289,9 +1328,10 @@ async def _social_prompt(target, db: AsyncSession, event: Event, user: User, sta
     tasks = await list_tasks(db, event.id)
     if task is None:
         await state.clear()
+        when = format_local(event.credentials_send_at, event.timezone)
         await target(
-            "✅ اسکرین همهٔ پیج‌ها فرستاده شد.\n"
-            "منتظر تأیید برگزارکننده بمانید — به‌محض تأیید، همین‌جا خبرش را می‌گیرید."
+            "✅ اسکرین همهٔ پیج‌ها رسید. <b>ثبت‌نام شما قطعی شد.</b>\n"
+            f"سر ساعت {when} ROOM ID و PASS همین‌جا برایتان می‌آید."
         )
         return False
     await state.set_state(SocialProofSG.screenshot)
@@ -1311,6 +1351,16 @@ async def social_start(cb: CallbackQuery, db: AsyncSession, db_user: User, state
         return
     if not join_window_open(e):
         await reply_callback(cb, "مهلت ثبت‌نام این کاستوم بسته شده است.")
+        return
+    # the button is already hidden until the channels are green, but a stale
+    # keyboard or an old message can still fire this
+    left = await _channels_left(db, db_user, e, cb.bot)
+    if left:
+        await reply_callback(
+            cb,
+            _channels_first_message(left),
+            reply_markup=checklist_kb(token, join_urls=_join_urls(left)),
+        )
         return
 
     async def _say(text: str) -> None:
@@ -1340,14 +1390,16 @@ async def social_screenshot(message: Message, db: AsyncSession, db_user: User, s
         await state.clear()
         await message.answer("این کاستوم دیگر در دسترس نیست.", reply_markup=await menu_for(db, db_user))
         return
-    try:
-        await register_user(db, user=db_user, event=e, bot=message.bot, source="social", accept_rules=True)
-    except AppError:
-        pass
-    except Exception:  # noqa: BLE001
-        log.exception("social_pre_register_failed")
-        await db.rollback()
+    left = await _channels_left(db, db_user, e, message.bot)
+    if left:
+        await state.clear()
+        await message.answer(
+            _channels_first_message(left),
+            reply_markup=checklist_kb(e.public_token, join_urls=_join_urls(left)),
+        )
+        return
     from app.models.social import EventSocialTask
+    from app.services.social import next_task_for
 
     task = None
     raw_task = data.get("task_id")
@@ -1356,6 +1408,11 @@ async def social_screenshot(message: Message, db: AsyncSession, db_user: User, s
             task = await db.get(EventSocialTask, UUID(raw_task))
         except ValueError:
             task = None
+    if task is None:
+        # a screenshot arriving without a page in state - a stale keyboard, or
+        # the state cleared under them. Pin it to the page they still owe
+        # rather than writing an orphan proof that satisfies nothing.
+        task, _, _ = await next_task_for(db, event=e, user=db_user)
     try:
         proof = await submit_proof(db, event=e, user=db_user, file_id=file_id, task=task)
         await db.commit()
@@ -1369,6 +1426,22 @@ async def social_screenshot(message: Message, db: AsyncSession, db_user: User, s
         await message.answer("ثبت اسکرین الان انجام نشد. چند ثانیه بعد دوباره تلاش کنید.")
         return
     await _notify_social_reviewers(message.bot, db, e, db_user, proof)
+    # the screenshot IS the requirement, so this is the moment the player
+    # becomes eligible - register them and push the room out now rather than
+    # leaving them to the next sweep
+    confirmed = False
+    try:
+        result = await register_user(
+            db, user=db_user, event=e, bot=message.bot, source="social", accept_rules=True
+        )
+        confirmed = result.registration.status == RegistrationStatus.CONFIRMED
+    except AppError:
+        confirmed = True  # already registered
+    except Exception:  # noqa: BLE001
+        log.exception("social_register_failed")
+        await db.rollback()
+    if not (confirmed and await queue_late_credentials(db, e)):
+        await db.commit()
 
     async def _say(text: str) -> None:
         await message.answer(text)
@@ -1376,7 +1449,7 @@ async def social_screenshot(message: Message, db: AsyncSession, db_user: User, s
     more = await _social_prompt(_say, db, e, db_user, state)
     if not more:
         await message.answer(
-            "تا زمان تأیید در کانال‌های اجباری بمانید تا سر ساعت ROOM ID و PASS برایتان بیاید.",
+            "تا ساعت کاستوم در کانال‌های اجباری بمانید — اگر خارج شوید مشخصات برایتان نمی‌آید.",
             reply_markup=await menu_for(db, db_user),
         )
 

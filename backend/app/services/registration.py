@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
-from app.core.enums import EventStatus, RegistrationStatus, RequirementStatus, RequirementType
+from app.core.enums import EventStatus, RegistrationStatus, RequirementStatus
 from app.core.errors import ConflictError, NotFoundError, ValidationAppError
 from app.core.logging import get_logger
 from app.models.event import Event
@@ -40,8 +40,6 @@ class RegisterResult:
     promoted_from_waitlist: bool = False
     waitlisted: bool = False
     checklist: list | None = None
-    #: every condition is met and only the organizer's screenshot review is left
-    awaiting_review: bool = False
 
 
 async def get_event_or_404(db: AsyncSession, event_id: UUID) -> Event:
@@ -116,20 +114,13 @@ async def register_user(
         for i in checklist.items
         if i.status in {RequirementStatus.NOT_DONE, RequirementStatus.EXPIRED} and i.requirement_type != "capacity"
     ]
-    # A screenshot still waiting for the organizer is not "done": confirming
-    # here would hand the ROOM ID / PASS to someone nobody has checked yet.
-    awaiting_review = [
-        i
-        for i in checklist.items
-        if i.status == RequirementStatus.PENDING_REVIEW
-        and i.requirement_type == RequirementType.SOCIAL_FOLLOW
-    ]
-    if hard_missing or awaiting_review:
+    # Nothing else holds a registration back. A follow screenshot counts the
+    # moment it is sent, so there is no review to wait for; a rejected one comes
+    # back as NOT_DONE and is caught by hard_missing above.
+    if hard_missing:
         holder.status = RegistrationStatus.PENDING
         await db.flush()
-        return RegisterResult(
-            holder, checklist=checklist.items, awaiting_review=bool(awaiting_review and not hard_missing)
-        )
+        return RegisterResult(holder, checklist=checklist.items)
 
     # Capacity lock
     locked = await db.scalar(select(Event).where(Event.id == event.id).with_for_update())

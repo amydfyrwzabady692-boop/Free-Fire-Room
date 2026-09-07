@@ -9,6 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import default_state
 from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardMarkup, Message
 from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import TelegramForbiddenError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -21,6 +22,8 @@ from app.bot.keyboards.common import (
     SUCCESS,
     add_required_channel_kb,
     creds_send_confirm_kb,
+    CHANNEL_POST_LABEL,
+    channel_post_kb,
     event_share_kb,
     ibtn,
     labeled,
@@ -29,7 +32,10 @@ from app.bot.keyboards.common import (
     payout_contact_kb,
     pick_date_kb,
     organizer_profile_kb,
+    post_confirm_kb,
     social_bulk_kb,
+    social_filter_row,
+    social_reject_all_kb,
     social_review_kb,
     start_confirm_kb,
     winner_claim_review_kb,
@@ -39,6 +45,7 @@ from app.bot.keyboards.common import (
 from app.locales.labels import event_status_fa, org_status_fa, reg_status_fa
 from app.locales.style import room_pair
 from app.bot.onboarding import ensure_onboarding, target_message
+from app.bot.paging import DEFAULT_PAGE_SIZE
 from app.bot.states.groups import (
     CredsWaitSG,
     EventWizardSG,
@@ -49,6 +56,7 @@ from app.bot.states.groups import (
 from app.core.config import get_settings
 from app.core.enums import (
     BanScope,
+    DeliveryStatus,
     EventStatus,
     OrganizerStatus,
     RegistrationStatus,
@@ -66,13 +74,17 @@ from app.models.registration import Registration
 from app.models.user import User
 from app.services.bans import is_banned
 from app.services.channels import connect_organizer_channel, list_owned_channels
+from app.services.audit import write_audit
 from app.services.credentials import queue_late_credentials
 from app.services.event_display import (
+    channel_public_label,
     default_custom_description,
     event_prize_text,
     event_public_load_options,
+    format_channel_post_caption,
     format_event_identity_block,
     format_event_list_label,
+    resolve_event_channel,
 )
 from app.services.events import (
     cancel_event,
@@ -84,6 +96,8 @@ from app.services.events import (
     waiting_live_credential_event,
 )
 from app.services.organizers import get_or_apply
+from app.services.posters import as_input_file, event_poster_bytes
+from app.services.telegram_ops import inspect_bot_admin, pace as _pace
 from app.services.social import (
     MAX_SOCIAL_TASKS,
     PLATFORM_FA,
@@ -91,8 +105,10 @@ from app.services.social import (
     normalize_social_url,
     pending_proof_count,
     pending_proofs_for_event,
+    proof_counts_for_event,
+    proof_status_label,
+    proofs_for_event,
     review_proof,
-    social_gate_ok,
     social_required,
     task_label,
 )
@@ -122,6 +138,14 @@ log = get_logger(__name__)
 
 def _short_label(e: Event, limit: int = 50) -> str:
     return ((e.prize_summary or e.title or "کاستوم").strip())[:limit]
+
+
+def _person_short(user: User | None, limit: int = 22) -> str:
+    """A name that fits on a button next to "دیدن اسکرین N"."""
+    if user is None:
+        return "بازیکن"
+    name = (user.first_name or "").strip() or (user.username or "").strip()
+    return (name or str(user.telegram_id))[:limit]
 
 
 DEFAULT_RULES = (
@@ -554,12 +578,14 @@ async def bot_added_as_channel_admin(event: ChatMemberUpdated, db: AsyncSession,
 
 PRIZE_STEP_TEXT = (
     "💎 <b>جایزه این کاستوم چیست؟</b>\n\n"
-    "این متن هم روی دکمهٔ کاستوم در فهرست دیده می‌شود و هم داخل کارت آن، "
-    "پس کوتاه و روشن بنویسید.\n\n"
-    "نمونه:\n"
-    "• ۱۰۰۰ الماس\n"
-    "• نفر اول ۵۰ الماس، نفر دوم اسکین\n"
-    "• ۵۰ هزار تومان کارت‌به‌کارت"
+    "این متن هم روی دکمهٔ کاستوم در فهرست دیده می‌شود، هم داخل کارت آن، "
+    "و هم روی بنری که در کانال می‌گذارید.\n\n"
+    "💡 <b>هر خط یک نفر.</b> اگر برای نفر دوم و سوم هم جایزه دارید، هرکدام را "
+    "در یک خط جدا بنویسید تا روی بنر «نفر اول / نفر دوم / نفر سوم» بشود.\n\n"
+    "نمونهٔ یک‌خطی:\n"
+    "<code>واریز یک میلیون تومان به کارت</code>\n\n"
+    "نمونهٔ چندخطی:\n"
+    "<code>واریز یک میلیون به کارت\n۵۰۰ هزار تومان\n۱۰۰۰ الماس</code>"
 )
 
 
@@ -912,7 +938,8 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
             "👥 ظرفیت: بدون محدودیت\n"
             f"{social_line}{payout_line}\n"
             f"<b>لینک این کاستوم:</b>\n{link}\n\n"
-            "📌 لینک را در کانال خودتان بگذارید تا بازیکن‌ها وارد شوند.\n\n"
+            "🖼 <b>بنر آماده است:</b> از «انتشار بنر در کانال» بزنید تا ربات خودش پست را "
+            f"با دکمهٔ «{CHANNEL_POST_LABEL}» در کانالتان بگذارد.\n\n"
             "🆔 <b>قدم بعدی:</b> از «ارسال ROOM ID / PASS» می‌توانید <b>همین حالا</b> مشخصات اتاق را ثبت کنید؛ "
             "ربات سر ساعت خودکار برای واجدین شرایط می‌فرستد و نتیجه را به شما خبر می‌دهد.\n\n"
             "⏹ <b>مهم:</b> این کاستوم تا وقتی خودتان دکمهٔ «کاستوم شروع شد» را نزنید "
@@ -922,13 +949,28 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
             f"اگر یادتان رفت، {get_settings().auto_archive_minutes} دقیقه بعد از ساعت شروع خودکار بسته می‌شود.\n\n"
             "🔔 ربات یک ساعت قبل و ده دقیقه قبل از شروع، این کاستوم را به کاربران خبر می‌دهد."
         )
-        banner = data.get("banner_file_id")
-        if banner:
-            try:
-                await message.answer_photo(banner)
-            except Exception:
-                pass
+        # show the real banner, exactly as the channel would get it, rather
+        # than the bare photo with no caption and no button
+        try:
+            png, caption, deep = await _banner_parts(db, event)
+            await _send_banner(message.bot, message.chat.id, event, png, caption, deep)
+        except Exception:  # noqa: BLE001
+            log.exception("publish_banner_preview_failed", event_id=str(event.id))
         await message.answer(details, reply_markup=event_share_kb(link))
+        await message.answer(
+            "می‌خواهید همین بنر را در کانالتان بگذارم؟",
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        ibtn(
+                            "انتشار بنر در کانال",
+                            callback_data=f"orgp:post:{event.public_token}",
+                            style=SUCCESS,
+                        )
+                    ]
+                ]
+            ),
+        )
         if event.status == EventStatus.PUBLISHED:
             # everyone hears about it now, not only when a reminder fires
             await db.commit()
@@ -991,19 +1033,20 @@ async def org_mine(cb: CallbackQuery, db: AsyncSession, db_user: User):
             and (credentials_window_open(e) or creds_were_provided(creds))
         )
         archived = is_archived(e)
-        pending_social = await pending_proof_count(db, e.id) if social_required(e) else 0
+        counts = await proof_counts_for_event(db, e.id) if social_required(e) else {}
         buttons = []
         if can_send:
             buttons.append([ibtn("ارسال ROOM ID / PASS", callback_data=f"orgp:creds:{e.public_token}", style=SUCCESS)])
-        if pending_social:
+        # the archive stays reachable after everything is settled - it is a
+        # place to look, not a queue that empties
+        if counts.get("total"):
+            label = f"اسکرین‌های فالو ({counts['total']})"
+            if counts.get("pending"):
+                label += f" — {counts['pending']} بررسی‌نشده"
+            elif counts.get("rejected"):
+                label += f" — {counts['rejected']} رد شده"
             buttons.append(
-                [
-                    ibtn(
-                        f"اسکرین فالو در انتظار ({pending_social})",
-                        callback_data=f"orgp:soc:{e.public_token}",
-                        style=SUCCESS,
-                    )
-                ]
+                [ibtn(label, callback_data=f"orgp:soc:{e.public_token}", style=PRIMARY)]
             )
         buttons.append(
             [
@@ -1011,6 +1054,10 @@ async def org_mine(cb: CallbackQuery, db: AsyncSession, db_user: User):
                 ibtn("قیف و آمار", callback_data=f"orgp:fun:{e.public_token}", style=PRIMARY),
             ]
         )
+        if e.status not in {EventStatus.CANCELLED, EventStatus.REJECTED}:
+            buttons.append(
+                [ibtn("انتشار بنر در کانال", callback_data=f"orgp:post:{e.public_token}", style=SUCCESS)]
+            )
         buttons.append(
             [
                 ibtn("خروجی شرکت‌کننده‌ها", callback_data=f"orgp:csv:{e.public_token}", style=PRIMARY),
@@ -1723,6 +1770,14 @@ async def org_mark_started(cb: CallbackQuery, db: AsyncSession, db_user: User):
 # ---------------------------------------------------------------- follow screenshots
 
 
+#: which archive filter each callback letter means
+SOCIAL_FILTERS = {
+    "a": None,
+    "r": [SocialProofStatus.REJECTED],
+    "p": [SocialProofStatus.PENDING],
+}
+
+
 def _social_caption(event: Event, proof) -> str:
     page = proof.task.url if proof.task else (event.social_url or "—")
     label = task_label(proof.task)
@@ -1730,52 +1785,212 @@ def _social_caption(event: Event, proof) -> str:
         "📸 <b>اسکرین فالو</b>\n"
         f"کاستوم: {esc(_short_label(event))}\n"
         f"بازیکن: {format_person(proof.user)}\n"
-        f"پیج ({esc(label)}): {esc(page)}\n\n"
-        "اگر درست است «تأیید» را بزنید. وقتی اسکرین همهٔ پیج‌ها تأیید شد، "
-        "ثبت‌نامش قطعی می‌شود و ROOM ID / PASS برایش می‌رود."
+        f"پیج ({esc(label)}): {esc(page)}\n"
+        f"وضعیت: {proof_status_label(proof.status)}\n\n"
+        "ثبت‌نام این بازیکن انجام شده و ROOM ID / PASS برایش می‌رود. "
+        "فقط اگر این اسکرین بی‌ربط یا جعلی است «رد» را بزنید."
+    )
+
+
+def _social_row(proof) -> str:
+    page = proof.task.url if proof.task else "—"
+    return (
+        f"{format_person(proof.user)} — {esc(task_label(proof.task))}\n"
+        f"<code>{esc(page[:60])}</code> · {proof_status_label(proof.status)}"
+    )
+
+
+async def _audit_event(db: AsyncSession, db_user: User, token: str) -> Event | None:
+    """The organizer's own custom, or any custom when the caller is an admin."""
+    e = await _own_event(db, db_user, token)
+    if e:
+        return e
+    if not await is_active_admin(db, db_user):
+        return None
+    return await db.scalar(
+        select(Event).where(Event.public_token == token).options(*event_public_load_options())
     )
 
 
 @router.callback_query(F.data.startswith("orgp:soc:"))
 async def org_social_queue(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    """Browse every screenshot for one custom - not a queue, an archive.
+
+    Nothing here blocks a player: they are registered the moment they send a
+    screenshot. This is where the organizer comes to look, and to reject the
+    one that turns out to show somebody else's page.
+    """
     if await _blocked_organize(db, db_user, cb):
         return
-    token = cb.data.split(":", 2)[-1]
-    e = await _own_event(db, db_user, token)
+    parts = cb.data.split(":")
+    token = parts[2] if len(parts) > 2 else ""
+    index = 0
+    if len(parts) > 3:
+        try:
+            index = max(0, int(parts[3]))
+        except ValueError:
+            index = 0
+    kind = parts[4] if len(parts) > 4 and parts[4] in SOCIAL_FILTERS else "a"
+    e = await _audit_event(db, db_user, token)
     if not e:
         await cb.answer("یافت نشد", show_alert=True)
         return
-    total = await pending_proof_count(db, e.id)
-    rows = await pending_proofs_for_event(db, e.id, limit=10)
+    counts = await proof_counts_for_event(db, e.id)
+    shown = {"a": counts["total"], "r": counts["rejected"], "p": counts["pending"]}[kind]
+    pages = max(1, (shown + DEFAULT_PAGE_SIZE - 1) // DEFAULT_PAGE_SIZE)
+    index = min(index, pages - 1)
+    rows = await proofs_for_event(
+        db,
+        e.id,
+        statuses=SOCIAL_FILTERS[kind],
+        limit=DEFAULT_PAGE_SIZE,
+        offset=index * DEFAULT_PAGE_SIZE,
+    )
+    head = (
+        f"📸 <b>اسکرین‌های فالو</b> — {esc(_short_label(e, 40))}\n"
+        f"همه: {counts['total']} · بررسی‌نشده: {counts['pending']} · رد شده: {counts['rejected']}\n"
+        "برای ارسال ROOM ID / PASS لازم نیست چیزی را تأیید کنید — "
+        "این‌جا فقط برای دیدن و رد کردن اسکرین اشتباه است.\n"
+        "——————————————\n"
+    )
     if not rows:
-        await cb.message.answer("اسکرین در انتظاری نیست.", reply_markup=organizer_home_kb())
-        await cb.answer()
-        return
-    more = f"\n({len(rows)} تای اول را می‌بینید؛ بقیه بعد از بررسی همین‌ها می‌آید.)" if total > len(rows) else ""
-    await cb.message.answer(
-        f"📸 <b>اسکرین‌های فالو در انتظار</b> — {total} مورد{more}\n"
-        "می‌توانید دانه‌دانه تأیید/رد کنید، یا از دکمه‌های پایین همه را یک‌جا.",
-        reply_markup=social_bulk_kb(e.public_token, total),
-    )
-    for proof in rows:
-        caption = _social_caption(e, proof)
-        try:
-            await cb.message.answer_photo(
-                proof.file_id, caption=caption[:1024], reply_markup=social_review_kb(str(proof.id))
+        head += (
+            "هنوز اسکرینی ثبت نشده است."
+            if not counts["total"]
+            else "در این دسته چیزی نیست."
+        )
+    else:
+        first = index * DEFAULT_PAGE_SIZE + 1
+        head += f"({first} تا {first + len(rows) - 1} از {shown})\n\n"
+        head += "\n\n".join(_social_row(p) for p in rows)
+    buttons = [
+        [
+            ibtn(
+                f"دیدن اسکرین {i + 1}: {_person_short(p.user)}",
+                callback_data=f"socv:{p.id.hex}",
+                style=PRIMARY,
             )
-        except Exception:  # noqa: BLE001
-            await cb.message.answer(
-                caption + "\n\n<i>اسکرین قابل نمایش نیست.</i>",
-                reply_markup=social_review_kb(str(proof.id)),
-            )
-    await cb.message.answer(
-        "بعد از بررسی، از دکمه‌های زیر استفاده کنید:",
-        reply_markup=social_bulk_kb(e.public_token, total),
-    )
+        ]
+        for i, p in enumerate(rows)
+    ]
+    buttons.append(social_filter_row(e.public_token, counts, kind))
+    nav = []
+    if index > 0:
+        nav.append(
+            ibtn("قبلی", callback_data=f"orgp:soc:{token}:{index - 1}:{kind}", style=PRIMARY)
+        )
+    if index < pages - 1:
+        nav.append(
+            ibtn("بعدی", callback_data=f"orgp:soc:{token}:{index + 1}:{kind}", style=PRIMARY)
+        )
+    if nav:
+        buttons.append(nav)
+    for row in social_bulk_kb(e.public_token, counts["pending"]).inline_keyboard:
+        buttons.append(row)
+    await replace_callback_view(cb, head, inline=InlineKeyboardMarkup(inline_keyboard=buttons))
     await cb.answer()
 
 
+@router.callback_query(F.data.startswith("socv:"))
+async def org_social_view(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    """One screenshot, full size, with the reject button under it."""
+    from app.models.social import SocialProof
+
+    raw = cb.data.split(":", 1)[-1]
+    try:
+        proof_id = UUID(hex=raw)
+    except ValueError:
+        await cb.answer("نامعتبر", show_alert=True)
+        return
+    proof = await db.scalar(
+        select(SocialProof)
+        .where(SocialProof.id == proof_id)
+        .options(selectinload(SocialProof.user), selectinload(SocialProof.task))
+    )
+    if not proof:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    event = await db.scalar(
+        select(Event).where(Event.id == proof.event_id).options(*event_public_load_options())
+    )
+    if not event or not await _may_review_proof(db, db_user, event):
+        await cb.answer("این اسکرین برای کاستوم شما نیست.", show_alert=True)
+        return
+    caption = _social_caption(event, proof)
+    kb = social_review_kb(
+        str(proof.id), status=proof.status, back=f"orgp:soc:{event.public_token}"
+    )
+    try:
+        await cb.message.answer_photo(proof.file_id, caption=caption[:1024], reply_markup=kb)
+    except Exception:  # noqa: BLE001
+        await cb.message.answer(
+            caption + "\n\n<i>اسکرین قابل نمایش نیست.</i>", reply_markup=kb
+        )
+    await cb.answer()
+
+
+async def _may_review_proof(db: AsyncSession, db_user: User, event: Event) -> bool:
+    if event.organizer and event.organizer.user_id == db_user.id:
+        return True
+    return await is_active_admin(db, db_user)
+
+
+async def _void_registration(db: AsyncSession, event: Event, player: User) -> bool:
+    """Take back a seat won with a screenshot that turned out to be junk.
+
+    Returns True when the player was actually holding a confirmed seat. The
+    decrement is guarded the same way ``deliver_one`` guards its own demotion,
+    so a double tap cannot drive ``confirmed_count`` negative.
+    """
+    reg = await db.scalar(
+        select(Registration).where(
+            Registration.event_id == event.id, Registration.user_id == player.id
+        )
+    )
+    if not reg or reg.status != RegistrationStatus.CONFIRMED:
+        return False
+    reg.status = RegistrationStatus.INELIGIBLE
+    reg.ineligible_reason = "social_rejected"
+    if event.confirmed_count > 0:
+        event.confirmed_count -= 1
+    if event.status == EventStatus.FULL:
+        event.status = EventStatus.PUBLISHED
+    await db.flush()
+    return True
+
+
+async def _creds_already_sent(db: AsyncSession, event: Event, player: User) -> bool:
+    row = await db.scalar(
+        select(Delivery).where(
+            Delivery.event_id == event.id,
+            Delivery.user_id == player.id,
+            Delivery.kind == "room_credentials",
+            Delivery.status == DeliveryStatus.SENT,
+        )
+    )
+    return row is not None
+
+
+def _reject_note(event: Event, *, had_creds: bool) -> str:
+    note = (
+        f"❌ اسکرین فالو شما برای کاستوم «{esc(_short_label(event))}» رد شد.\n"
+        "برگزارکننده گفته این اسکرین درست نیست."
+    )
+    if had_creds:
+        note += (
+            "\n\n⚠️ ورود شما به این کاستوم <b>باطل شد</b> و ROOM ID / PASS "
+            "قبلی به کارتان نمی‌آید."
+        )
+    note += "\n\nاسکرین درست را از کارت کاستوم دوباره بفرستید تا ثبت‌نامتان برگردد."
+    return note
+
+
 async def _resolve_social(cb: CallbackQuery, db: AsyncSession, db_user: User, *, approved: bool) -> None:
+    """Reject a screenshot, or undo a rejection that was a mistake.
+
+    There is nothing to approve any more - the registration was final when the
+    screenshot arrived. What this does is take a seat back, and give it back.
+    """
     from app.models.social import SocialProof
 
     raw = cb.data.split(":", 1)[-1]
@@ -1794,54 +2009,53 @@ async def _resolve_social(cb: CallbackQuery, db: AsyncSession, db_user: User, *,
     if not event:
         await cb.answer("کاستوم یافت نشد", show_alert=True)
         return
-    allowed = bool(event.organizer and event.organizer.user_id == db_user.id)
-    if not allowed:
-            allowed = await is_active_admin(db, db_user)
-    if not allowed:
+    if not await _may_review_proof(db, db_user, event):
         await cb.answer("این اسکرین برای کاستوم شما نیست.", show_alert=True)
         return
-    if proof.status != SocialProofStatus.PENDING:
-        await cb.answer("قبلاً بررسی شده است.", show_alert=True)
+    target = SocialProofStatus.APPROVED if approved else SocialProofStatus.REJECTED
+    if proof.status == target:
+        await cb.answer("قبلاً همین‌طور بود.", show_alert=True)
         return
     await review_proof(db, proof, approved=approved, reviewer_id=db_user.id)
     player = await db.get(User, proof.user_id)
+    had_creds = False
     confirmed = False
-    if approved and player:
-        try:
-            result = await register_user(
-                db, user=player, event=event, bot=cb.bot, source="social", accept_rules=True
-            )
-            confirmed = result.registration.status == RegistrationStatus.CONFIRMED
-        except AppError:
-            confirmed = True  # already registered
-        except Exception:  # noqa: BLE001
-            confirmed = False
-    # approving is the moment this player becomes eligible, so the room has
-    # to go out now - the sweep alone would leave them waiting
-    if confirmed and not await queue_late_credentials(db, event):
-        await db.commit()
-    elif not confirmed:
+    if player is not None:
+        if approved:
+            # the rejection is lifted: they qualify again, so put the room back
+            # on its way instead of leaving them to the next sweep
+            try:
+                result = await register_user(
+                    db, user=player, event=event, bot=cb.bot, source="social", accept_rules=True
+                )
+                confirmed = result.registration.status == RegistrationStatus.CONFIRMED
+            except AppError:
+                confirmed = True  # already registered
+            except Exception:  # noqa: BLE001
+                log.exception("social_undo_register_failed", user_id=str(player.id))
+        else:
+            had_creds = await _creds_already_sent(db, event, player)
+            await _void_registration(db, event, player)
+    if not (confirmed and await queue_late_credentials(db, event)):
         await db.commit()
     if player and not player.is_bot_blocked:
         if approved:
             note = (
-                "✅ اسکرین فالو شما تأیید شد و ثبت‌نامتان در کاستوم "
-                f"«{esc(_short_label(event))}» قطعی شد.\n"
-                "سر ساعت ROOM ID و PASS برایتان می‌آید — فقط تا آن لحظه در کانال‌ها بمانید."
-                if confirmed
-                else "✅ اسکرین فالو شما تأیید شد. برای قطعی شدن ثبت‌نام، دکمهٔ «عضو شدم» را در کارت کاستوم بزنید."
+                f"✅ اسکرین فالو شما در کاستوم «{esc(_short_label(event))}» قبول شد و "
+                "ثبت‌نامتان برگشت.\nسر ساعت ROOM ID و PASS برایتان می‌آید — تا آن لحظه در کانال‌ها بمانید."
             )
         else:
-            note = (
-                f"❌ اسکرین فالو شما برای کاستوم «{esc(_short_label(event))}» تأیید نشد.\n"
-                "دوباره از کارت کاستوم اسکرین درست را بفرستید."
-            )
+            note = _reject_note(event, had_creds=had_creds)
         try:
             await cb.bot.send_message(player.telegram_id, note)
         except Exception:  # noqa: BLE001
             pass
-    await cb.answer("تأیید شد" if approved else "رد شد")
-    await cb.message.answer("✅ ثبت‌نام این بازیکن قطعی شد." if approved else "❌ رد شد.")
+    await cb.answer("برگشت داده شد" if approved else "رد شد")
+    await cb.message.answer(
+        "✅ ثبت‌نام این بازیکن برگشت."
+        if approved
+        else "❌ رد شد. تا اسکرین درست نفرستد ROOM ID / PASS برایش نمی‌رود."
+    )
 
 
 @router.callback_query(F.data.startswith("socok:"))
@@ -2103,93 +2317,115 @@ async def org_payout_shortcut(cb: CallbackQuery, state: FSMContext, db: AsyncSes
 # ---------------------------------------------------------------- bulk follow review
 
 
-async def _notify_social_result(bot, db: AsyncSession, event: Event, player: User, approved: bool) -> None:
-    if not player or player.is_bot_blocked:
-        return
-    if approved:
-        ok = await social_gate_ok(db, event, player)
-        note = (
-            "✅ اسکرین‌های فالو شما تأیید شد و ثبت‌نامتان در کاستوم "
-            f"«{esc(_short_label(event))}» قطعی شد.\n"
-            "سر ساعت ROOM ID و PASS برایتان می‌آید — فقط تا آن لحظه در کانال‌ها بمانید."
-            if ok
-            else "✅ این اسکرین تأیید شد. هنوز چند پیج مانده؛ اسکرین بقیه را هم بفرستید."
-        )
-    else:
-        note = (
-            f"❌ اسکرین فالو شما برای کاستوم «{esc(_short_label(event))}» تأیید نشد.\n"
-            "دوباره از کارت کاستوم اسکرین درست را بفرستید."
-        )
-    try:
-        await bot.send_message(player.telegram_id, note)
-    except Exception:  # noqa: BLE001
-        pass
-
-
-async def _bulk_review_social(cb: CallbackQuery, db: AsyncSession, db_user: User, *, approved: bool) -> None:
-    """Settle every pending screenshot for one custom in a single tap."""
-    if await _blocked_organize(db, db_user, cb):
-        return
-    token = cb.data.split(":", 2)[-1]
-    e = await _own_event(db, db_user, token)
-    if not e:
-        allowed = await is_active_admin(db, db_user)
-        if not allowed:
-            await cb.answer("یافت نشد", show_alert=True)
-            return
-        e = await db.scalar(
-            select(Event).where(Event.public_token == token).options(*event_public_load_options())
-        )
-        if not e:
-            await cb.answer("یافت نشد", show_alert=True)
-            return
-    rows = await pending_proofs_for_event(db, e.id, limit=200)
-    if not rows:
-        await cb.answer("اسکرین در انتظاری نیست.", show_alert=True)
-        return
-    players: dict = {}
-    for proof in rows:
-        await review_proof(db, proof, approved=approved, reviewer_id=db_user.id)
-        players[proof.user_id] = proof.user
-    confirmed = 0
-    if approved:
-        for player in players.values():
-            if player is None:
-                continue
-            try:
-                result = await register_user(
-                    db, user=player, event=e, bot=cb.bot, source="social", accept_rules=True
-                )
-                if result.registration.status == RegistrationStatus.CONFIRMED:
-                    confirmed += 1
-            except AppError:
-                confirmed += 1  # already registered
-            except Exception:  # noqa: BLE001
-                log.exception("bulk_social_register_failed", user_id=str(player.id))
-    # one send for the whole batch, not one per player
-    if confirmed and await queue_late_credentials(db, e):
-        pass
-    else:
-        await db.commit()
-    for player in players.values():
-        await _notify_social_result(cb.bot, db, e, player, approved)
-    await cb.answer("انجام شد")
-    await cb.message.answer(
-        f"✅ {len(rows)} اسکرین تأیید شد و {confirmed} ثبت‌نام قطعی شد."
-        if approved
-        else f"❌ {len(rows)} اسکرین رد شد و به بازیکن‌ها اطلاع داده شد.",
-        reply_markup=organizer_home_kb(),
-    )
+#: how many screenshots one bulk tap may touch. A reject loop has to DM every
+#: player it demotes, and Telegram will not take hundreds of messages from one
+#: callback - the leftovers stay for the next tap.
+BULK_SOCIAL_LIMIT = 60
 
 
 @router.callback_query(F.data.startswith("socall:ok:"))
 async def org_social_all_ok(cb: CallbackQuery, db: AsyncSession, db_user: User):
-    await _bulk_review_social(cb, db, db_user, approved=True)
+    """Mark the unreviewed ones as looked-at. Changes nothing about eligibility.
+
+    This is the honest bulk action now: those players are already registered
+    and already getting the room, so all this clears is the badge.
+    """
+    if await _blocked_organize(db, db_user, cb):
+        return
+    token = cb.data.split(":", 2)[-1]
+    e = await _audit_event(db, db_user, token)
+    if not e:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    rows = await pending_proofs_for_event(db, e.id, limit=BULK_SOCIAL_LIMIT)
+    if not rows:
+        await cb.answer("چیزی برای علامت زدن نیست.", show_alert=True)
+        return
+    for proof in rows:
+        await review_proof(db, proof, approved=True, reviewer_id=db_user.id)
+    await db.commit()
+    left = await pending_proof_count(db, e.id)
+    tail = f"\n{left} تای دیگر مانده — دوباره بزنید." if left else ""
+    await cb.answer("انجام شد")
+    await cb.message.answer(
+        f"✅ {len(rows)} اسکرین «بررسی‌شده» علامت خورد.{tail}\n"
+        "چیزی برای بازیکن‌ها عوض نشد — آن‌ها از قبل ثبت‌نام بودند.",
+        reply_markup=organizer_home_kb(),
+    )
+
+
+@router.callback_query(F.data.startswith("socall:ask:"))
+async def org_social_all_ask(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    """Rejecting everyone voids a whole custom, so it never fires from one tap."""
+    if await _blocked_organize(db, db_user, cb):
+        return
+    token = cb.data.split(":", 2)[-1]
+    e = await _audit_event(db, db_user, token)
+    if not e:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    counts = await proof_counts_for_event(db, e.id)
+    live = counts["total"] - counts["rejected"]
+    if live <= 0:
+        await cb.answer("همه از قبل رد شده‌اند.", show_alert=True)
+        return
+    await cb.message.answer(
+        f"⚠️ <b>رد کردن همهٔ اسکرین‌ها</b>\n"
+        f"کاستوم: {esc(_short_label(e, 40))}\n\n"
+        f"با این کار ثبت‌نام <b>{live} نفر</b> باطل می‌شود و تا اسکرین درست نفرستند "
+        "ROOM ID / PASS برایشان نمی‌رود. به همه هم خبر داده می‌شود.\n\n"
+        "مطمئنید؟",
+        reply_markup=social_reject_all_kb(e.public_token, live),
+    )
+    await cb.answer()
 
 
 @router.callback_query(F.data.startswith("socall:no:"))
 async def org_social_all_no(cb: CallbackQuery, db: AsyncSession, db_user: User):
-    await _bulk_review_social(cb, db, db_user, approved=False)
+    """Void every live screenshot in one custom, after the confirm screen."""
+    if await _blocked_organize(db, db_user, cb):
+        return
+    token = cb.data.split(":", 2)[-1]
+    e = await _audit_event(db, db_user, token)
+    if not e:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    rows = await proofs_for_event(
+        db,
+        e.id,
+        statuses=[SocialProofStatus.PENDING, SocialProofStatus.APPROVED],
+        limit=BULK_SOCIAL_LIMIT,
+    )
+    if not rows:
+        await cb.answer("چیزی برای رد کردن نیست.", show_alert=True)
+        return
+    players: dict = {}
+    for proof in rows:
+        await review_proof(db, proof, approved=False, reviewer_id=db_user.id)
+        players[proof.user_id] = proof.user
+    voided = 0
+    for player in players.values():
+        if player is None:
+            continue
+        if await _void_registration(db, e, player):
+            voided += 1
+    await db.commit()
+    for player in players.values():
+        if not player or player.is_bot_blocked:
+            continue
+        try:
+            await cb.bot.send_message(player.telegram_id, _reject_note(e, had_creds=False))
+        except Exception:  # noqa: BLE001
+            pass
+        await _pace()
+    left = await proof_counts_for_event(db, e.id)
+    remaining = left["total"] - left["rejected"]
+    tail = f"\n{remaining} تای دیگر مانده — دوباره بزنید." if remaining > 0 else ""
+    await cb.answer("انجام شد")
+    await cb.message.answer(
+        f"❌ {len(rows)} اسکرین رد شد و ثبت‌نام {voided} نفر باطل شد.{tail}",
+        reply_markup=organizer_home_kb(),
+    )
 
 
 # ---------------------------------------------------------------- start menu
@@ -2472,3 +2708,135 @@ async def org_my_profile(cb: CallbackQuery, db: AsyncSession, db_user: User):
 
     await _profile_view(_say, db, org, own=True, back="orgp:home")
     await cb.answer()
+
+
+# ---------------------------------------------------------------- channel banner
+
+
+async def _banner_parts(db: AsyncSession, event: Event) -> tuple[bytes | None, str, str]:
+    """(poster png, caption, deep link) for one custom.
+
+    The organizer's own uploaded photo wins when they gave one - it is their
+    art. Otherwise the bot draws the banner itself, which is the whole point of
+    the poster renderer.
+    """
+    pages = await list_social_tasks(db, event.id)
+    caption = format_channel_post_caption(event, social_pages=len(pages))
+    link = event_deep_link(event.public_token)
+    if event.banner_file_id:
+        return None, caption, link
+    try:
+        png = event_poster_bytes(event, social_pages=len(pages))
+    except Exception:  # noqa: BLE001
+        log.exception("poster_render_failed", event_id=str(event.id))
+        png = None
+    return png, caption, link
+
+
+async def _send_banner(bot, chat_id, event: Event, png, caption: str, link: str):
+    """One photo + caption + the entry button, wherever it is going."""
+    photo = event.banner_file_id or (as_input_file(png) if png else None)
+    kb = channel_post_kb(link)
+    if photo is None:
+        return await bot.send_message(chat_id, caption, reply_markup=kb)
+    return await bot.send_photo(chat_id, photo, caption=caption, reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("orgp:post:"))
+async def org_post_preview(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    """Show the organizer exactly what their channel will get, then ask."""
+    if await _blocked_organize(db, db_user, cb):
+        return
+    token = cb.data.split(":", 2)[-1]
+    e = await _own_event(db, db_user, token)
+    if not e:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    png, caption, link = await _banner_parts(db, e)
+    try:
+        await _send_banner(cb.bot, cb.message.chat.id, e, png, caption, link)
+    except Exception:  # noqa: BLE001
+        log.exception("banner_preview_failed", event_id=str(e.id))
+        await cb.message.answer("ساخت بنر الان انجام نشد. چند ثانیه بعد دوباره بزنید.")
+        await cb.answer()
+        return
+    channel = resolve_event_channel(e)
+    if channel is None:
+        await cb.message.answer(
+            "این بالا همان چیزی است که در کانال منتشر می‌شود.\n\n"
+            "⚠️ کانالی به این کاستوم وصل نیست. از «کانال‌های من» ربات را در کانالتان ادمین کنید.",
+            reply_markup=organizer_home_kb(),
+        )
+        await cb.answer()
+        return
+    await cb.message.answer(
+        "این بالا همان چیزی است که در کانال منتشر می‌شود — با دکمهٔ "
+        f"«{CHANNEL_POST_LABEL}» که مستقیم بازیکن را داخل ربات می‌آورد.\n\n"
+        f"📢 مقصد: <b>{esc(channel_public_label(channel))}</b>",
+        reply_markup=post_confirm_kb(e.public_token, channel_public_label(channel)),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("orgp:pub:"))
+async def org_post_publish(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    if await _blocked_organize(db, db_user, cb):
+        return
+    token = cb.data.split(":", 2)[-1]
+    e = await _own_event(db, db_user, token)
+    if not e:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    channel = resolve_event_channel(e)
+    if channel is None:
+        await cb.answer("کانالی به این کاستوم وصل نیست.", show_alert=True)
+        return
+    # bot_is_admin is written once at connect time and can be hours stale, so
+    # ask Telegram again rather than failing in front of the organizer
+    try:
+        check = await inspect_bot_admin(cb.bot, channel.telegram_chat_id)
+    except Exception:  # noqa: BLE001
+        check = None
+    if check is not None and not check.is_admin:
+        await cb.message.answer(
+            "⚠️ ربات الان ادمین این کانال نیست، پس نمی‌تواند پست بگذارد.\n"
+            "اول ربات را ادمین کنید و دوباره بزنید.",
+            reply_markup=organizer_home_kb(),
+        )
+        await cb.answer()
+        return
+    png, caption, link = await _banner_parts(db, e)
+    try:
+        msg = await _send_banner(cb.bot, channel.telegram_chat_id, e, png, caption, link)
+    except TelegramForbiddenError:
+        await cb.message.answer(
+            "⚠️ تلگرام اجازهٔ ارسال در این کانال را نداد. ربات باید ادمین با دسترسی "
+            "«ارسال پیام» باشد.",
+            reply_markup=organizer_home_kb(),
+        )
+        await cb.answer()
+        return
+    except Exception:  # noqa: BLE001
+        log.exception("banner_publish_failed", event_id=str(e.id))
+        await cb.message.answer(
+            "انتشار در کانال انجام نشد. چند ثانیه بعد دوباره تلاش کنید.",
+            reply_markup=organizer_home_kb(),
+        )
+        await cb.answer()
+        return
+    await write_audit(
+        db,
+        action="event_banner_posted",
+        entity_type="event",
+        entity_id=e.id,
+        actor_id=db_user.id,
+        extra={"channel_id": str(channel.id)},
+    )
+    await db.commit()
+    where = f"https://t.me/{channel.username}/{msg.message_id}" if channel.username else ""
+    await cb.answer("منتشر شد")
+    await cb.message.answer(
+        f"✅ بنر در <b>{esc(channel_public_label(channel))}</b> منتشر شد."
+        + (f"\n{where}" if where else ""),
+        reply_markup=organizer_home_kb(),
+    )

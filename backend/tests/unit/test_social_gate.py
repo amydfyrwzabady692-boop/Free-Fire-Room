@@ -50,7 +50,8 @@ def test_social_not_required_by_default(db):
     assert social_gate_ok_sync(db, event, player) is True
 
 
-def test_social_gate_blocks_delivery_until_approved(db):
+def test_sending_the_screenshot_opens_the_gate_and_a_rejection_closes_it(db):
+    """Sending is the requirement. Only a rejection takes the room back."""
     host = make_user(db, 9010)
     org = make_organizer(db, host)
     event = make_event(db, org)
@@ -79,11 +80,11 @@ def test_social_gate_blocks_delivery_until_approved(db):
     )
     db.add(proof)
     db.flush()
-    assert social_gate_ok_sync(db, event, player) is False
+    assert social_gate_ok_sync(db, event, player) is True, "sending it is enough"
 
     proof.status = SocialProofStatus.REJECTED
     db.flush()
-    assert social_gate_ok_sync(db, event, player) is False
+    assert social_gate_ok_sync(db, event, player) is False, "a rejection voids the entry"
 
     proof.status = SocialProofStatus.APPROVED
     db.flush()
@@ -136,37 +137,47 @@ async def test_social_requirement_is_the_last_item(async_db):
     assert checklist.items[-1].status == RequirementStatus.NOT_DONE
 
 
-async def test_pending_review_keeps_the_registration_out_of_confirmed(async_db):
+async def test_the_screenshot_confirms_the_registration_with_nobody_approving(async_db):
     event, player = await _seed_async(async_db, social=True)
 
     result = await register_user(async_db, user=player, event=event, bot=None, accept_rules=True)
     assert result.registration.status == RegistrationStatus.PENDING
+    assert event.confirmed_count == 0
 
     from app.services.social import list_tasks
 
     task = (await list_tasks(async_db, event.id))[0]
     await submit_proof(async_db, event=event, user=player, file_id="shot", task=task)
-    result = await register_user(async_db, user=player, event=event, bot=None, accept_rules=True)
-    assert result.registration.status == RegistrationStatus.PENDING
-    assert result.awaiting_review is True
-    assert event.confirmed_count == 0
-
-    from app.services.social import get_proof
-
-    row = await get_proof(async_db, event_id=event.id, user_id=player.id, task_id=task.id)
-    row.status = SocialProofStatus.APPROVED
-    await async_db.flush()
 
     result = await register_user(async_db, user=player, event=event, bot=None, accept_rules=True)
     assert result.registration.status == RegistrationStatus.CONFIRMED
     assert event.confirmed_count == 1
 
 
+async def test_a_rejection_takes_the_registration_back(async_db):
+    event, player = await _seed_async(async_db, social=True)
+    from app.services.social import get_proof, list_tasks, review_proof
+
+    task = (await list_tasks(async_db, event.id))[0]
+    await submit_proof(async_db, event=event, user=player, file_id="shot", task=task)
+    result = await register_user(async_db, user=player, event=event, bot=None, accept_rules=True)
+    assert result.registration.status == RegistrationStatus.CONFIRMED
+
+    row = await get_proof(async_db, event_id=event.id, user_id=player.id, task_id=task.id)
+    await review_proof(async_db, row, approved=False, reviewer_id=player.id)
+
+    checklist = await evaluate_requirements(async_db, user=player, event=event, bot=None)
+    social = [i for i in checklist.items if i.requirement_type == RequirementType.SOCIAL_FOLLOW][0]
+    assert social.status == RequirementStatus.NOT_DONE
+    from app.services.social import social_gate_ok
+
+    assert await social_gate_ok(async_db, event, player) is False
+
+
 async def test_without_the_gate_a_player_confirms_straight_away(async_db):
     event, player = await _seed_async(async_db, social=False)
     result = await register_user(async_db, user=player, event=event, bot=None, accept_rules=True)
     assert result.registration.status == RegistrationStatus.CONFIRMED
-    assert result.awaiting_review is False
 
 
 async def _multi(async_db, urls):
@@ -231,25 +242,24 @@ async def test_the_player_is_walked_through_every_page(async_db):
     assert done == 3
 
 
-async def test_the_gate_needs_every_page_approved(async_db):
-    from app.services.social import list_tasks, social_gate_ok, submit_proof
+async def test_every_page_needs_a_screenshot_and_none_may_be_rejected(async_db):
+    from app.services.social import get_proof, list_tasks, review_proof, social_gate_ok, submit_proof
 
     event, player = await _multi(async_db, ["https://instagram.com/a", "https://instagram.com/b"])
     tasks = await list_tasks(async_db, event.id)
-    for task in tasks:
-        await submit_proof(async_db, event=event, user=player, file_id="s", task=task)
+    await submit_proof(async_db, event=event, user=player, file_id="s", task=tasks[0])
+    # one page out of two is not enough
     assert await social_gate_ok(async_db, event, player) is False
 
-    from app.services.social import get_proof, review_proof
+    await submit_proof(async_db, event=event, user=player, file_id="s", task=tasks[1])
+    assert await social_gate_ok(async_db, event, player) is True
 
     first = await get_proof(async_db, event_id=event.id, user_id=player.id, task_id=tasks[0].id)
-    await review_proof(async_db, first, approved=True, reviewer_id=player.id)
-    # one page approved is not enough
-    assert await social_gate_ok(async_db, event, player) is False
+    await review_proof(async_db, first, approved=False, reviewer_id=player.id)
+    assert await social_gate_ok(async_db, event, player) is False, "one bad page closes the gate"
 
-    second = await get_proof(async_db, event_id=event.id, user_id=player.id, task_id=tasks[1].id)
-    await review_proof(async_db, second, approved=True, reviewer_id=player.id)
-    assert await social_gate_ok(async_db, event, player) is True
+    await submit_proof(async_db, event=event, user=player, file_id="better", task=tasks[0])
+    assert await social_gate_ok(async_db, event, player) is True, "resending reopens it"
 
 
 async def test_a_rejected_page_comes_back_around(async_db):

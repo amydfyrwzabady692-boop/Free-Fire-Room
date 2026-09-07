@@ -16,6 +16,19 @@ CYAN = (80, 214, 255)
 WHITE = (248, 250, 255)
 MUTED = (176, 186, 204)
 NAVY = (10, 16, 36)
+GREEN = (86, 224, 154)
+
+#: the same words as the inline button under the post, so the picture and the
+#: button never say two different things
+CTA = "ورود به کاستوم جایزه دار"
+#: no medal emoji here on purpose - Vazirmatn carries no emoji glyphs and Pillow
+#: drops them silently, so the podium is spelled out. The caption below the
+#: photo is where 🥇🥈🥉 render, because Telegram draws that text itself.
+PLACE_NAMES = ("نفر اول", "نفر دوم", "نفر سوم")
+
+TIME_CARD_H = 276
+RULES_CARD_H = 136
+PILL_H = 92
 
 
 def _fa(text: str) -> str:
@@ -64,14 +77,26 @@ def _text_w(draw: ImageDraw.ImageDraw, text: str, font) -> int:
     return box[2] - box[0]
 
 
+def _fit(draw: ImageDraw.ImageDraw, raw: str, font, max_w: int) -> str:
+    """Shorten the LOGICAL string until its shaped form fits.
+
+    Trimming after reshaping would eat the wrong end: bidi has already put the
+    visually-last glyph at what is logically the start of a Persian sentence,
+    so slicing the shaped string removes the first word, not the last.
+    """
+    text = raw or ""
+    if _text_w(draw, _fa(text), font) <= max_w:
+        return text
+    while text and _text_w(draw, _fa(text + "…"), font) > max_w:
+        text = text[:-1]
+    return (text + "…") if text else ""
+
+
 def _center(draw: ImageDraw.ImageDraw, y: int, text: str, font, fill, *, max_w: int | None = None) -> int:
-    shown = _fa(text)
+    shown = _fa(_fit(draw, text, font, max_w) if max_w else text)
+    if not shown:
+        return y
     tw = _text_w(draw, shown, font)
-    if max_w and tw > max_w:
-        while shown and _text_w(draw, shown + "…", font) > max_w:
-            shown = shown[:-1]
-        shown = shown + "…"
-        tw = _text_w(draw, shown, font)
     x = (W - tw) // 2
     draw.text((x, y), shown, font=font, fill=fill)
     box = draw.textbbox((x, y), shown, font=font)
@@ -95,13 +120,9 @@ def _wrap(draw: ImageDraw.ImageDraw, text: str, font, max_w: int, limit: int = 3
             break
     if cur and len(lines) < limit:
         lines.append(cur)
-    if len(lines) == limit and words:
-        rest = " ".join(words[len(" ".join(lines).split()) :])
-        if rest:
-            last = lines[-1]
-            while last and _text_w(draw, _fa(last + "…"), font) > max_w:
-                last = last[:-1]
-            lines[-1] = last + "…"
+    elif cur and lines:
+        # the overflow word has nowhere to go: mark the last line as cut
+        lines[-1] = _fit(draw, lines[-1] + " " + cur, font, max_w)
     return lines or [text]
 
 
@@ -109,41 +130,92 @@ def _card(draw: ImageDraw.ImageDraw, xy: tuple[int, int, int, int], *, fill, out
     draw.rounded_rectangle(xy, radius=36, fill=fill, outline=outline, width=width)
 
 
+def _pill(draw: ImageDraw.ImageDraw, y: int, text: str, *, fill, text_fill, font, pad: int = 34) -> int:
+    """A filled lozenge sized to its own text - the call to action."""
+    shown = _fa(_fit(draw, text, font, W - 260))
+    tw = _text_w(draw, shown, font)
+    box = draw.textbbox((0, 0), shown, font=font)
+    th = box[3] - box[1]
+    x0 = (W - tw) // 2 - pad
+    x1 = (W + tw) // 2 + pad
+    draw.rounded_rectangle((x0, y, x1, y + th + pad), radius=(th + pad) // 2, fill=fill)
+    draw.text(((W - tw) // 2, y + pad // 2 - box[1]), shown, font=font, fill=text_fill)
+    return y + th + pad
+
+
 def render_event_poster(
     *,
-    prize: str,
-    when: str,
-    host: str,
-    channels: int,
+    prize: str = "",
+    when: str = "",
+    host: str = "",
+    channels: int = 0,
     bot_username: str = "",
+    places: list[str] | None = None,
+    channel_name: str = "",
+    social_pages: int = 0,
 ) -> bytes:
+    """The whole custom on one image, in the order a player reads it.
+
+    The layout flows: every block measures itself and advances a cursor, so a
+    three-line prize pushes the time card down instead of colliding with it.
+    """
     img = _gradient()
     overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(overlay)
-    d.rounded_rectangle((48, 48, W - 48, H - 48), radius=48, outline=(*ORANGE, 210), width=6)
-    d.rounded_rectangle((70, 70, W - 70, 210), radius=28, fill=(255, 122, 24, 42))
+    d.rounded_rectangle((44, 44, W - 44, H - 44), radius=48, outline=(*ORANGE, 210), width=6)
+    d.rounded_rectangle((66, 66, W - 66, 214), radius=28, fill=(255, 122, 24, 42))
     img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
     draw = ImageDraw.Draw(img)
 
-    y = 92
-    y = _center(draw, y, "FREE FIRE CUSTOM", _bold(28), GOLD) + 8
-    y = _center(draw, y, "کاستوم جایزه‌دار", _bold(52), WHITE) + 28
+    y = 88
+    y = _center(draw, y, "FREE FIRE CUSTOM", _bold(28), GOLD) + 10
+    y = _center(draw, y, "کاستوم جایزه‌دار", _bold(54), WHITE) + 30
 
-    _card(draw, (90, 250, W - 90, 720), fill=(16, 24, 48), outline=GOLD, width=3)
-    y = 290
-    y = _center(draw, y, "جایزه", _reg(32), CYAN) + 18
-    prize_font = _bold(64 if len(prize or "") < 22 else 48)
-    for line in _wrap(draw, prize or "جایزه کاستوم", prize_font, W - 220, 3):
-        y = _center(draw, y, line, prize_font, GOLD, max_w=W - 240) + 10
+    rows = [line for line in (places or []) if line] or (
+        [" ".join((prize or "").split())] if prize else []
+    )
+    rows = rows[:3]
+    prize_font = _bold(44 if max((len(r) for r in rows), default=0) > 24 else 54)
+    prize_h = 108 + max(1, len(rows)) * 74
+    # measure the whole stack first, then centre it: a one-prize custom would
+    # otherwise leave a hole where two more lines would have been
+    stack = prize_h + 24 + TIME_CARD_H + 22 + RULES_CARD_H + 24 + PILL_H + 46
+    top, bottom = y, H - 130
+    y = top + max(0, (bottom - top - stack) // 2)
 
-    _card(draw, (90, 760, W - 90, 1120), fill=(14, 20, 40), outline=(60, 80, 120), width=2)
-    y = 800
-    y = _center(draw, y, "ساعت کاستوم", _reg(28), MUTED) + 12
-    y = _center(draw, y, when, _bold(40), WHITE, max_w=W - 220) + 28
-    host_line = f"برگزارکننده: {host or '—'}"
-    y = _center(draw, y, host_line, _reg(32), CYAN, max_w=W - 220) + 18
-    ch_line = f"کانال جوین اجباری: {to_fa_digits(str(channels))} مورد"
-    _center(draw, y, ch_line, _reg(30), MUTED, max_w=W - 220)
+    _card(draw, (84, y, W - 84, y + prize_h), fill=(16, 24, 48), outline=GOLD, width=3)
+    inner = y + 34
+    inner = _center(draw, inner, "جایزه", _reg(32), CYAN) + 16
+    if rows:
+        for i, line in enumerate(rows):
+            label = f"{PLACE_NAMES[i]}: {line}" if len(rows) > 1 else line
+            inner = _center(draw, inner, label, prize_font, GOLD, max_w=W - 220) + 14
+    else:
+        _center(draw, inner, "جایزه کاستوم", prize_font, GOLD, max_w=W - 220)
+    y = y + prize_h + 24
+
+    _card(draw, (84, y, W - 84, y + TIME_CARD_H), fill=(14, 20, 40), outline=(60, 80, 120), width=2)
+    inner = y + 30
+    inner = _center(draw, inner, "زمان کاستوم", _reg(28), MUTED) + 10
+    inner = _center(draw, inner, when, _bold(42), WHITE, max_w=W - 200) + 20
+    inner = _center(draw, inner, f"برگزارکننده: {host or '—'}", _reg(30), CYAN, max_w=W - 200) + 10
+    where = channel_name or (f"{to_fa_digits(str(channels))} کانال جوین اجباری" if channels else "")
+    if where:
+        _center(draw, inner, where, _reg(28), MUTED, max_w=W - 200)
+    y = y + TIME_CARD_H + 22
+
+    conditions = ["چیت و تبانی ممنوع"]
+    if channels:
+        conditions.append(f"عضویت در {to_fa_digits(str(channels))} کانال")
+    if social_pages:
+        conditions.append(f"فالو {to_fa_digits(str(social_pages))} پیج + اسکرین")
+    _card(draw, (84, y, W - 84, y + RULES_CARD_H), fill=(20, 14, 10), outline=(150, 60, 20), width=2)
+    inner = y + 22
+    inner = _center(draw, inner, "شرایط و قوانین", _reg(28), ORANGE) + 10
+    _center(draw, inner, " · ".join(conditions), _reg(30), WHITE, max_w=W - 200)
+    y = y + RULES_CARD_H + 24
+
+    y = _pill(draw, y, CTA, fill=GREEN, text_fill=(8, 26, 18), font=_bold(38)) + 14
 
     handle = (bot_username or "").lstrip("@")
     if not handle:
@@ -153,11 +225,16 @@ def render_event_poster(
             handle = (get_settings().bot_username or "").lstrip("@")
         except Exception:
             handle = ""
-    footer = "این بنر را در کانال بگذارید · جوین از لینک ربات"
     if handle:
-        footer = f"t.me/{handle}  ·  جوین کن  ·  سر ساعت ROOM ID و PASS داخل ربات"
-    _center(draw, 1185, footer, _reg(26), GOLD, max_w=W - 120)
-    _center(draw, 1240, "ROOM ID و PASS در گروه نیست — فقط پیام خصوصی ربات", _reg(24), MUTED, max_w=W - 120)
+        _center(draw, y, f"t.me/{handle}", _reg(28), GOLD, max_w=W - 160)
+    _center(
+        draw,
+        H - 104,
+        "ROOM ID و PASS در گروه نیست — فقط پیام خصوصی ربات",
+        _reg(24),
+        MUTED,
+        max_w=W - 140,
+    )
 
     buf = BytesIO()
     img.save(buf, format="PNG", optimize=True)
@@ -198,12 +275,32 @@ def render_digest_poster(*, date_label: str, items: list[dict]) -> bytes:
     return buf.getvalue()
 
 
-def event_poster_bytes(event, *, channels: int = 0) -> bytes:
-    prize = (getattr(event, "prize_summary", None) or getattr(event, "title", None) or "کاستوم جایزه‌دار").strip()
-    org = getattr(event, "organizer", None)
-    host = (org.display_name if org and org.display_name else None) or "برگزارکننده"
-    when = format_local(event.starts_at, getattr(event, "timezone", None) or "Asia/Tehran")
-    return render_event_poster(prize=prize, when=when, host=host, channels=channels)
+def event_poster_bytes(event, *, channels: int = 0, social_pages: int = 0) -> bytes:
+    from app.services.event_display import (
+        channel_public_label,
+        organizer_public_name,
+        prize_places,
+        required_channel_count,
+        resolve_event_channel,
+    )
+
+    places = prize_places(event)
+    host = organizer_public_name(getattr(event, "organizer", None))
+    tz = getattr(event, "timezone", None) or "Asia/Tehran"
+    when = format_local(event.starts_at, tz)
+    try:
+        channel_name = channel_public_label(resolve_event_channel(event))
+    except Exception:  # noqa: BLE001
+        channel_name = ""
+    return render_event_poster(
+        prize=(getattr(event, "prize_summary", None) or "").strip(),
+        places=places,
+        when=when,
+        host=host,
+        channels=channels or required_channel_count(event),
+        channel_name=channel_name,
+        social_pages=social_pages,
+    )
 
 
 def digest_poster_bytes(events: list) -> bytes:

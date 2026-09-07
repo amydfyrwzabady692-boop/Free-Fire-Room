@@ -216,3 +216,77 @@ def format_event_identity_block(event: Event) -> str:
     lines.append("━━━━━━━━━━━━━━")
     lines.append(f"💎 <b>جایزه</b>\n{esc(prize)}")
     return "\n".join(lines)
+
+
+# ------------------------------------------------------------------ channel post
+
+
+#: The owner's own wording for the post that goes in their channel, kept
+#: byte-for-byte - the tatweel stretching in «کاستـوم جایـزه دار» and the plain
+#: space in «جایزه دار» are theirs, not a typo to normalise away.
+POST_TITLE = "🚨 کاستـوم جایـزه دار"
+POST_WHEN_LABEL = "زمان کاستوم 👇🔥"
+POST_RULES_LABEL = "شرایط و قوانین ❗"
+POST_NO_CHEAT = "✔️چیــت و تبــانی ممنوع 👎"
+POST_SIGNOFF = "موفق و پیروز باشین 🥰"
+
+#: Telegram cuts a photo caption at 1024 UTF-16 units; a prize alone may be 400
+#: characters and a description 500, so the parts are budgeted before the whole
+#: is capped rather than slicing the assembled HTML and cutting a tag in half.
+CAPTION_LIMIT = 1024
+
+PLACE_LABELS = (("🥇", "نفر اول"), ("🥈", "نفر دوم"), ("🥉", "نفر سوم"))
+
+
+def prize_places(event: Event) -> list[str]:
+    """One line per place, from whatever the organizer actually typed.
+
+    The wizard takes the prize as free text, so a host who wrote three lines
+    means three places and a host who wrote one means one. Reading it this way
+    needs no extra wizard step and no new column.
+    """
+    raw = (event.prize_summary or "").strip()
+    lines = [" ".join(part.split()) for part in raw.splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        rows = sorted(_loaded(event, "prizes") or [], key=lambda p: p.place or 0)
+        lines = [" ".join((p.title or "").split()) for p in rows if p.title]
+    return [line[:120] for line in lines[:3]]
+
+
+def format_channel_post_caption(event: Event, *, social_pages: int = 0) -> str:
+    """The caption that rides under the banner in the organizer's channel."""
+    from app.core.time import format_when_line
+
+    places = prize_places(event)
+    lines = [POST_TITLE, ""]
+    if places:
+        for i, prize in enumerate(places):
+            medal, who = PLACE_LABELS[i]
+            lines.append(f"{medal}<b>{who}:</b>  {esc(prize)}")
+    else:
+        lines.append("🥇<b>جایزه:</b> اعلام نشده")
+    lines.append("")
+    lines.append(POST_WHEN_LABEL)
+    lines.append("")
+    lines.append(f"{format_when_line(event.starts_at, event.timezone)} ⚡")
+    lines.append("")
+    lines.append(POST_RULES_LABEL)
+    lines.append("")
+    lines.append(POST_NO_CHEAT)
+    channels = required_channel_count(event)
+    if channels:
+        lines.append(f"✔️ عضویت در {channels} کانال اجباری")
+    if social_pages:
+        lines.append(f"✔️ فالو {social_pages} پیج + ارسال اسکرین‌شات")
+    lines.append("✔️ ROOM ID و PASS فقط داخل ربات می‌آید")
+    about = event_about_text(event)
+    if about:
+        lines.append("")
+        lines.append(esc(" ".join(about.split())[:200]))
+    lines.append("")
+    lines.append(POST_SIGNOFF)
+    text = "\n".join(lines)
+    if len(text) > CAPTION_LIMIT:
+        text = text[: CAPTION_LIMIT - 1].rstrip() + "…"
+    return text

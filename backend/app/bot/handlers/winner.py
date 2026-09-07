@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+
 from aiogram import F, Router
+from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -14,6 +17,7 @@ from app.bot.keyboards.common import (
     home_kb,
     labeled,
     organizer_reply_kb,
+    social_review_kb,
     winner_claim_review_kb,
     winner_list_kb,
 )
@@ -27,10 +31,14 @@ from app.models.admin import Admin
 from app.models.event import Event
 from app.models.user import User
 from app.core.enums import WinnerMessageDirection
+from app.services.social import proofs_with_tasks_for_user, social_required
+from app.services.telegram_ops import pace
 from app.services.winners import (
     check_winner_eligibility,
     claim_parties,
     create_winner_claim,
+    format_claim_proof_caption,
+    format_claim_proof_header,
     format_relayed_to_organizer,
     format_winner_claim_caption,
     list_recent_winner_events,
@@ -55,11 +63,54 @@ async def _event_by_token(db: AsyncSession, token: str | None) -> Event | None:
     return await db.scalar(select(Event).where(Event.public_token == token, Event.deleted_at.is_(None)))
 
 
+#: a player can hold one proof per page plus a legacy no-page row, so this is
+#: a defensive cap rather than an expected number
+MAX_BUNDLED_PROOFS = 6
+
+
+async def _send_paced(bot, chat_id, *, photo=None, text: str = "", reply_markup=None):
+    """One send, with the two Telegram failures that are worth handling."""
+    try:
+        if photo:
+            return await bot.send_photo(chat_id, photo, caption=text, reply_markup=reply_markup)
+        return await bot.send_message(chat_id, text, reply_markup=reply_markup)
+    except TelegramRetryAfter as exc:
+        await asyncio.sleep(float(exc.retry_after) + 0.5)
+        try:
+            if photo:
+                return await bot.send_photo(chat_id, photo, caption=text, reply_markup=reply_markup)
+            return await bot.send_message(chat_id, text, reply_markup=reply_markup)
+        except Exception:  # noqa: BLE001
+            return None
+    except TelegramForbiddenError:
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+    finally:
+        await pace()
+
+
 async def _notify_winner_claim(
     bot, db: AsyncSession, event: Event, player: User, file_id: str, claim
 ) -> None:
-    """The organizer gets approve / reject / message right under the screenshot."""
-    caption = format_winner_claim_caption(event, player)[:1024]
+    """Everything the organizer needs to judge one claim, in one burst.
+
+    The follow screenshots this player sent earlier go first, each labelled
+    with its page and its own reject button; the win screenshot comes LAST so
+    the approve / reject / message buttons sit right above the input box
+    instead of being scrolled away by the pile above them.
+
+    They are sent one by one rather than as an album on purpose: Telegram does
+    not attach an inline keyboard to a media group, and without the keyboard
+    the organizer cannot reject a fake follow at the moment they spot it.
+    """
+    proofs: list = []
+    if social_required(event):
+        proofs = await proofs_with_tasks_for_user(db, event_id=event.id, user_id=player.id)
+        proofs = proofs[:MAX_BUNDLED_PROOFS]
+    caption = format_winner_claim_caption(
+        event, player, proof_count=len(proofs), social_asked=social_required(event)
+    )[:1024]
     kb = winner_claim_review_kb(str(claim.id), player_url=player_dm_link(player))
     targets: set[int] = set()
     org_tid = await organizer_telegram_id(db, event.organizer_id)
@@ -71,13 +122,22 @@ async def _notify_winner_claim(
         if user and user.telegram_id:
             targets.add(user.telegram_id)
     for chat_id in targets:
-        try:
-            await bot.send_photo(chat_id, file_id, caption=caption, reply_markup=kb)
-        except Exception:
-            try:
-                await bot.send_message(chat_id, caption, reply_markup=kb)
-            except Exception:
-                log.exception("winner_claim_notify_failed", chat_id=chat_id)
+        if proofs:
+            await _send_paced(
+                bot, chat_id, text=format_claim_proof_header(event, player, len(proofs))
+            )
+            for i, proof in enumerate(proofs, start=1):
+                await _send_paced(
+                    bot,
+                    chat_id,
+                    photo=proof.file_id,
+                    text=format_claim_proof_caption(event, proof, i, len(proofs))[:1024],
+                    reply_markup=social_review_kb(str(proof.id), status=proof.status),
+                )
+        sent = await _send_paced(bot, chat_id, photo=file_id, text=caption, reply_markup=kb)
+        if sent is None:
+            # the screenshot itself could not go: the text still must
+            await _send_paced(bot, chat_id, text=caption, reply_markup=kb)
 
 
 @router.message(Command("winner"))

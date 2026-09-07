@@ -704,9 +704,12 @@ async def _broadcast(bot, db, campaign_id: UUID) -> None:
 
 
 def get_outbound_rate() -> int:
-    from app.core.config import get_settings
+    # one definition, in telegram_ops, so the workers and the bot handlers pace
+    # to the same number. Kept as a module attribute because the reminder tests
+    # monkeypatch it here.
+    from app.services.telegram_ops import outbound_rate
 
-    return get_settings().telegram_outbound_per_second
+    return outbound_rate()
 
 
 @celery_app.task(name="app.workers.tasks.recheck_channel_admin")

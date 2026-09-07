@@ -19,8 +19,21 @@ PLATFORM_FA = {
     SocialPlatform.OTHER: "پیج برگزارکننده",
 }
 
+#: What a screenshot's status means to the organizer. Nothing here says
+#: "waiting": sending the screenshot is what counts, so an unreviewed one is
+#: simply one nobody has looked at yet.
+PROOF_STATUS_FA = {
+    SocialProofStatus.PENDING: "بررسی‌نشده",
+    SocialProofStatus.APPROVED: "بررسی و تأیید شده",
+    SocialProofStatus.REJECTED: "رد شده",
+}
+
 #: how many pages one custom may ask a player to follow
 MAX_SOCIAL_TASKS = 5
+
+
+def proof_status_label(status: str | None) -> str:
+    return PROOF_STATUS_FA.get(status or SocialProofStatus.PENDING, "بررسی‌نشده")
 
 
 def detect_platform(url: str) -> str:
@@ -133,9 +146,10 @@ def format_social_step(event: Event, tasks: list[EventSocialTask], done: int = 0
         lines.append("برای هر پیج یک اسکرین جدا لازم است.")
     lines.append("")
     lines.append(
-        "برگزارکننده اسکرین‌ها را می‌بیند و بعد از تأیید او ثبت‌نام شما قطعی می‌شود "
-        "و سر ساعت ROOM ID و PASS برایتان می‌آید."
+        "همین که اسکرین را بفرستید ثبت‌نامتان قطعی است — منتظر تأیید کسی نمی‌مانید. "
+        "سر ساعت ROOM ID و PASS همین‌جا برایتان می‌آید؛ تا آن لحظه در کانال‌ها بمانید."
     )
+    lines.append("فقط اگر اسکرین بی‌ربط باشد برگزارکننده می‌تواند ردش کند و باید دوباره بفرستید.")
     note = (getattr(event, "social_note", None) or "").strip()
     if note:
         lines.append(f"\n📝 {esc(note)}")
@@ -165,13 +179,32 @@ async def get_proof(db: AsyncSession, *, event_id, user_id, task_id=None) -> Soc
     return await db.scalar(stmt)
 
 
-def get_proof_sync(db: Session, *, event_id, user_id, task_id=None) -> SocialProof | None:
-    stmt = select(SocialProof).where(
-        SocialProof.event_id == event_id, SocialProof.user_id == user_id
+async def proofs_with_tasks_for_user(db: AsyncSession, *, event_id, user_id) -> list[SocialProof]:
+    """Every screenshot this player sent for this custom, page included.
+
+    Ordered by the organizer's own page order, not by when the rows landed:
+    a player who sends three screenshots in one burst gives them all the same
+    ``created_at``, and ordering on that alone leaves the tiebreak to a random
+    UUID - so "page 1 of 3" would name a different page on every read.
+
+    ``selectinload`` is not optional either: the winner bundle reads
+    ``proof.task.url`` to label each screenshot, and a lazy load on an
+    AsyncSession raises MissingGreenlet.
+    """
+    rows = (
+        await db.scalars(
+            select(SocialProof)
+            .where(SocialProof.event_id == event_id, SocialProof.user_id == user_id)
+            .options(selectinload(SocialProof.task))
+        )
+    ).all()
+    return sorted(
+        rows,
+        key=lambda p: (
+            p.task.sort_order if p.task is not None else -1,
+            p.created_at or datetime.min.replace(tzinfo=UTC),
+        ),
     )
-    if task_id is not None:
-        stmt = stmt.where(SocialProof.task_id == task_id)
-    return db.scalar(stmt)
 
 
 async def next_task_for(
@@ -198,26 +231,42 @@ async def next_task_for(
     return pending, done, len(tasks)
 
 
+def gate_from(tasks: list[EventSocialTask], proofs: list[SocialProof]) -> bool:
+    """Has this player done what the follow gate asks?
+
+    Sending the screenshot is the whole requirement - nobody has to approve it.
+    The only thing that closes the gate again is the organizer rejecting a
+    screenshot, which is why the predicate is "not rejected" rather than
+    "approved". Both session flavours call this so they cannot drift apart.
+    """
+    ok = {p.task_id for p in proofs if p.status != SocialProofStatus.REJECTED}
+    if not tasks:
+        # a custom from before the multi-page change, whose backfill has not
+        # run: one screenshot, no task row to hang it on
+        return bool(ok)
+    return all(task.id in ok for task in tasks)
+
+
+def rejected_proof(proofs: list[SocialProof]) -> SocialProof | None:
+    for proof in proofs:
+        if proof.status == SocialProofStatus.REJECTED:
+            return proof
+    return None
+
+
 def social_gate_ok_sync(db: Session, event: Event, user: User) -> bool:
     """Used at ROOM ID / PASS send time, where the session is synchronous."""
     if not social_required(event):
         return True
     tasks = list_tasks_sync(db, event.id)
-    if not tasks:
-        # a custom from before the multi-page change, whose backfill has not run
-        proof = get_proof_sync(db, event_id=event.id, user_id=user.id)
-        return bool(proof and proof.status == SocialProofStatus.APPROVED)
-    approved = {
-        p.task_id
-        for p in db.scalars(
+    proofs = list(
+        db.scalars(
             select(SocialProof).where(
-                SocialProof.event_id == event.id,
-                SocialProof.user_id == user.id,
-                SocialProof.status == SocialProofStatus.APPROVED,
+                SocialProof.event_id == event.id, SocialProof.user_id == user.id
             )
         ).all()
-    }
-    return all(task.id in approved for task in tasks)
+    )
+    return gate_from(tasks, proofs)
 
 
 async def social_gate_ok(db: AsyncSession, event: Event, user: User) -> bool:
@@ -225,10 +274,7 @@ async def social_gate_ok(db: AsyncSession, event: Event, user: User) -> bool:
         return True
     tasks = await list_tasks(db, event.id)
     proofs = await proofs_for_user(db, event_id=event.id, user_id=user.id)
-    approved = {p.task_id for p in proofs if p.status == SocialProofStatus.APPROVED}
-    if not tasks:
-        return bool(approved)
-    return all(task.id in approved for task in tasks)
+    return gate_from(tasks, proofs)
 
 
 async def submit_proof(
@@ -239,7 +285,7 @@ async def submit_proof(
     task_id = task.id if task is not None else None
     proof = await get_proof(db, event_id=event.id, user_id=user.id, task_id=task_id)
     if proof and proof.status == SocialProofStatus.APPROVED:
-        raise ConflictError("social_already_approved", "اسکرین این پیج قبلاً تأیید شده است.")
+        raise ConflictError("social_already_approved", "اسکرین این پیج قبلاً ثبت شده است.")
     if proof:
         proof.file_id = file_id
         proof.status = SocialProofStatus.PENDING
@@ -273,6 +319,51 @@ async def review_proof(
     proof.review_note = note
     await db.flush()
     return proof
+
+
+async def proofs_for_event(
+    db: AsyncSession,
+    event_id,
+    *,
+    statuses: list[str] | None = None,
+    limit: int = 5,
+    offset: int = 0,
+) -> list[SocialProof]:
+    """One page of an organizer's screenshot archive.
+
+    Paged in the database, not in Python: a busy custom can hold hundreds of
+    screenshots and the panel only ever shows a handful. The ``id`` tiebreak
+    matters - ``created_at`` alone is not unique, and offset paging over a
+    non-unique order silently repeats and skips rows.
+    """
+    stmt = select(SocialProof).where(SocialProof.event_id == event_id)
+    if statuses:
+        stmt = stmt.where(SocialProof.status.in_(statuses))
+    rows = (
+        await db.scalars(
+            stmt.options(selectinload(SocialProof.user), selectinload(SocialProof.task))
+            .order_by(SocialProof.created_at.desc(), SocialProof.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+    ).all()
+    return list(rows)
+
+
+async def proof_counts_for_event(db: AsyncSession, event_id) -> dict:
+    """{total, pending, approved, rejected} in one grouped query."""
+    rows = (
+        await db.execute(
+            select(SocialProof.status, func.count())
+            .where(SocialProof.event_id == event_id)
+            .group_by(SocialProof.status)
+        )
+    ).all()
+    counts = {"total": 0, "pending": 0, "approved": 0, "rejected": 0}
+    for status, n in rows:
+        counts[str(status)] = counts.get(str(status), 0) + int(n or 0)
+        counts["total"] += int(n or 0)
+    return counts
 
 
 async def pending_proofs_for_event(db: AsyncSession, event_id, *, limit: int = 60) -> list[SocialProof]:

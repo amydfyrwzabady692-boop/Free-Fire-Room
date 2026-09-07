@@ -188,3 +188,22 @@ def parse_naive_in_tz(value: datetime, tz_name: str) -> datetime:
     if value.tzinfo is not None:
         return as_utc(value)
     return value.replace(tzinfo=ZoneInfo(tz_name)).astimezone(UTC)
+
+
+def format_when_line(dt: datetime, tz_name: str = DEFAULT_TZ) -> str:
+    """A short, human "when" for a poster: «امشب ساعت ۲۲».
+
+    A channel post is read in the moment, so the useful phrasing is the one a
+    person would say out loud. Only today and tomorrow get the friendly form -
+    anything further out falls back to the dated stamp, because «پس‌فردا شب»
+    stops being clearer than a date.
+    """
+    local = to_tz(dt, tz_name)
+    today = datetime.now(ZoneInfo(tz_name)).date()
+    delta = (local.date() - today).days
+    clock = to_fa_digits(f"{local.hour:02d}:{local.minute:02d}")
+    if delta == 0:
+        return f"امشب ساعت {clock}" if local.hour >= 16 else f"امروز ساعت {clock}"
+    if delta == 1:
+        return f"فردا شب ساعت {clock}" if local.hour >= 16 else f"فردا ساعت {clock}"
+    return format_local(dt, tz_name, compact=True)

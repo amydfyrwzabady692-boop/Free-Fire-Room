@@ -210,9 +210,19 @@ def event_detail_kb(
     show_reviews: bool = False,
     can_claim_win: bool = False,
     social_url: str | None = None,
+    channels_done: bool = False,
     organizer_id: str | None = None,
+    show_aftercare: bool = False,
     back: str = "upcoming",
 ) -> InlineKeyboardMarkup:
+    """One card, one job at a time.
+
+    While the player is still completing conditions the card shows only what
+    they have to do next: the channels, then - once every channel is green -
+    the follow pages. Reporting, the organizer's profile and the reviews are
+    after-the-fact and stay hidden behind ``show_aftercare`` so the working
+    card never grows past a handful of buttons.
+    """
     rows: list[list[InlineKeyboardButton]] = []
     seen: set[str] = set()
     for title, url in join_urls or []:
@@ -220,23 +230,24 @@ def event_detail_kb(
             continue
         seen.add(url)
         rows.append([ibtn(f"عضویت در {title[:28]}", url=url, style=PRIMARY)])
-    if social_url:
-        rows.append([ibtn("فالو پیج برگزارکننده", url=social_url, style=PRIMARY)])
     if can_join:
         rows.append([ibtn("عضو شدم — بررسی و ثبت‌نام", callback_data=f"join:{token}", style=SUCCESS)])
-    if social_url:
+    # the follow step is the step AFTER the channels, never beside them
+    if social_url and channels_done:
+        rows.append([ibtn("باز کردن پیج و فالو", url=social_url, style=PRIMARY)])
         rows.append([ibtn("ارسال اسکرین‌شات فالو", callback_data=f"soc:{token}", style=SUCCESS)])
     if can_claim_win:
         rows.append([ibtn("برنده شدم", callback_data=f"win:{token}", style=SUCCESS)])
-    if organizer_id:
-        rows.append(
-            [ibtn("دربارهٔ برگزارکننده", callback_data=f"orgprof:{organizer_id}", style=PRIMARY)]
-        )
-    if can_review:
-        rows.append([ibtn("نظر و امتیاز", callback_data=f"rev:{token}", style=PRIMARY)])
-    if show_reviews:
-        rows.append([ibtn("نظرات بازیکن‌ها", callback_data=f"rvl:{token}", style=PRIMARY)])
-    rows.append([ibtn("گزارش به مالک ربات", callback_data=f"rep:{token}", style=DANGER)])
+    if show_aftercare:
+        if organizer_id:
+            rows.append(
+                [ibtn("دربارهٔ برگزارکننده", callback_data=f"orgprof:{organizer_id}", style=PRIMARY)]
+            )
+        if can_review:
+            rows.append([ibtn("نظر و امتیاز", callback_data=f"rev:{token}", style=PRIMARY)])
+        if show_reviews:
+            rows.append([ibtn("نظرات بازیکن‌ها", callback_data=f"rvl:{token}", style=PRIMARY)])
+        rows.append([ibtn("گزارش به مالک ربات", callback_data=f"rep:{token}", style=DANGER)])
     if back not in {"upcoming", "today", "past"}:
         back = "upcoming"
     rows.append([ibtn("بازگشت به فهرست", callback_data=f"list:{back}", style=PRIMARY)])
@@ -397,6 +408,23 @@ def event_share_kb(link: str) -> InlineKeyboardMarkup:
     return share_link_kb(link, open_label="ورود به کاستوم از لینک", copy_label="کپی لینک کاستوم")
 
 
+#: The one button that goes out on the channel post. The wording is the
+#: organizer's, so it is a constant rather than something a caller passes in.
+CHANNEL_POST_LABEL = "ورود به کاستوم جایزه دار"
+
+
+def channel_post_kb(link: str) -> InlineKeyboardMarkup:
+    """The button under the banner in the organizer's own channel.
+
+    Built bare on purpose: ibtn() falls back to prefixing a coloured circle
+    when the running aiogram rejects its style kwarg, and this label has to
+    reach the channel exactly as written.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text=CHANNEL_POST_LABEL, url=link)]]
+    )
+
+
 def organizer_home_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -455,15 +483,27 @@ def social_step_kb(token: str, url: str | None) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def social_review_kb(proof_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                ibtn("تأیید ثبت‌نام", callback_data=f"socok:{proof_id}", style=SUCCESS),
-                ibtn("رد", callback_data=f"socno:{proof_id}", style=DANGER),
-            ]
-        ]
-    )
+def social_review_kb(
+    proof_id: str, *, status: str | None = None, back: str | None = None
+) -> InlineKeyboardMarkup:
+    """What the organizer can do to one screenshot.
+
+    There is nothing to approve - the player is registered the moment they send
+    it. The only real action is rejecting a screenshot that shows something
+    else, and undoing that when it was a mistake.
+    """
+    from app.core.enums import SocialProofStatus
+
+    rows: list[list[InlineKeyboardButton]] = []
+    if status == SocialProofStatus.REJECTED:
+        rows.append([ibtn("اشتباه رد شد — قبولش کن", callback_data=f"socok:{proof_id}", style=SUCCESS)])
+    else:
+        rows.append(
+            [ibtn("رد این اسکرین — ورودش باطل شود", callback_data=f"socno:{proof_id}", style=DANGER)]
+        )
+    if back:
+        rows.append([ibtn("بازگشت به فهرست اسکرین‌ها", callback_data=back, style=PRIMARY)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def payout_contact_kb(*, saved: str | None = None, username: str | None = None) -> InlineKeyboardMarkup:
@@ -517,14 +557,47 @@ def organizer_reply_kb(claim_id: str, *, player_url: str | None = None) -> Inlin
 
 
 def social_bulk_kb(token: str, pending: int) -> InlineKeyboardMarkup:
-    """Settle a whole queue of follow screenshots in one tap."""
+    """The two whole-queue actions, one of them deliberately behind a confirm.
+
+    "Mark all as checked" is safe - it changes nothing about who is registered,
+    it only clears the unreviewed badge. "Reject all" voids every registration
+    in the custom at once, so it never fires straight from a tap.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if pending:
+        rows.append(
+            [ibtn(f"همه درست بود ({pending})", callback_data=f"socall:ok:{token}", style=SUCCESS)]
+        )
+    rows.append([ibtn("رد همه", callback_data=f"socall:ask:{token}", style=DANGER)])
+    rows.append([ibtn("بازگشت به پنل", callback_data="orgp:home", style=PRIMARY)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def social_reject_all_kb(token: str, total: int) -> InlineKeyboardMarkup:
+    """The confirm screen for the one action that cannot be undone in bulk."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [ibtn(f"تأیید همه ({pending})", callback_data=f"socall:ok:{token}", style=SUCCESS)],
-            [ibtn(f"رد همه ({pending})", callback_data=f"socall:no:{token}", style=DANGER)],
-            [ibtn("بازگشت به پنل", callback_data="orgp:home", style=PRIMARY)],
+            [ibtn(f"بله، هر {total} نفر باطل شوند", callback_data=f"socall:no:{token}", style=DANGER)],
+            [ibtn("نه، بازگشت", callback_data=f"orgp:soc:{token}", style=PRIMARY)],
         ]
     )
+
+
+def social_filter_row(token: str, counts: dict, current: str) -> list[InlineKeyboardButton]:
+    """All / rejected / not-yet-checked, as one row of toggles."""
+    def label(text: str, key: str, n: int) -> InlineKeyboardButton:
+        mark = "• " if key == current else ""
+        return ibtn(
+            f"{mark}{text} ({n})",
+            callback_data=f"orgp:soc:{token}:0:{key}",
+            style=SUCCESS if key == current else PRIMARY,
+        )
+
+    return [
+        label("همه", "a", int(counts.get("total", 0))),
+        label("رد شده", "r", int(counts.get("rejected", 0))),
+        label("بررسی‌نشده", "p", int(counts.get("pending", 0))),
+    ]
 
 
 def start_confirm_kb(token: str) -> InlineKeyboardMarkup:
@@ -552,3 +625,13 @@ def organizer_profile_kb(
         rows.append([ibtn("کپی لینک پروفایل", copy_text=share_link, style=PRIMARY)])
     rows.append([ibtn("بازگشت", callback_data=back, style=DANGER)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def post_confirm_kb(token: str, channel_label: str) -> InlineKeyboardMarkup:
+    """Preview first, publish second - a channel post cannot be taken back."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [ibtn(f"انتشار در {channel_label[:24]}", callback_data=f"orgp:pub:{token}", style=SUCCESS)],
+            [ibtn("فعلاً نه", callback_data="orgp:home", style=PRIMARY)],
+        ]
+    )

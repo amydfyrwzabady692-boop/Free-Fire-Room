@@ -139,6 +139,15 @@ async def _seed(async_db, *, social=False, minutes_ago=10, with_creds=True):
     )
     async_db.add(event)
     await async_db.flush()
+    if social:
+        # seed the page row too, so these tests exercise the same multi-page
+        # path production does rather than the pre-0009 legacy branch
+        from app.services.social import seed_tasks
+
+        seed_tasks(
+            async_db, event, [{"url": event.social_url, "platform": SocialPlatform.INSTAGRAM}]
+        )
+        await async_db.flush()
     if with_creds:
         from app.core.security import encrypt_secret
 
@@ -186,62 +195,93 @@ async def test_start_button_is_not_offered_to_someone_elses_custom(async_db):
     assert event.archived_at is None
 
 
-@pytest.mark.asyncio
-async def test_approving_a_follow_screenshot_confirms_the_registration(async_db):
-    org, event, host, player = await _seed(async_db, social=True)
+async def _seeded_proof(async_db, event, player, *, status=SocialProofStatus.PENDING):
+    """A screenshot bound to the custom's page row, the way players send them."""
+    from app.services.social import list_tasks
+
+    tasks = await list_tasks(async_db, event.id)
     proof = SocialProof(
-        event_id=event.id, user_id=player.id, file_id="shot", status=SocialProofStatus.PENDING
+        event_id=event.id,
+        user_id=player.id,
+        task_id=tasks[0].id if tasks else None,
+        file_id="shot",
+        status=status,
     )
     async_db.add(proof)
+    await async_db.flush()
+    return proof
+
+
+async def _confirmed_registration(async_db, event, player):
+    from app.models.registration import Registration
+
+    reg = Registration(
+        event_id=event.id, user_id=player.id, status=RegistrationStatus.CONFIRMED, source="bot"
+    )
+    async_db.add(reg)
+    event.confirmed_count = (event.confirmed_count or 0) + 1
+    await async_db.flush()
+    return reg
+
+
+@pytest.mark.asyncio
+async def test_rejecting_a_screenshot_voids_a_confirmed_entry(async_db):
+    """A rejection has to take the seat back, not just recolour a row.
+
+    Under the new rule the player was already registered when they sent the
+    screenshot, so rejecting it must undo that or the organizer's only
+    sanction does nothing at all.
+    """
+    org, event, host, player = await _seed(async_db, social=True)
+    proof = await _seeded_proof(async_db, event, player)
+    reg = await _confirmed_registration(async_db, event, player)
     await async_db.commit()
 
     rec = Recorder()
-    cb = FakeCb(f"socok:{proof.id}", rec)
-    await org_panel.org_social_ok(cb, async_db, host)
+    await org_panel.org_social_no(FakeCb(f"socno:{proof.id}", rec), async_db, host)
+
+    await async_db.refresh(proof)
+    await async_db.refresh(reg)
+    assert proof.status == SocialProofStatus.REJECTED
+    assert reg.status == RegistrationStatus.INELIGIBLE
+    assert event.confirmed_count == 0
+    told = [t for chat, t, _ in rec.sent if chat == player.telegram_id]
+    assert told, "the player was never told their entry was voided"
+    assert "دوباره" in told[0]
+
+
+@pytest.mark.asyncio
+async def test_undoing_a_rejection_gives_the_registration_back(async_db):
+    org, event, host, player = await _seed(async_db, social=True)
+    proof = await _seeded_proof(async_db, event, player, status=SocialProofStatus.REJECTED)
+    await async_db.commit()
+
+    rec = Recorder()
+    await org_panel.org_social_ok(FakeCb(f"socok:{proof.id}", rec), async_db, host)
 
     await async_db.refresh(proof)
     assert proof.status == SocialProofStatus.APPROVED
-    from app.models.registration import Registration
     from sqlalchemy import select
+
+    from app.models.registration import Registration
 
     reg = await async_db.scalar(
         select(Registration).where(
             Registration.event_id == event.id, Registration.user_id == player.id
         )
     )
-    assert reg is not None
-    assert reg.status == RegistrationStatus.CONFIRMED
-    # the player is told, on their own chat
+    assert reg is not None and reg.status == RegistrationStatus.CONFIRMED
     assert any(chat == player.telegram_id for chat, _, _ in rec.sent)
 
 
 @pytest.mark.asyncio
-async def test_rejecting_a_follow_screenshot_leaves_them_pending(async_db):
+async def test_a_stranger_cannot_reject_a_follow_screenshot(async_db):
     org, event, host, player = await _seed(async_db, social=True)
-    proof = SocialProof(
-        event_id=event.id, user_id=player.id, file_id="shot", status=SocialProofStatus.PENDING
-    )
-    async_db.add(proof)
+    proof = await _seeded_proof(async_db, event, player)
     await async_db.commit()
 
     rec = Recorder()
-    await org_panel.org_social_no(FakeCb(f"socno:{proof.id}", rec), async_db, host)
-    await async_db.refresh(proof)
-    assert proof.status == SocialProofStatus.REJECTED
-    assert event.confirmed_count == 0
-
-
-@pytest.mark.asyncio
-async def test_a_stranger_cannot_approve_a_follow_screenshot(async_db):
-    org, event, host, player = await _seed(async_db, social=True)
-    proof = SocialProof(
-        event_id=event.id, user_id=player.id, file_id="shot", status=SocialProofStatus.PENDING
-    )
-    async_db.add(proof)
-    await async_db.commit()
-
-    rec = Recorder()
-    await org_panel.org_social_ok(FakeCb(f"socok:{proof.id}", rec), async_db, player)
+    await org_panel.org_social_no(FakeCb(f"socno:{proof.id}", rec), async_db, player)
     await async_db.refresh(proof)
     assert proof.status == SocialProofStatus.PENDING
 
@@ -334,13 +374,15 @@ async def test_player_follow_screenshot_reaches_the_organizer(async_db, monkeypa
     proof = await get_proof(async_db, event_id=event.id, user_id=player.id)
     assert proof is not None
     assert proof.status == SocialProofStatus.PENDING
-    # the organizer is shown the screenshot with review buttons
+    # the organizer is shown the screenshot with a reject button - there is
+    # nothing to approve, the player is already registered
     assert rec.photos
-    _, file_id, _, markup = rec.photos[-1]
+    _, file_id, caption, markup = rec.photos[-1]
     assert file_id == "shot-1"
     assert any(
-        b.callback_data == f"socok:{proof.id}" for row in markup.inline_keyboard for b in row
+        b.callback_data == f"socno:{proof.id}" for row in markup.inline_keyboard for b in row
     )
+    assert "تأیید" not in caption, "the organizer must not be told they gate anything"
 
 
 @pytest.mark.asyncio
@@ -393,28 +435,35 @@ async def test_claim_notification_offers_the_players_dm(async_db):
     assert "https://t.me/lucky" in urls
 
 
+async def _send_screenshot(async_db, event, player, monkeypatch, rec):
+    from app.bot.handlers import player as player_panel
+
+    async def _no_limit(*a, **kw):
+        return None
+
+    monkeypatch.setattr(player_panel, "hit_rate_limit", _no_limit)
+    state = FakeState()
+    state.data["event_token"] = event.public_token
+    await state.set_state("SocialProofSG:screenshot")
+    msg = FakeMessage(rec)
+    msg.photo = [type("P", (), {"file_id": "shot-1"})()]
+    await player_panel.social_screenshot(msg, async_db, player, state)
+
+
 @pytest.mark.asyncio
-async def test_approving_a_follow_screenshot_sends_the_room_straight_away(async_db, monkeypatch):
-    """Approval is the moment they qualify, so the room must go out then.
+async def test_the_screenshot_itself_sends_the_room_straight_away(async_db, monkeypatch):
+    """Sending is the moment they qualify, so the room must go out then.
 
     Waiting for the periodic sweep would leave a player who did everything
     right staring at nothing while the match starts.
     """
     org, event, host, player = await _seed(async_db, social=True)
-    proof = SocialProof(
-        event_id=event.id, user_id=player.id, file_id="shot", status=SocialProofStatus.PENDING
-    )
-    async_db.add(proof)
-    await async_db.commit()
-
     queued: list[str] = []
     from app.workers import enqueue
 
     monkeypatch.setattr(enqueue, "spawn", lambda task, *a: queued.append(a[0]))
 
-    rec = Recorder()
-    await org_panel.org_social_ok(FakeCb(f"socok:{proof.id}", rec), async_db, host)
-
+    await _send_screenshot(async_db, event, player, monkeypatch, Recorder())
     assert queued == [str(event.id)], "the credentials send was never queued"
 
 
@@ -422,17 +471,183 @@ async def test_approving_a_follow_screenshot_sends_the_room_straight_away(async_
 async def test_no_send_is_queued_when_the_custom_is_already_closed(async_db, monkeypatch):
     org, event, host, player = await _seed(async_db, social=True)
     event.archived_at = datetime.now(UTC)
-    proof = SocialProof(
-        event_id=event.id, user_id=player.id, file_id="shot", status=SocialProofStatus.PENDING
-    )
-    async_db.add(proof)
-    await async_db.commit()
+    await async_db.flush()
 
     queued: list[str] = []
     from app.workers import enqueue
 
     monkeypatch.setattr(enqueue, "spawn", lambda task, *a: queued.append(a[0]))
 
-    rec = Recorder()
-    await org_panel.org_social_ok(FakeCb(f"socok:{proof.id}", rec), async_db, host)
+    await _send_screenshot(async_db, event, player, monkeypatch, Recorder())
     assert queued == []
+
+
+# ------------------------------------------------- the follow-screenshot archive
+
+
+async def _many_proofs(async_db, event, players, *, statuses):
+    from app.services.social import list_tasks
+
+    tasks = await list_tasks(async_db, event.id)
+    made = []
+    for i, status in enumerate(statuses):
+        user = User(telegram_id=6200 + i, first_name=f"p{i}")
+        async_db.add(user)
+        await async_db.flush()
+        proof = SocialProof(
+            event_id=event.id,
+            user_id=user.id,
+            task_id=tasks[0].id if tasks else None,
+            file_id=f"shot-{i}",
+            status=status,
+        )
+        async_db.add(proof)
+        made.append(proof)
+    await async_db.flush()
+    return made
+
+
+@pytest.mark.asyncio
+async def test_the_archive_still_opens_when_nothing_is_pending(async_db):
+    """The old queue emptied itself into a dead end; the archive must not."""
+    org, event, host, player = await _seed(async_db, social=True)
+    await _many_proofs(
+        async_db,
+        event,
+        None,
+        statuses=[SocialProofStatus.APPROVED, SocialProofStatus.APPROVED],
+    )
+    await async_db.commit()
+
+    rec = Recorder()
+    await org_panel.org_social_queue(FakeCb(f"orgp:soc:{event.public_token}", rec), async_db, host)
+    text = rec.last
+    assert "اسکرین‌های فالو" in text
+    assert "بررسی‌نشده: 0" in text
+    assert "لازم نیست چیزی را تأیید کنید" in text
+
+
+@pytest.mark.asyncio
+async def test_the_archive_pages_instead_of_flooding_the_chat(async_db):
+    """Twelve screenshots used to mean twelve separate photo messages."""
+    org, event, host, player = await _seed(async_db, social=True)
+    await _many_proofs(async_db, event, None, statuses=[SocialProofStatus.PENDING] * 12)
+    await async_db.commit()
+
+    rec = Recorder()
+    await org_panel.org_social_queue(FakeCb(f"orgp:soc:{event.public_token}", rec), async_db, host)
+    assert len(rec.views) == 1, "one edited view, not one message per screenshot"
+    assert not rec.photos, "photos only load when the organizer asks for one"
+    kb = rec.views[-1][1]
+    data = [b.callback_data for row in kb.inline_keyboard for b in row if b.callback_data]
+    assert sum(1 for d in data if d.startswith("socv:")) == 5
+    assert any(d == f"orgp:soc:{event.public_token}:1:a" for d in data), "no next page"
+
+
+@pytest.mark.asyncio
+async def test_the_archive_can_be_filtered_to_the_rejected_ones(async_db):
+    org, event, host, player = await _seed(async_db, social=True)
+    await _many_proofs(
+        async_db,
+        event,
+        None,
+        statuses=[SocialProofStatus.PENDING, SocialProofStatus.REJECTED, SocialProofStatus.APPROVED],
+    )
+    await async_db.commit()
+
+    rec = Recorder()
+    await org_panel.org_social_queue(
+        FakeCb(f"orgp:soc:{event.public_token}:0:r", rec), async_db, host
+    )
+    kb = rec.views[-1][1]
+    data = [b.callback_data for row in kb.inline_keyboard for b in row if b.callback_data]
+    assert sum(1 for d in data if d.startswith("socv:")) == 1
+
+
+@pytest.mark.asyncio
+async def test_one_screenshot_opens_full_size_with_a_reject_button(async_db):
+    org, event, host, player = await _seed(async_db, social=True)
+    proof = await _seeded_proof(async_db, event, player)
+    await async_db.commit()
+
+    rec = Recorder()
+    await org_panel.org_social_view(FakeCb(f"socv:{proof.id.hex}", rec), async_db, host)
+    assert rec.photos
+    _, file_id, caption, markup = rec.photos[-1]
+    assert file_id == "shot"
+    assert "بررسی‌نشده" in caption
+    data = [b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data]
+    assert f"socno:{proof.id}" in data
+    assert f"orgp:soc:{event.public_token}" in data, "no way back to the list"
+
+
+@pytest.mark.asyncio
+async def test_a_stranger_cannot_open_someone_elses_screenshot(async_db):
+    org, event, host, player = await _seed(async_db, social=True)
+    proof = await _seeded_proof(async_db, event, player)
+    await async_db.commit()
+
+    rec = Recorder()
+    await org_panel.org_social_view(FakeCb(f"socv:{proof.id.hex}", rec), async_db, player)
+    assert not rec.photos
+    assert any(alert for alert, _ in rec.alerts)
+
+
+@pytest.mark.asyncio
+async def test_marking_everything_checked_changes_nobody_s_registration(async_db):
+    org, event, host, player = await _seed(async_db, social=True)
+    proofs = await _many_proofs(
+        async_db, event, None, statuses=[SocialProofStatus.PENDING] * 3
+    )
+    await async_db.commit()
+
+    rec = Recorder()
+    await org_panel.org_social_all_ok(
+        FakeCb(f"socall:ok:{event.public_token}", rec), async_db, host
+    )
+    for proof in proofs:
+        await async_db.refresh(proof)
+        assert proof.status == SocialProofStatus.APPROVED
+    assert event.confirmed_count == 0
+    assert "چیزی برای بازیکن‌ها عوض نشد" in rec.last
+
+
+@pytest.mark.asyncio
+async def test_rejecting_everyone_asks_first(async_db):
+    """One mis-tap would otherwise void a whole custom."""
+    org, event, host, player = await _seed(async_db, social=True)
+    proof = await _seeded_proof(async_db, event, player)
+    await async_db.commit()
+
+    rec = Recorder()
+    await org_panel.org_social_all_ask(
+        FakeCb(f"socall:ask:{event.public_token}", rec), async_db, host
+    )
+    await async_db.refresh(proof)
+    assert proof.status == SocialProofStatus.PENDING, "nothing may happen before the confirm"
+    assert "مطمئنید" in rec.last
+    data = [
+        b.callback_data
+        for row in rec.views[-1][1].inline_keyboard
+        for b in row
+        if b.callback_data
+    ]
+    assert f"socall:no:{event.public_token}" in data
+
+
+@pytest.mark.asyncio
+async def test_confirming_reject_all_voids_the_confirmed_seats(async_db):
+    org, event, host, player = await _seed(async_db, social=True)
+    proof = await _seeded_proof(async_db, event, player)
+    reg = await _confirmed_registration(async_db, event, player)
+    await async_db.commit()
+
+    rec = Recorder()
+    await org_panel.org_social_all_no(
+        FakeCb(f"socall:no:{event.public_token}", rec), async_db, host
+    )
+    await async_db.refresh(proof)
+    await async_db.refresh(reg)
+    assert proof.status == SocialProofStatus.REJECTED
+    assert reg.status == RegistrationStatus.INELIGIBLE
+    assert event.confirmed_count == 0

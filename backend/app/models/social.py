@@ -35,9 +35,11 @@ class EventSocialTask(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 class SocialProof(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     """A player's screenshot proving they followed the organizer's page.
 
-    This is the last gate before a registration is confirmed, and only exists
-    for events where the organizer asked for one. The organizer reviews it; the
-    bot owner can review it too when the organizer goes quiet.
+    Sending it is the requirement - the registration is final the moment the row
+    exists, and nobody has to approve it. ``status`` is an audit trail rather
+    than a gate: the organizer (or the bot owner) can look through the archive
+    later and REJECT a screenshot that shows something else, which voids that
+    player's entry until they send a real one.
     """
 
     __tablename__ = "social_proofs"

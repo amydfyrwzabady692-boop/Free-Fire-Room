@@ -211,29 +211,31 @@ async def evaluate_requirements(
 
 
 async def _social_item(db: AsyncSession, user: User, event: Event) -> CheckItem | None:
-    """Follow the organizer's page and prove it - only when they asked for it."""
-    from app.core.enums import SocialProofStatus
-    from app.services.social import get_proof, platform_label, social_required
+    """Follow the organizer's pages and prove it - only when they asked for it.
+
+    Two outcomes, never three. Sending the screenshot is the requirement, so a
+    screenshot nobody has looked at is DONE; the one thing that reopens the item
+    is the organizer rejecting one.
+    """
+    from app.services.social import (
+        gate_from,
+        list_tasks,
+        platform_label,
+        proofs_for_user,
+        rejected_proof,
+        social_required,
+    )
 
     if not social_required(event):
         return None
-    label = f"فالو {platform_label(event)} + ارسال اسکرین‌شات"
-    proof = await get_proof(db, event_id=event.id, user_id=user.id)
-    if proof is None:
-        return CheckItem(
-            RequirementType.SOCIAL_FOLLOW,
-            label,
-            RequirementStatus.NOT_DONE,
-            "پیج را فالو کنید و اسکرین‌شات آن را بفرستید.",
-            action="social_proof",
-            url=event.social_url,
-        )
-    if proof.status == SocialProofStatus.APPROVED:
-        return CheckItem(
-            RequirementType.SOCIAL_FOLLOW, label, RequirementStatus.DONE, url=event.social_url
-        )
-    if proof.status == SocialProofStatus.REJECTED:
-        detail = (proof.review_note or "").strip() or "اسکرین شما تأیید نشد. دوباره بفرستید."
+    label = f"فالو {platform_label(event.social_platform)} + ارسال اسکرین‌شات"
+    tasks = await list_tasks(db, event.id)
+    if len(tasks) > 1:
+        label = f"فالو {len(tasks)} پیج + ارسال اسکرین‌شات هرکدام"
+    proofs = await proofs_for_user(db, event_id=event.id, user_id=user.id)
+    bad = rejected_proof(proofs)
+    if bad is not None:
+        detail = (bad.review_note or "").strip() or "یکی از اسکرین‌های شما رد شد. دوباره بفرستید."
         return CheckItem(
             RequirementType.SOCIAL_FOLLOW,
             label,
@@ -242,11 +244,16 @@ async def _social_item(db: AsyncSession, user: User, event: Event) -> CheckItem 
             action="social_proof",
             url=event.social_url,
         )
+    if gate_from(tasks, proofs):
+        return CheckItem(
+            RequirementType.SOCIAL_FOLLOW, label, RequirementStatus.DONE, url=event.social_url
+        )
     return CheckItem(
         RequirementType.SOCIAL_FOLLOW,
         label,
-        RequirementStatus.PENDING_REVIEW,
-        "اسکرین شما رسید و منتظر تأیید برگزارکننده است.",
+        RequirementStatus.NOT_DONE,
+        "پیج را فالو کنید و اسکرین‌شات آن را بفرستید.",
+        action="social_proof",
         url=event.social_url,
     )
 

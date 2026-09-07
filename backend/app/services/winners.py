@@ -82,14 +82,58 @@ async def create_winner_claim(
     return claim
 
 
-def format_winner_claim_caption(event: Event, player: User) -> str:
+def format_winner_claim_caption(
+    event: Event, player: User, *, proof_count: int = 0, social_asked: bool = False
+) -> str:
+    """The caption under the win screenshot itself.
+
+    It says which photo this is, because by the time it lands the organizer has
+    just scrolled past the player's follow screenshots.
+    """
+    from app.core.time import to_fa_digits
+
     prize = esc((event.prize_summary or "").strip() or "—")
+    lines = [
+        "🏆 <b>ادعای برنده</b>",
+        f"کاستوم: {esc(event.title)}",
+        f"جایزه: {prize}",
+        f"بازیکن: {format_person(player)}",
+        "",
+        "📷 این عکس، اسکرین «برنده شدن» است.",
+    ]
+    if proof_count:
+        lines.append(
+            f"📸 اسکرین فالو: {to_fa_digits(str(proof_count))} عدد، بالاتر فرستاده شد."
+        )
+    elif social_asked:
+        lines.append("⚠️ برای این بازیکن هیچ اسکرین فالویی ثبت نشده است.")
+    else:
+        lines.append("این کاستوم شرط فالو نداشت.")
+    lines.append("")
+    lines.append("این بازیکن شرایط جوین را انجام داده و ROOM ID / PASS را از ربات گرفته است.")
+    return "\n".join(lines)
+
+
+def format_claim_proof_header(event: Event, player: User, count: int) -> str:
+    from app.core.time import to_fa_digits
+
     return (
-        "🏆 <b>ادعای برنده</b>\n"
+        "📸 <b>اسکرین‌های فالو این بازیکن</b>\n"
         f"کاستوم: {esc(event.title)}\n"
-        f"جایزه: {prize}\n"
         f"بازیکن: {format_person(player)}\n\n"
-        "این بازیکن شرایط جوین را انجام داده و ROOM ID / PASS را از ربات گرفته است."
+        f"{to_fa_digits(str(count))} اسکرین در ادامه می‌آید و بعد از آن‌ها عکس برنده شدن."
+    )
+
+
+def format_claim_proof_caption(event: Event, proof, index: int, total: int) -> str:
+    from app.core.time import to_fa_digits
+    from app.services.social import proof_status_label, task_label
+
+    page = proof.task.url if proof.task else (event.social_url or "—")
+    return (
+        f"📸 اسکرین فالو {to_fa_digits(str(index))} از {to_fa_digits(str(total))}\n"
+        f"پیج ({esc(task_label(proof.task))}): {esc(page)}\n"
+        f"وضعیت: {proof_status_label(proof.status)}"
     )
 
 
