@@ -680,3 +680,41 @@ async def test_the_archive_does_not_claim_the_organizer_is_blocking_anyone(async
     rec = Recorder()
     await org_panel.org_social_queue(FakeCb(f"orgp:soc:{event.public_token}", rec), async_db, host)
     assert "لازم نیست چیزی را تأیید کنید" in rec.last
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_player_gets_their_seat_back_by_resending(async_db, monkeypatch):
+    """The whole point of rejecting is that it can be fixed."""
+    from app.bot.handlers import player as player_panel
+    from app.services.social import get_proof
+
+    async def _no_limit(*a, **kw):
+        return None
+
+    monkeypatch.setattr(player_panel, "hit_rate_limit", _no_limit)
+    org, event, host, player = await _seed(async_db, social=True)
+    proof = await _seeded_proof(async_db, event, player)
+    reg = await _confirmed_registration(async_db, event, player)
+    await async_db.commit()
+
+    rec = Recorder()
+    await org_panel.org_social_no(FakeCb(f"socno:{proof.id}", rec), async_db, host)
+    await async_db.refresh(reg)
+    assert reg.status == RegistrationStatus.INELIGIBLE
+    assert event.confirmed_count == 0
+
+    # the player sends a real screenshot this time
+    state = FakeState()
+    state.data["event_token"] = event.public_token
+    await state.set_state("SocialProofSG:screenshot")
+    msg = FakeMessage(Recorder())
+    msg.photo = [type("P", (), {"file_id": "better-shot"})()]
+    await player_panel.social_screenshot(msg, async_db, player, state)
+
+    await async_db.refresh(reg)
+    fixed = await get_proof(async_db, event_id=event.id, user_id=player.id)
+    assert fixed.status == SocialProofStatus.PENDING
+    assert fixed.file_id == "better-shot"
+    assert reg.status == RegistrationStatus.CONFIRMED
+    assert reg.ineligible_reason is None, "the old reason must not follow them"
+    assert event.confirmed_count == 1, "the seat must come back exactly once"

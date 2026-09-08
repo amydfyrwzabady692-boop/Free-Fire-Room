@@ -132,6 +132,9 @@ async def register_user(
         holder.status = RegistrationStatus.CONFIRMED
         holder.confirmed_at = now
         holder.conditions_met_at = now
+        # they were demoted before and have fixed it: the old reason would
+        # otherwise follow them into the CSV export and the funnel
+        holder.ineligible_reason = None
         locked.confirmed_count += 1
         if not unlimited and locked.confirmed_count >= locked.capacity and locked.status == EventStatus.PUBLISHED:
             locked.status = EventStatus.FULL

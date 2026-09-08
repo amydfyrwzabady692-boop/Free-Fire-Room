@@ -124,7 +124,7 @@ from app.services.winners import (
     resolve_claim,
     resolve_payout_contact,
 )
-from app.services.registration import register_user
+from app.services.registration import mark_ineligible, register_user
 from app.services.reports import (
     credentials_window_open,
     creds_were_provided,
@@ -1939,8 +1939,9 @@ async def _void_registration(db: AsyncSession, event: Event, player: User) -> bo
     """Take back a seat won with a screenshot that turned out to be junk.
 
     Returns True when the player was actually holding a confirmed seat. The
-    decrement is guarded the same way ``deliver_one`` guards its own demotion,
-    so a double tap cannot drive ``confirmed_count`` negative.
+    accounting - the guarded decrement, unwinding FULL, and handing the freed
+    seat to whoever is next on the waitlist - belongs to ``mark_ineligible``;
+    doing it here by hand is how the two would drift apart.
     """
     reg = await db.scalar(
         select(Registration).where(
@@ -1949,13 +1950,7 @@ async def _void_registration(db: AsyncSession, event: Event, player: User) -> bo
     )
     if not reg or reg.status != RegistrationStatus.CONFIRMED:
         return False
-    reg.status = RegistrationStatus.INELIGIBLE
-    reg.ineligible_reason = "social_rejected"
-    if event.confirmed_count > 0:
-        event.confirmed_count -= 1
-    if event.status == EventStatus.FULL:
-        event.status = EventStatus.PUBLISHED
-    await db.flush()
+    await mark_ineligible(db, reg, "social_rejected")
     return True
 
 
