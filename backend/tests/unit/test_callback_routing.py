@@ -19,7 +19,7 @@ from app.bot.handlers.player import router as player_router
 from app.bot.handlers.winner import router as winner_router
 from app.bot.keyboards.common import (
     organizer_profile_kb,
-    post_confirm_kb,
+    post_targets_kb,
     social_bulk_kb,
     social_reject_all_kb,
     start_confirm_kb,
@@ -80,6 +80,14 @@ def _callbacks(markup) -> list[str]:
     return [b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data]
 
 
+class _FakeChannel:
+    """Just enough Channel for channel_public_label()."""
+
+    def __init__(self, username: str):
+        self.title = "کانال"
+        self.username = username
+
+
 ALL_KEYBOARDS = {
     "organizer_home": organizer_home_kb(),
     "payout_saved": payout_contact_kb(saved="@old", username="me"),
@@ -89,7 +97,10 @@ ALL_KEYBOARDS = {
         CLAIM, status="rejected", back=f"orgp:soc:{TOKEN}"
     ),
     "social_reject_all": social_reject_all_kb(TOKEN, 12),
-    "post_confirm": post_confirm_kb(TOKEN, "@myclan"),
+    "post_targets_one": post_targets_kb(TOKEN, [_FakeChannel("@one")]),
+    "post_targets_many": post_targets_kb(
+        TOKEN, [_FakeChannel("@one"), _FakeChannel("@two"), _FakeChannel("@three")]
+    ),
     "winner_claim_review": winner_claim_review_kb(CLAIM),
     "winner_claim_reviewed": winner_claim_review_kb(CLAIM, approved=True),
     "winner_reply": winner_reply_kb(CLAIM, contact_url="https://t.me/x"),
@@ -213,7 +224,8 @@ def test_the_check_can_actually_fail():
         f"socall:ask:{TOKEN}",
         f"orgp:soc:{TOKEN}:2:r",
         f"orgp:post:{TOKEN}",
-        f"orgp:pub:{TOKEN}",
+        f"orgp:pub:{TOKEN}:0",
+        f"orgp:pub:{TOKEN}:a",
     ],
 )
 def test_new_callbacks_are_routed(data):

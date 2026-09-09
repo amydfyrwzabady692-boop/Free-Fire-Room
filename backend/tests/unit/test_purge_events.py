@@ -104,3 +104,74 @@ def test_purge_old_events_removes_registrations_and_credentials(db):
     assert db.scalars(select(Registration.id)).all() == []
     assert db.scalars(select(RoomCredential.id)).all() == []
     assert db.scalars(select(EventView.id)).all() == []
+
+
+def test_purging_a_custom_takes_its_follow_screenshots_with_it(db):
+    """Screenshots must not outlive the custom they belong to.
+
+    They are dead weight the moment the custom is gone, and they are the one
+    kind of row a busy custom produces by the hundred. The cascade lives in
+    migrations 0008/0009; this asserts it actually fires rather than trusting a
+    FK clause written in another file.
+    """
+    from app.core.enums import SocialPlatform, SocialProofStatus
+    from app.models.social import EventSocialTask, SocialProof
+    from app.services.social import seed_tasks
+
+    host = make_user(db, 811)
+    player = make_user(db, 812)
+    org = make_organizer(db, host)
+    now = datetime.now(UTC)
+
+    old = make_event(db, org, title="Old custom")
+    old.starts_at = now - timedelta(hours=25)
+    old.social_url = "https://instagram.com/a"
+    old.social_platform = SocialPlatform.INSTAGRAM
+    db.flush()
+    seed_tasks(
+        db,
+        old,
+        [
+            {"url": "https://instagram.com/a", "platform": SocialPlatform.INSTAGRAM},
+            {"url": "https://youtube.com/@b", "platform": SocialPlatform.YOUTUBE},
+        ],
+    )
+    db.flush()
+    for task in db.scalars(select(EventSocialTask).where(EventSocialTask.event_id == old.id)):
+        db.add(
+            SocialProof(
+                event_id=old.id,
+                user_id=player.id,
+                task_id=task.id,
+                file_id=f"shot-{task.sort_order}",
+                status=SocialProofStatus.PENDING,
+            )
+        )
+
+    # a custom that is still inside the retention window keeps everything
+    keeper = make_event(db, org, title="Recent custom")
+    keeper.starts_at = now - timedelta(hours=2)
+    keeper.social_url = "https://instagram.com/c"
+    db.flush()
+    seed_tasks(db, keeper, [{"url": "https://instagram.com/c", "platform": SocialPlatform.INSTAGRAM}])
+    db.flush()
+    kept_task = db.scalar(select(EventSocialTask).where(EventSocialTask.event_id == keeper.id))
+    db.add(
+        SocialProof(
+            event_id=keeper.id,
+            user_id=player.id,
+            task_id=kept_task.id,
+            file_id="keep-me",
+            status=SocialProofStatus.PENDING,
+        )
+    )
+    db.commit()
+
+    assert len(db.scalars(select(SocialProof)).all()) == 3
+    _purge_events_older_than(db, now - timedelta(hours=24))
+    db.commit()
+
+    proofs = db.scalars(select(SocialProof)).all()
+    tasks = db.scalars(select(EventSocialTask)).all()
+    assert [p.file_id for p in proofs] == ["keep-me"]
+    assert [t.event_id for t in tasks] == [keeper.id]

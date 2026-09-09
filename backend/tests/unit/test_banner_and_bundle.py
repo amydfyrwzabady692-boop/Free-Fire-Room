@@ -322,7 +322,7 @@ class PostCb:
         self.rec.alerts.append((text, show_alert))
 
 
-async def _channel_event(async_db):
+async def _channel_event(async_db, *, extra_channels: int = 0):
     from app.core.security import generate_unguessable_token
     from app.models.channel import Channel
     from app.models.event import Event, EventRequiredChannel
@@ -359,9 +359,18 @@ async def _channel_event(async_db):
     async_db.add(event)
     await async_db.flush()
     async_db.add(EventRequiredChannel(event_id=event.id, channel_id=channel.id, is_active=True))
+    channels = [channel]
+    for i in range(extra_channels):
+        more = Channel(
+            telegram_chat_id=-100800 - i, title=f"کانال {i + 2}", username=f"ch{i + 2}", bot_is_admin=True
+        )
+        async_db.add(more)
+        await async_db.flush()
+        async_db.add(EventRequiredChannel(event_id=event.id, channel_id=more.id, is_active=True))
+        channels.append(more)
     await async_db.flush()
     await async_db.commit()
-    return event, host, channel
+    return event, host, channels[0] if extra_channels == 0 else channels
 
 
 @pytest.mark.asyncio
@@ -379,7 +388,129 @@ async def test_the_preview_shows_the_organizer_exactly_what_the_channel_gets(asy
     assert markup.inline_keyboard[0][0].text == "ورود به کاستوم جایزه دار"
     # and nothing has been posted to the channel yet
     assert all(chat != channel.telegram_chat_id for chat, *_ in rec.sent)
-    assert any("مقصد" in view for view, _ in rec.views)
+    assert any("کجا منتشر شود" in view for view, _ in rec.views)
+
+
+@pytest.mark.asyncio
+async def test_the_picker_lists_every_mandatory_channel_one_by_one(async_db):
+    """The organizer picks which channel, or takes all of them in one tap."""
+    from app.bot.handlers import organizer as org_panel
+
+    event, host, channels = await _channel_event(async_db, extra_channels=2)
+    rec = PostRecorder()
+    await org_panel.org_post_preview(PostCb(f"orgp:post:{event.public_token}", rec), async_db, host)
+
+    view, markup = rec.views[-1]
+    buttons = [b for row in markup.inline_keyboard for b in row]
+    per_channel = [b for b in buttons if b.callback_data and b.callback_data.endswith(("0", "1", "2"))]
+    assert len(per_channel) == 3, "one button per mandatory channel"
+    assert any(b.callback_data == f"orgp:pub:{event.public_token}:a" for b in buttons)
+    # and every channel is named in the message, not just on a button
+    for channel in channels:
+        assert channel.username in view
+
+
+@pytest.mark.asyncio
+async def test_a_single_channel_gets_no_pointless_all_button(async_db):
+    from app.bot.handlers import organizer as org_panel
+
+    event, host, channel = await _channel_event(async_db)
+    rec = PostRecorder()
+    await org_panel.org_post_preview(PostCb(f"orgp:post:{event.public_token}", rec), async_db, host)
+
+    _, markup = rec.views[-1]
+    data = [b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data]
+    assert f"orgp:pub:{event.public_token}:0" in data
+    assert f"orgp:pub:{event.public_token}:a" not in data
+
+
+@pytest.mark.asyncio
+async def test_picking_one_channel_posts_only_there(async_db, monkeypatch):
+    from app.bot.handlers import organizer as org_panel
+
+    event, host, channels = await _channel_event(async_db, extra_channels=2)
+
+    async def _admin(bot, chat_ref):
+        return type("R", (), {"is_admin": True})()
+
+    monkeypatch.setattr(org_panel, "inspect_bot_admin", _admin)
+    ordered = org_panel.post_targets(
+        await org_panel._own_event(async_db, host, event.public_token)
+    )
+    rec = PostRecorder()
+    await org_panel.org_post_publish(
+        PostCb(f"orgp:pub:{event.public_token}:1", rec), async_db, host
+    )
+
+    chats = [m[0] for m in rec.sent]
+    assert chats == [ordered[1].telegram_chat_id], chats
+
+
+@pytest.mark.asyncio
+async def test_all_posts_to_every_channel_once(async_db, monkeypatch):
+    from app.bot.handlers import organizer as org_panel
+
+    event, host, channels = await _channel_event(async_db, extra_channels=2)
+
+    async def _admin(bot, chat_ref):
+        return type("R", (), {"is_admin": True})()
+
+    monkeypatch.setattr(org_panel, "inspect_bot_admin", _admin)
+    rec = PostRecorder()
+    await org_panel.org_post_publish(
+        PostCb(f"orgp:pub:{event.public_token}:a", rec), async_db, host
+    )
+
+    chats = sorted(m[0] for m in rec.sent)
+    assert chats == sorted(c.telegram_chat_id for c in channels)
+    assert len(chats) == len(set(chats)), "no channel posted to twice"
+    assert any("۳" in view for view, _ in rec.views), "the summary counts them"
+
+
+@pytest.mark.asyncio
+async def test_one_bad_channel_does_not_stop_the_others(async_db, monkeypatch):
+    """A channel the bot was demoted in must not cost the rest their post."""
+    from app.bot.handlers import organizer as org_panel
+
+    event, host, channels = await _channel_event(async_db, extra_channels=2)
+    ordered = org_panel.post_targets(
+        await org_panel._own_event(async_db, host, event.public_token)
+    )
+    broken = ordered[1].telegram_chat_id
+
+    async def _admin(bot, chat_ref):
+        return type("R", (), {"is_admin": chat_ref != broken})()
+
+    monkeypatch.setattr(org_panel, "inspect_bot_admin", _admin)
+    rec = PostRecorder()
+    await org_panel.org_post_publish(
+        PostCb(f"orgp:pub:{event.public_token}:a", rec), async_db, host
+    )
+
+    chats = sorted(m[0] for m in rec.sent)
+    assert broken not in chats
+    assert len(chats) == 2, "the other two still went out"
+    summary = rec.views[-1][0]
+    assert "ادمین" in summary, "the organizer is told which one failed and why"
+
+
+@pytest.mark.asyncio
+async def test_a_stale_channel_index_is_refused(async_db, monkeypatch):
+    """The picker addresses channels by position; the list can change under it."""
+    from app.bot.handlers import organizer as org_panel
+
+    event, host, channel = await _channel_event(async_db)
+
+    async def _admin(bot, chat_ref):
+        return type("R", (), {"is_admin": True})()
+
+    monkeypatch.setattr(org_panel, "inspect_bot_admin", _admin)
+    rec = PostRecorder()
+    await org_panel.org_post_publish(
+        PostCb(f"orgp:pub:{event.public_token}:7", rec), async_db, host
+    )
+    assert not rec.sent
+    assert rec.alerts
 
 
 @pytest.mark.asyncio
@@ -393,7 +524,7 @@ async def test_publishing_sends_the_same_post_to_the_channel(async_db, monkeypat
 
     monkeypatch.setattr(org_panel, "inspect_bot_admin", _admin)
     rec = PostRecorder()
-    await org_panel.org_post_publish(PostCb(f"orgp:pub:{event.public_token}", rec), async_db, host)
+    await org_panel.org_post_publish(PostCb(f"orgp:pub:{event.public_token}:0", rec), async_db, host)
 
     to_channel = [m for m in rec.sent if m[0] == channel.telegram_chat_id]
     assert len(to_channel) == 1
@@ -415,7 +546,7 @@ async def test_publishing_refuses_when_the_bot_lost_admin(async_db, monkeypatch)
 
     monkeypatch.setattr(org_panel, "inspect_bot_admin", _not_admin)
     rec = PostRecorder()
-    await org_panel.org_post_publish(PostCb(f"orgp:pub:{event.public_token}", rec), async_db, host)
+    await org_panel.org_post_publish(PostCb(f"orgp:pub:{event.public_token}:0", rec), async_db, host)
 
     assert not [m for m in rec.sent if m[0] == channel.telegram_chat_id]
     assert any("ادمین" in view for view, _ in rec.views)
@@ -432,6 +563,6 @@ async def test_a_send_failure_is_reported_not_swallowed(async_db, monkeypatch):
 
     monkeypatch.setattr(org_panel, "inspect_bot_admin", _admin)
     rec = PostRecorder(fail=channel.telegram_chat_id)
-    await org_panel.org_post_publish(PostCb(f"orgp:pub:{event.public_token}", rec), async_db, host)
+    await org_panel.org_post_publish(PostCb(f"orgp:pub:{event.public_token}:0", rec), async_db, host)
 
-    assert any("انجام نشد" in text for text, _ in rec.views)
+    assert any("ارسال انجام نشد" in text for text, _ in rec.views)

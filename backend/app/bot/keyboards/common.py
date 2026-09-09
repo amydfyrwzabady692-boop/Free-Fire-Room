@@ -627,11 +627,37 @@ def organizer_profile_kb(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def post_confirm_kb(token: str, channel_label: str) -> InlineKeyboardMarkup:
-    """Preview first, publish second - a channel post cannot be taken back."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [ibtn(f"انتشار در {channel_label[:24]}", callback_data=f"orgp:pub:{token}", style=SUCCESS)],
-            [ibtn("فعلاً نه", callback_data="orgp:home", style=PRIMARY)],
-        ]
-    )
+def post_targets_kb(token: str, channels: list) -> InlineKeyboardMarkup:
+    """One button per mandatory-join channel, plus "all of them".
+
+    Preview first, publish second - a channel post cannot be taken back. The
+    buttons carry the channel's position in the list rather than its id: a
+    UUID plus a 24-character token would blow past Telegram's 64-byte
+    callback_data limit, and the caller re-derives the same ordered list before
+    it sends anything.
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    for i, channel in enumerate(channels):
+        from app.services.event_display import channel_public_label
+
+        rows.append(
+            [
+                ibtn(
+                    f"انتشار در {channel_public_label(channel)[:30]}",
+                    callback_data=f"orgp:pub:{token}:{i}",
+                    style=SUCCESS,
+                )
+            ]
+        )
+    if len(channels) > 1:
+        rows.append(
+            [
+                ibtn(
+                    f"انتشار در همه ({len(channels)} کانال)",
+                    callback_data=f"orgp:pub:{token}:a",
+                    style=SUCCESS,
+                )
+            ]
+        )
+    rows.append([ibtn("فعلاً نه", callback_data="orgp:home", style=PRIMARY)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

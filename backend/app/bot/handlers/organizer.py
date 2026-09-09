@@ -32,7 +32,7 @@ from app.bot.keyboards.common import (
     payout_contact_kb,
     pick_date_kb,
     organizer_profile_kb,
-    post_confirm_kb,
+    post_targets_kb,
     social_bulk_kb,
     social_filter_row,
     social_reject_all_kb,
@@ -65,7 +65,14 @@ from app.core.enums import (
 )
 from app.core.errors import AppError
 from app.core.logging import get_logger
-from app.core.time import combine_local_date_and_clock, format_jalali_date, format_local, parse_clock, upcoming_local_dates
+from app.core.time import (
+    combine_local_date_and_clock,
+    format_jalali_date,
+    format_local,
+    parse_clock,
+    to_fa_digits,
+    upcoming_local_dates,
+)
 from app.models.channel import Channel, ChannelOwnership
 from app.models.event import Event, RoomCredential
 from app.models.jobs import Delivery
@@ -2724,9 +2731,38 @@ async def _send_banner(bot, chat_id, text: str, link: str):
     return await bot.send_message(chat_id, text, reply_markup=channel_post_kb(link))
 
 
+def post_targets(event: Event) -> list:
+    """Every channel this custom could be posted to, in a stable order.
+
+    The mandatory-join channels first - that is where the audience already is -
+    then the custom's own channel if it is not among them. Sorted by the
+    channel's id rather than by whatever order the relationship loaded in,
+    because the picker addresses them by position and a shuffled list would
+    send the post somewhere the organizer did not choose.
+    """
+    out: list = []
+    seen: set = set()
+    for link in _loaded_required(event):
+        channel = link.channel
+        if link.is_active and channel is not None and channel.id not in seen:
+            seen.add(channel.id)
+            out.append(channel)
+    own = resolve_event_channel(event)
+    if own is not None and own.id not in seen:
+        out.append(own)
+    return sorted(out, key=lambda c: str(c.id))
+
+
+def _loaded_required(event: Event) -> list:
+    try:
+        return list(event.required_channels or [])
+    except Exception:  # noqa: BLE001 - not eager-loaded on this session
+        return []
+
+
 @router.callback_query(F.data.startswith("orgp:post:"))
 async def org_post_preview(cb: CallbackQuery, db: AsyncSession, db_user: User):
-    """Show the organizer exactly what their channel will get, then ask."""
+    """Show the organizer the exact post, then let them pick where it goes."""
     if await _blocked_organize(db, db_user, cb):
         return
     token = cb.data.split(":", 2)[-1]
@@ -2742,8 +2778,8 @@ async def org_post_preview(cb: CallbackQuery, db: AsyncSession, db_user: User):
         await cb.message.answer("ساخت بنر الان انجام نشد. چند ثانیه بعد دوباره بزنید.")
         await cb.answer()
         return
-    channel = resolve_event_channel(e)
-    if channel is None:
+    targets = post_targets(e)
+    if not targets:
         await cb.message.answer(
             "این بالا همان چیزی است که در کانال منتشر می‌شود.\n\n"
             "⚠️ کانالی به این کاستوم وصل نیست. از «کانال‌های من» ربات را در کانالتان ادمین کنید.",
@@ -2751,74 +2787,97 @@ async def org_post_preview(cb: CallbackQuery, db: AsyncSession, db_user: User):
         )
         await cb.answer()
         return
+    listing = "\n".join(
+        f"{to_fa_digits(str(i + 1))}) {esc(channel_public_label(c))}"
+        for i, c in enumerate(targets)
+    )
     await cb.message.answer(
-        "این بالا همان چیزی است که در کانال منتشر می‌شود — با دکمهٔ "
+        "این بالا همان چیزی است که منتشر می‌شود — با دکمهٔ "
         f"«{CHANNEL_POST_LABEL}» که مستقیم بازیکن را داخل ربات می‌آورد.\n\n"
-        f"📢 مقصد: <b>{esc(channel_public_label(channel))}</b>",
-        reply_markup=post_confirm_kb(e.public_token, channel_public_label(channel)),
+        f"📢 <b>کجا منتشر شود؟</b>\n{listing}\n\n"
+        "هرکدام را خواستید بزنید، یا «همه» را.",
+        reply_markup=post_targets_kb(e.public_token, targets),
     )
     await cb.answer()
 
 
+async def _publish_to(bot, channel, text: str, link: str) -> tuple[bool, str]:
+    """Post into one channel. Returns (ok, a line to show the organizer)."""
+    label = esc(channel_public_label(channel))
+    # bot_is_admin is written once at connect time and can be hours stale, so
+    # ask Telegram again rather than failing in front of the organizer
+    try:
+        check = await inspect_bot_admin(bot, channel.telegram_chat_id)
+    except Exception:  # noqa: BLE001
+        check = None
+    if check is not None and not check.is_admin:
+        return False, f"⚠️ {label} — ربات ادمین این کانال نیست"
+    try:
+        msg = await _send_banner(bot, channel.telegram_chat_id, text, link)
+    except TelegramForbiddenError:
+        return False, f"⚠️ {label} — تلگرام اجازهٔ ارسال نداد"
+    except Exception:  # noqa: BLE001
+        log.exception("banner_publish_failed", chat_id=channel.telegram_chat_id)
+        return False, f"⚠️ {label} — ارسال انجام نشد"
+    where = f"\n   https://t.me/{channel.username}/{msg.message_id}" if channel.username else ""
+    return True, f"✅ {label}{where}"
+
+
 @router.callback_query(F.data.startswith("orgp:pub:"))
 async def org_post_publish(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    """Post into the chosen mandatory-join channel, or into all of them."""
     if await _blocked_organize(db, db_user, cb):
         return
-    token = cb.data.split(":", 2)[-1]
+    parts = cb.data.split(":")
+    token = parts[2] if len(parts) > 2 else ""
+    which = parts[3] if len(parts) > 3 else "a"
     e = await _own_event(db, db_user, token)
     if not e:
         await cb.answer("یافت نشد", show_alert=True)
         return
-    channel = resolve_event_channel(e)
-    if channel is None:
+    targets = post_targets(e)
+    if not targets:
         await cb.answer("کانالی به این کاستوم وصل نیست.", show_alert=True)
         return
-    # bot_is_admin is written once at connect time and can be hours stale, so
-    # ask Telegram again rather than failing in front of the organizer
-    try:
-        check = await inspect_bot_admin(cb.bot, channel.telegram_chat_id)
-    except Exception:  # noqa: BLE001
-        check = None
-    if check is not None and not check.is_admin:
-        await cb.message.answer(
-            "⚠️ ربات الان ادمین این کانال نیست، پس نمی‌تواند پست بگذارد.\n"
-            "اول ربات را ادمین کنید و دوباره بزنید.",
-            reply_markup=organizer_home_kb(),
-        )
-        await cb.answer()
-        return
+    if which != "a":
+        try:
+            index = int(which)
+        except ValueError:
+            await cb.answer("نامعتبر", show_alert=True)
+            return
+        if index < 0 or index >= len(targets):
+            await cb.answer("این کانال دیگر به کاستوم وصل نیست.", show_alert=True)
+            return
+        targets = [targets[index]]
+
     text, link = await _banner_parts(db, e)
-    try:
-        msg = await _send_banner(cb.bot, channel.telegram_chat_id, text, link)
-    except TelegramForbiddenError:
-        await cb.message.answer(
-            "⚠️ تلگرام اجازهٔ ارسال در این کانال را نداد. ربات باید ادمین با دسترسی "
-            "«ارسال پیام» باشد.",
-            reply_markup=organizer_home_kb(),
-        )
-        await cb.answer()
-        return
-    except Exception:  # noqa: BLE001
-        log.exception("banner_publish_failed", event_id=str(e.id))
-        await cb.message.answer(
-            "انتشار در کانال انجام نشد. چند ثانیه بعد دوباره تلاش کنید.",
-            reply_markup=organizer_home_kb(),
-        )
-        await cb.answer()
-        return
-    await write_audit(
-        db,
-        action="event_banner_posted",
-        entity_type="event",
-        entity_id=e.id,
-        actor_id=db_user.id,
-        extra={"channel_id": str(channel.id)},
-    )
+    lines: list[str] = []
+    posted = 0
+    for channel in targets:
+        ok, line = await _publish_to(cb.bot, channel, text, link)
+        lines.append(line)
+        if ok:
+            posted += 1
+            await write_audit(
+                db,
+                action="event_banner_posted",
+                entity_type="event",
+                entity_id=e.id,
+                actor_id=db_user.id,
+                extra={"channel_id": str(channel.id)},
+            )
+        # several channels in one tap: space the sends out
+        if len(targets) > 1:
+            await _pace()
     await db.commit()
-    where = f"https://t.me/{channel.username}/{msg.message_id}" if channel.username else ""
-    await cb.answer("منتشر شد")
+    await cb.answer("منتشر شد" if posted else "انجام نشد")
+    head = (
+        f"📢 <b>در {to_fa_digits(str(posted))} کانال از {to_fa_digits(str(len(targets)))} منتشر شد</b>"
+        if len(targets) > 1
+        else ""
+    )
+    body = "\n".join(lines)
     await cb.message.answer(
-        f"✅ بنر در <b>{esc(channel_public_label(channel))}</b> منتشر شد."
-        + (f"\n{where}" if where else ""),
+        (head + "\n" + body if head else body),
         reply_markup=organizer_home_kb(),
     )
