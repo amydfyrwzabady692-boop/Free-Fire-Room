@@ -96,7 +96,6 @@ from app.services.events import (
     waiting_live_credential_event,
 )
 from app.services.organizers import get_or_apply
-from app.services.posters import as_input_file, event_poster_bytes
 from app.services.telegram_ops import inspect_bot_admin, pace as _pace
 from app.services.social import (
     MAX_SOCIAL_TASKS,
@@ -949,11 +948,10 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
             f"اگر یادتان رفت، {get_settings().auto_archive_minutes} دقیقه بعد از ساعت شروع خودکار بسته می‌شود.\n\n"
             "🔔 ربات یک ساعت قبل و ده دقیقه قبل از شروع، این کاستوم را به کاربران خبر می‌دهد."
         )
-        # show the real banner, exactly as the channel would get it, rather
-        # than the bare photo with no caption and no button
+        # show the real post, exactly as the channel would get it
         try:
-            png, caption, deep = await _banner_parts(db, event)
-            await _send_banner(message.bot, message.chat.id, event, png, caption, deep)
+            text, deep = await _banner_parts(db, event)
+            await _send_banner(message.bot, message.chat.id, text, deep)
         except Exception:  # noqa: BLE001
             log.exception("publish_banner_preview_failed", event_id=str(event.id))
         await message.answer(details, reply_markup=event_share_kb(link))
@@ -2708,33 +2706,22 @@ async def org_my_profile(cb: CallbackQuery, db: AsyncSession, db_user: User):
 # ---------------------------------------------------------------- channel banner
 
 
-async def _banner_parts(db: AsyncSession, event: Event) -> tuple[bytes | None, str, str]:
-    """(poster png, caption, deep link) for one custom.
-
-    The organizer's own uploaded photo wins when they gave one - it is their
-    art. Otherwise the bot draws the banner itself, which is the whole point of
-    the poster renderer.
-    """
+async def _banner_parts(db: AsyncSession, event: Event) -> tuple[str, str]:
+    """(the post's text, the deep link) for one custom."""
     pages = await list_social_tasks(db, event.id)
-    caption = format_channel_post_caption(event, social_pages=len(pages))
-    link = event_deep_link(event.public_token)
-    if event.banner_file_id:
-        return None, caption, link
-    try:
-        png = event_poster_bytes(event, social_pages=len(pages))
-    except Exception:  # noqa: BLE001
-        log.exception("poster_render_failed", event_id=str(event.id))
-        png = None
-    return png, caption, link
+    return format_channel_post_caption(event, social_pages=len(pages)), event_deep_link(
+        event.public_token
+    )
 
 
-async def _send_banner(bot, chat_id, event: Event, png, caption: str, link: str):
-    """One photo + caption + the entry button, wherever it is going."""
-    photo = event.banner_file_id or (as_input_file(png) if png else None)
-    kb = channel_post_kb(link)
-    if photo is None:
-        return await bot.send_message(chat_id, caption, reply_markup=kb)
-    return await bot.send_photo(chat_id, photo, caption=caption, reply_markup=kb)
+async def _send_banner(bot, chat_id, text: str, link: str):
+    """The post itself: plain text, with the entry button under it.
+
+    Deliberately not a picture. A text post is what the organizer asked for -
+    it stays legible on every screen, it can be forwarded and quoted, and the
+    reader's eye lands on the prize rather than on artwork.
+    """
+    return await bot.send_message(chat_id, text, reply_markup=channel_post_kb(link))
 
 
 @router.callback_query(F.data.startswith("orgp:post:"))
@@ -2747,9 +2734,9 @@ async def org_post_preview(cb: CallbackQuery, db: AsyncSession, db_user: User):
     if not e:
         await cb.answer("یافت نشد", show_alert=True)
         return
-    png, caption, link = await _banner_parts(db, e)
+    text, link = await _banner_parts(db, e)
     try:
-        await _send_banner(cb.bot, cb.message.chat.id, e, png, caption, link)
+        await _send_banner(cb.bot, cb.message.chat.id, text, link)
     except Exception:  # noqa: BLE001
         log.exception("banner_preview_failed", event_id=str(e.id))
         await cb.message.answer("ساخت بنر الان انجام نشد. چند ثانیه بعد دوباره بزنید.")
@@ -2800,9 +2787,9 @@ async def org_post_publish(cb: CallbackQuery, db: AsyncSession, db_user: User):
         )
         await cb.answer()
         return
-    png, caption, link = await _banner_parts(db, e)
+    text, link = await _banner_parts(db, e)
     try:
-        msg = await _send_banner(cb.bot, channel.telegram_chat_id, e, png, caption, link)
+        msg = await _send_banner(cb.bot, channel.telegram_chat_id, text, link)
     except TelegramForbiddenError:
         await cb.message.answer(
             "⚠️ تلگرام اجازهٔ ارسال در این کانال را نداد. ربات باید ادمین با دسترسی "

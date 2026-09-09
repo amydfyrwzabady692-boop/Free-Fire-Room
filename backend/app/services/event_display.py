@@ -230,10 +230,11 @@ POST_RULES_LABEL = "شرایط و قوانین ❗"
 POST_NO_CHEAT = "✔️چیــت و تبــانی ممنوع 👎"
 POST_SIGNOFF = "موفق و پیروز باشین 🥰"
 
-#: Telegram cuts a photo caption at 1024 UTF-16 units; a prize alone may be 400
-#: characters and a description 500, so the parts are budgeted before the whole
-#: is capped rather than slicing the assembled HTML and cutting a tag in half.
-CAPTION_LIMIT = 1024
+#: Not a Telegram limit - the post is a plain message, so 4096 would fit. This
+#: is a tidiness budget: a channel post people actually read is short. Each part
+#: is trimmed on its own (a prize line to 120, the description to 200) so this
+#: only ever fires as a backstop, and never mid-HTML-tag.
+POST_LIMIT = 1024
 
 PLACE_LABELS = (("🥇", "نفر اول"), ("🥈", "نفر دوم"), ("🥉", "نفر سوم"))
 
@@ -255,8 +256,13 @@ def prize_places(event: Event) -> list[str]:
 
 
 def format_channel_post_caption(event: Event, *, social_pages: int = 0) -> str:
-    """The caption that rides under the banner in the organizer's channel."""
-    from app.core.time import format_when_line
+    """The post the organizer puts in their channel.
+
+    Plain text, not a picture: it stays legible on any screen, survives
+    forwarding, and puts the prize where the eye lands first. The entry button
+    is attached to the message rather than drawn into it.
+    """
+    from app.core.time import format_when_line, to_fa_digits
 
     places = prize_places(event)
     lines = [POST_TITLE, ""]
@@ -275,10 +281,12 @@ def format_channel_post_caption(event: Event, *, social_pages: int = 0) -> str:
     lines.append("")
     lines.append(POST_NO_CHEAT)
     channels = required_channel_count(event)
+    # Persian digits throughout - the clock line above already uses them, and a
+    # post that mixes ۲۲:۰۰ with "3 کانال" looks like two people wrote it
     if channels:
-        lines.append(f"✔️ عضویت در {channels} کانال اجباری")
+        lines.append(f"✔️ عضویت در {to_fa_digits(str(channels))} کانال اجباری")
     if social_pages:
-        lines.append(f"✔️ فالو {social_pages} پیج + ارسال اسکرین‌شات")
+        lines.append(f"✔️ فالو {to_fa_digits(str(social_pages))} پیج + ارسال اسکرین‌شات")
     lines.append("✔️ ROOM ID و PASS فقط داخل ربات می‌آید")
     about = event_about_text(event)
     if about:
@@ -287,6 +295,6 @@ def format_channel_post_caption(event: Event, *, social_pages: int = 0) -> str:
     lines.append("")
     lines.append(POST_SIGNOFF)
     text = "\n".join(lines)
-    if len(text) > CAPTION_LIMIT:
-        text = text[: CAPTION_LIMIT - 1].rstrip() + "…"
+    if len(text) > POST_LIMIT:
+        text = text[: POST_LIMIT - 1].rstrip() + "…"
     return text

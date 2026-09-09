@@ -11,7 +11,7 @@ from app.core.enums import EventStatus, SocialPlatform, SocialProofStatus
 from app.models.organizer import Organizer
 from app.models.social import SocialProof
 from app.models.user import User, UserProfile
-from app.services.event_display import CAPTION_LIMIT, format_channel_post_caption, prize_places
+from app.services.event_display import POST_LIMIT, format_channel_post_caption, prize_places
 from tests.conftest import make_event, make_organizer, make_user
 
 # --- the prize, read the way the organizer typed it ------------------------
@@ -40,7 +40,7 @@ def test_a_fourth_place_is_dropped_rather_than_squeezed(db):
     assert prize_places(event) == ["یک", "دو", "سه"]
 
 
-# --- the caption -----------------------------------------------------------
+# --- the post text ---------------------------------------------------------
 
 
 def _caption(db, telegram_id, **kw):
@@ -50,7 +50,7 @@ def _caption(db, telegram_id, **kw):
     return event, format_channel_post_caption(event)
 
 
-def test_the_caption_reads_like_the_owner_wrote_it(db):
+def test_the_post_reads_like_the_owner_wrote_it(db):
     event, text = _caption(db, 7110, prize_summary="واریز یک میلیون به کارت\n۵۰۰ هزار تومان")
     lines = [line for line in text.split("\n") if line.strip()]
     assert lines[0] == "🚨 کاستـوم جایـزه دار"
@@ -62,17 +62,17 @@ def test_the_caption_reads_like_the_owner_wrote_it(db):
     assert lines[-1] == "موفق و پیروز باشین 🥰"
 
 
-def test_the_caption_names_the_follow_pages_when_there_are_any(db):
+def test_the_post_names_the_follow_pages_when_there_are_any(db):
     host = make_user(db, 7111)
     org = make_organizer(db, host)
     event = make_event(db, org, prize_summary="۱۰۰۰ الماس")
     with_pages = format_channel_post_caption(event, social_pages=2)
     without = format_channel_post_caption(event, social_pages=0)
-    assert "فالو 2 پیج" in with_pages
+    assert "فالو ۲ پیج" in with_pages
     assert "پیج" not in without.replace("کاستوم", "")
 
 
-def test_the_caption_never_outgrows_a_photo_caption(db):
+def test_the_post_stays_short_enough_to_read(db):
     host = make_user(db, 7112)
     org = make_organizer(db, host)
     event = make_event(
@@ -82,7 +82,7 @@ def test_the_caption_never_outgrows_a_photo_caption(db):
         description="توضیح خیلی طولانی " * 60,
     )
     text = format_channel_post_caption(event, social_pages=5)
-    assert len(text) <= CAPTION_LIMIT, len(text)
+    assert len(text) <= POST_LIMIT, len(text)
 
 
 def test_a_prize_with_html_in_it_cannot_break_the_post(db):
@@ -91,73 +91,36 @@ def test_a_prize_with_html_in_it_cannot_break_the_post(db):
     assert "&lt;b&gt;" in text and "&amp;" in text
 
 
-# --- the banner image ------------------------------------------------------
+# --- the button under the post ---------------------------------------------
 
 
-def test_the_poster_says_the_same_thing_as_the_button(monkeypatch):
-    """The picture's call to action and the inline button must not diverge."""
-    from app.services import posters
+def test_the_post_uses_persian_digits_throughout(db):
+    """A post that mixes ۲۲:۰۰ with "3 کانال" reads like two people wrote it."""
+    from app.models.channel import Channel
+    from app.models.event import EventRequiredChannel
 
-    drawn: list[str] = []
-    real_center = posters._center
-    real_pill = posters._pill
+    host = make_user(db, 7120)
+    org = make_organizer(db, host)
+    event = make_event(db, org, prize_summary="۱۰۰۰ الماس")
+    channel = Channel(telegram_chat_id=-100777, title="ch", bot_is_admin=True)
+    db.add(channel)
+    db.flush()
+    db.add(EventRequiredChannel(event_id=event.id, channel_id=channel.id, is_active=True))
+    db.flush()
 
-    def spy_center(draw, y, text, font, fill, **kw):
-        drawn.append(text)
-        return real_center(draw, y, text, font, fill, **kw)
-
-    def spy_pill(draw, y, text, **kw):
-        drawn.append(text)
-        return real_pill(draw, y, text, **kw)
-
-    monkeypatch.setattr(posters, "_center", spy_center)
-    monkeypatch.setattr(posters, "_pill", spy_pill)
-    png = posters.render_event_poster(
-        when="امشب ساعت ۲۲",
-        host="کلن ما",
-        channels=3,
-        bot_username="ffroom",
-        places=["یک میلیون", "۵۰۰ هزار", "۱۰۰۰ الماس"],
-        social_pages=2,
-    )
-    assert png.startswith(b"\x89PNG")
-    assert posters.CTA == CHANNEL_POST_LABEL
-    assert posters.CTA in drawn, "the call to action never reached the canvas"
-    assert any("نفر اول" in t for t in drawn)
-    assert any("نفر سوم" in t for t in drawn)
-    assert any("چیت و تبانی ممنوع" in t for t in drawn)
-    assert any("t.me/ffroom" in t for t in drawn)
-
-
-def test_the_poster_survives_a_prize_nobody_would_type(monkeypatch):
-    from app.services import posters
-
-    png = posters.render_event_poster(
-        prize="ج" * 400, when="امشب ساعت ۲۲", host="ه" * 200, channels=8, bot_username="ffroom"
-    )
-    assert png.startswith(b"\x89PNG")
-
-
-def test_truncation_keeps_the_start_of_a_persian_line():
-    """Bidi puts the last glyph first; slicing the shaped string eats the wrong end."""
-    from PIL import Image, ImageDraw
-
-    from app.services import posters
-
-    draw = ImageDraw.Draw(Image.new("RGB", (10, 10)))
-    font = posters._reg(30)
-    raw = "سلام بر همهٔ بازیکنان این کاستوم جایزه‌دار"
-    fitted = posters._fit(draw, raw, font, 120)
-    assert fitted.startswith("سلام"), fitted
-    assert fitted.endswith("…")
-    assert len(fitted) < len(raw)
+    text = format_channel_post_caption(event, social_pages=2)
+    assert "۱ کانال" in text
+    assert "۲ پیج" in text
+    assert not any(ch in text for ch in "0123456789")
 
 
 def test_the_channel_button_is_a_plain_url_button():
     kb = channel_post_kb("https://t.me/ffroom?start=event_abc")
     button = kb.inline_keyboard[0][0]
     assert button.text == "ورود به کاستوم جایزه دار"
+    assert button.text == CHANNEL_POST_LABEL
     assert button.url.endswith("?start=event_abc")
+    assert len(kb.inline_keyboard) == 1, "one button under the post, nothing else"
 
 
 # --- the winner bundle -----------------------------------------------------
@@ -317,9 +280,13 @@ class PostRecorder(Recorder):
         self.alerts: list = []
         self.id = 1
 
-    async def send_photo(self, chat_id, file_id, caption=None, reply_markup=None, **kw):
+    async def send_message(self, chat_id, text, reply_markup=None, **kw):
         if self.fail is not None and chat_id == self.fail:
             raise RuntimeError("no rights")
+        self.sent.append((chat_id, text, reply_markup))
+        return type("M", (), {"message_id": 77})()
+
+    async def send_photo(self, chat_id, file_id, caption=None, reply_markup=None, **kw):
         self.photos.append((chat_id, file_id, caption, reply_markup))
         return type("M", (), {"message_id": 77})()
 
@@ -405,13 +372,14 @@ async def test_the_preview_shows_the_organizer_exactly_what_the_channel_gets(asy
     rec = PostRecorder()
     await org_panel.org_post_preview(PostCb(f"orgp:post:{event.public_token}", rec), async_db, host)
 
-    assert rec.photos, "no banner was drawn"
-    _, _, caption, markup = rec.photos[-1]
-    assert caption.startswith("🚨 کاستـوم جایـزه دار")
+    assert not rec.photos, "the post is text, not a picture"
+    assert rec.sent, "no preview was sent"
+    _, text, markup = rec.sent[-1]
+    assert text.startswith("🚨 کاستـوم جایـزه دار")
     assert markup.inline_keyboard[0][0].text == "ورود به کاستوم جایزه دار"
     # and nothing has been posted to the channel yet
-    assert all(chat != channel.telegram_chat_id for chat, *_ in rec.photos)
-    assert any("مقصد" in text for text, _ in rec.views)
+    assert all(chat != channel.telegram_chat_id for chat, *_ in rec.sent)
+    assert any("مقصد" in view for view, _ in rec.views)
 
 
 @pytest.mark.asyncio
@@ -427,10 +395,11 @@ async def test_publishing_sends_the_same_post_to_the_channel(async_db, monkeypat
     rec = PostRecorder()
     await org_panel.org_post_publish(PostCb(f"orgp:pub:{event.public_token}", rec), async_db, host)
 
-    to_channel = [p for p in rec.photos if p[0] == channel.telegram_chat_id]
+    to_channel = [m for m in rec.sent if m[0] == channel.telegram_chat_id]
     assert len(to_channel) == 1
-    _, _, caption, markup = to_channel[0]
-    assert "🥇" in caption and "🥈" in caption
+    _, text, markup = to_channel[0]
+    assert not rec.photos, "the channel gets a text post, never an image"
+    assert "🥇" in text and "🥈" in text
     assert markup.inline_keyboard[0][0].url.endswith(f"?start=event_{event.public_token}")
 
 
@@ -448,8 +417,8 @@ async def test_publishing_refuses_when_the_bot_lost_admin(async_db, monkeypatch)
     rec = PostRecorder()
     await org_panel.org_post_publish(PostCb(f"orgp:pub:{event.public_token}", rec), async_db, host)
 
-    assert not [p for p in rec.photos if p[0] == channel.telegram_chat_id]
-    assert any("ادمین" in text for text, _ in rec.views)
+    assert not [m for m in rec.sent if m[0] == channel.telegram_chat_id]
+    assert any("ادمین" in view for view, _ in rec.views)
 
 
 @pytest.mark.asyncio
