@@ -724,3 +724,117 @@ async def test_a_rejected_player_gets_their_seat_back_by_resending(async_db, mon
     assert reg.status == RegistrationStatus.CONFIRMED
     assert reg.ineligible_reason is None, "the old reason must not follow them"
     assert event.confirmed_count == 1, "the seat must come back exactly once"
+
+
+# --- one custom, one screen ------------------------------------------------
+
+
+def _kb_callbacks(markup) -> list:
+    return [b.callback_data for row in markup.inline_keyboard for b in row if b.callback_data]
+
+
+@pytest.mark.asyncio
+async def test_my_customs_is_a_list_not_a_pile_of_messages(async_db):
+    """Fifteen customs used to mean sixteen messages fired in a loop.
+
+    Telegram throttles around one message per second per chat, so the tail
+    arrived late, out of order, or not at all.
+    """
+    org, event, host, player = await _seed(async_db)
+    rec = Recorder()
+    await org_panel.org_mine(FakeCb("orgp:mine", rec), async_db, host)
+
+    assert len(rec.views) == 1, "the list is one message, edited in place"
+    text, markup = rec.views[0]
+    assert f"orgp:ev:{event.public_token}" in _kb_callbacks(markup)
+    assert "روی هر کاستوم بزنید" in text
+
+
+@pytest.mark.asyncio
+async def test_the_detail_screen_carries_every_action(async_db):
+    """Whatever the organizer came to do, it is on this screen."""
+    org, event, host, player = await _seed(async_db, social=True)
+    await _seeded_proof(async_db, event, player)
+    await async_db.commit()
+
+    rec = Recorder()
+    await org_panel.org_event_detail(FakeCb(f"orgp:ev:{event.public_token}", rec), async_db, host)
+
+    text, markup = rec.views[-1]
+    data = _kb_callbacks(markup)
+    token = event.public_token
+    for expected in (
+        f"orgp:creds:{token}",
+        f"orgp:post:{token}",
+        f"orgp:soc:{token}",
+        f"orgp:link:{token}",
+        f"orgp:fun:{token}",
+        f"orgp:csv:{token}",
+        f"orgp:rep:{token}",
+        f"orgp:start:{token}",
+        f"orgp:cancel:{token}",
+        "orgp:mine",
+    ):
+        assert expected in data, f"{expected} is not reachable from the custom's screen"
+
+
+@pytest.mark.asyncio
+async def test_a_wrong_room_id_can_be_corrected_and_the_button_says_so(async_db):
+    """The owner's case: they typed the ROOM ID wrong and need it fixed."""
+    org, event, host, player = await _seed(async_db, with_creds=True)
+    rec = Recorder()
+    await org_panel.org_event_detail(FakeCb(f"orgp:ev:{event.public_token}", rec), async_db, host)
+
+    text, markup = rec.views[-1]
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    assert any("اصلاح ROOM ID" in label for label in labels), labels
+    assert "ROOM ID / PASS: ثبت شده" in text
+    assert f"orgp:creds:{event.public_token}" in _kb_callbacks(markup)
+
+
+@pytest.mark.asyncio
+async def test_before_any_credentials_the_button_offers_to_send_them(async_db):
+    org, event, host, player = await _seed(async_db, with_creds=False)
+    rec = Recorder()
+    await org_panel.org_event_detail(FakeCb(f"orgp:ev:{event.public_token}", rec), async_db, host)
+
+    text, markup = rec.views[-1]
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    assert any("ارسال ROOM ID" in label for label in labels), labels
+    assert "هنوز ثبت نشده" in text
+
+
+@pytest.mark.asyncio
+async def test_the_detail_screen_is_not_someone_elses_to_open(async_db):
+    _, event, _, player = await _seed(async_db)
+    rec = Recorder()
+    await org_panel.org_event_detail(FakeCb(f"orgp:ev:{event.public_token}", rec), async_db, player)
+    assert not rec.views
+    assert rec.alerts
+
+
+@pytest.mark.asyncio
+async def test_winners_can_be_read_one_custom_at_a_time(async_db):
+    org, event, host, player = await _seed(async_db)
+    async_db.add(
+        WinnerClaim(
+            event_id=event.id,
+            user_id=player.id,
+            organizer_id=org.id,
+            screenshot_file_id="win",
+            status=WinnerClaimStatus.PENDING,
+        )
+    )
+    await async_db.commit()
+
+    rec = Recorder()
+    await org_panel.org_event_detail(FakeCb(f"orgp:ev:{event.public_token}", rec), async_db, host)
+    assert f"orgp:evwin:{event.public_token}" in _kb_callbacks(rec.views[-1][1])
+
+    rec2 = Recorder()
+    await org_panel.org_event_winners(
+        FakeCb(f"orgp:evwin:{event.public_token}", rec2), async_db, host
+    )
+    assert [p[1] for p in rec2.photos] == ["win"]
+    # and back goes to that custom, not to the panel root
+    assert f"orgp:ev:{event.public_token}" in _kb_callbacks(rec2.views[-1][1])

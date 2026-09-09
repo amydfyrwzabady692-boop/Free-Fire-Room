@@ -45,7 +45,7 @@ from app.bot.keyboards.common import (
 from app.locales.labels import event_status_fa, org_status_fa, reg_status_fa
 from app.locales.style import room_pair
 from app.bot.onboarding import ensure_onboarding, target_message
-from app.bot.paging import DEFAULT_PAGE_SIZE
+from app.bot.paging import DEFAULT_PAGE_SIZE, page_header, paged_kb, paginate, parse_page
 from app.bot.states.groups import (
     CredsWaitSG,
     EventWizardSG,
@@ -1001,26 +1001,76 @@ async def _publish_custom(message: Message, state: FSMContext, db: AsyncSession,
     await state.clear()
 
 
-@router.callback_query(F.data == "orgp:mine")
+@router.callback_query(F.data.startswith("orgp:mine"))
 async def org_mine(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    """The organizer's customs as a list - one tap opens everything about one.
+
+    This used to send one message per custom with eight buttons under each, so
+    fifteen customs meant sixteen messages fired in a loop. Telegram throttles
+    around one message per second per chat, so the tail arrived late or not at
+    all, and the organizer had no way back to the top.
+    """
     if await _blocked_organize(db, db_user, cb):
         return
     org = await db.scalar(select(Organizer).where(Organizer.user_id == db_user.id))
     if not org:
         await cb.answer("اول یک کاستوم بسازید.", show_alert=True)
         return
+    index = parse_page(cb.data, "orgp:mine")
     rows = (
         await db.scalars(
             select(Event)
             .where(Event.organizer_id == org.id, Event.deleted_at.is_(None))
             .options(*event_public_load_options())
             .order_by(Event.starts_at.desc())
-            .limit(15)
+            .limit(60)
         )
     ).all()
-    if not rows:
-        await cb.message.answer("هنوز کاستومی ندارید.", reply_markup=organizer_home_kb())
-        await cb.answer()
+    page = paginate(list(rows), index)
+    text = page_header(
+        "🎮 کاستوم‌ها و آمار من",
+        page,
+        empty="هنوز کاستومی ندارید. از «ثبت کاستوم جدید» شروع کنید.",
+    )
+    if page.total:
+        text += "\n\nروی هر کاستوم بزنید تا همهٔ کارهایش را ببینید."
+
+    def button(e: Event):
+        mark = "📥" if is_archived(e) else "🔥"
+        when = format_local(e.starts_at, e.timezone, compact=True)
+        return ibtn(
+            f"{mark} {when} · {_short_label(e, 28)}",
+            callback_data=f"orgp:ev:{e.public_token}",
+            style=PRIMARY,
+        )
+
+    await replace_callback_view(
+        cb,
+        text,
+        inline=paged_kb(
+            "orgp:mine",
+            page,
+            item_button=button,
+            back="orgp:home",
+            back_label="بازگشت به پنل",
+        ),
+    )
+
+
+@router.callback_query(F.data.startswith("orgp:ev:"))
+async def org_event_detail(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    """Everything about one custom, on one screen.
+
+    Whatever the organizer came here to do - fix a ROOM ID they typed wrong,
+    put the post in a channel, look at the screenshots, settle a winner - it is
+    on this screen. Nothing about a custom lives anywhere else.
+    """
+    if await _blocked_organize(db, db_user, cb):
+        return
+    token = cb.data.split(":", 2)[-1]
+    e = await _own_event(db, db_user, token)
+    if not e:
+        await cb.answer("یافت نشد", show_alert=True)
         return
     from app.services.reviews import (
         event_audience_stats,
@@ -1028,70 +1078,124 @@ async def org_mine(cb: CallbackQuery, db: AsyncSession, db_user: User):
         format_rating_line,
         review_summary_for_event,
     )
+    from app.services.winners import claim_count_for_event
 
-    for e in rows:
-        stats = await event_audience_stats(db, e.id)
-        rating = format_rating_line(await review_summary_for_event(db, e.id), prefix="امتیاز این کاستوم")
-        creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == e.id))
-        can_send = (
-            e.status not in {EventStatus.CANCELLED, EventStatus.FINISHED, EventStatus.REJECTED}
-            and (credentials_window_open(e) or creds_were_provided(creds))
-        )
-        archived = is_archived(e)
-        counts = await proof_counts_for_event(db, e.id) if social_required(e) else {}
-        buttons = []
-        if can_send:
-            buttons.append([ibtn("ارسال ROOM ID / PASS", callback_data=f"orgp:creds:{e.public_token}", style=SUCCESS)])
-        # the archive stays reachable after everything is settled - it is a
-        # place to look, not a queue that empties
-        if counts.get("total"):
-            label = f"اسکرین‌های فالو ({counts['total']})"
-            if counts.get("pending"):
-                label += f" — {counts['pending']} بررسی‌نشده"
-            elif counts.get("rejected"):
-                label += f" — {counts['rejected']} رد شده"
-            buttons.append(
-                [ibtn(label, callback_data=f"orgp:soc:{e.public_token}", style=PRIMARY)]
-            )
+    stats = await event_audience_stats(db, e.id)
+    rating = format_rating_line(
+        await review_summary_for_event(db, e.id), prefix="امتیاز این کاستوم"
+    )
+    creds = await db.scalar(select(RoomCredential).where(RoomCredential.event_id == e.id))
+    sent = creds_were_provided(creds)
+    can_send = e.status not in {
+        EventStatus.CANCELLED,
+        EventStatus.FINISHED,
+        EventStatus.REJECTED,
+    } and (credentials_window_open(e) or sent)
+    archived = is_archived(e)
+    live = e.status not in {EventStatus.CANCELLED, EventStatus.FINISHED, EventStatus.REJECTED}
+    counts = await proof_counts_for_event(db, e.id) if social_required(e) else {}
+    wins = await claim_count_for_event(db, e.id)
+
+    buttons: list[list] = []
+    if can_send:
+        # the same button both ways: a wrong ROOM ID is fixed by sending the
+        # right one, which bumps the version and re-delivers to everybody
         buttons.append(
             [
-                ibtn("لینک اختصاصی", callback_data=f"orgp:link:{e.public_token}", style=PRIMARY),
-                ibtn("قیف و آمار", callback_data=f"orgp:fun:{e.public_token}", style=PRIMARY),
+                ibtn(
+                    "اصلاح ROOM ID / PASS" if sent else "ارسال ROOM ID / PASS",
+                    callback_data=f"orgp:creds:{e.public_token}",
+                    style=SUCCESS,
+                )
             ]
         )
-        if e.status not in {EventStatus.CANCELLED, EventStatus.REJECTED}:
-            buttons.append(
-                [ibtn("انتشار بنر در کانال", callback_data=f"orgp:post:{e.public_token}", style=SUCCESS)]
-            )
+    if live:
+        buttons.append(
+            [ibtn("انتشار بنر در کانال", callback_data=f"orgp:post:{e.public_token}", style=SUCCESS)]
+        )
+    if wins:
         buttons.append(
             [
-                ibtn("خروجی شرکت‌کننده‌ها", callback_data=f"orgp:csv:{e.public_token}", style=PRIMARY),
-                ibtn("تکرار", callback_data=f"orgp:rep:{e.public_token}", style=SUCCESS),
+                ibtn(
+                    f"برنده‌های این کاستوم ({to_fa_digits(str(wins))})",
+                    callback_data=f"orgp:evwin:{e.public_token}",
+                    style=SUCCESS,
+                )
             ]
         )
-        if not archived and e.status not in {EventStatus.CANCELLED, EventStatus.FINISHED}:
-            buttons.append(
-                [ibtn("کاستوم شروع شد — انتقال به گذشته", callback_data=f"orgp:start:{e.public_token}", style=DANGER)]
-            )
-        if e.status not in {EventStatus.CANCELLED, EventStatus.FINISHED}:
-            buttons.append([ibtn("لغو کاستوم", callback_data=f"orgp:cancel:{e.public_token}", style=DANGER)])
-        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-        where = (
-            "\U0001F4E5 در فهرست «گذشته»"
-            if archived
-            else "\U0001F525 در فهرست «کاستوم‌های پیش‌رو» — ثبت‌نام باز است"
+    if counts.get("total"):
+        label = f"اسکرین‌های فالو ({to_fa_digits(str(counts['total']))})"
+        if counts.get("pending"):
+            label += f" — {to_fa_digits(str(counts['pending']))} بررسی‌نشده"
+        elif counts.get("rejected"):
+            label += f" — {to_fa_digits(str(counts['rejected']))} رد شده"
+        buttons.append([ibtn(label, callback_data=f"orgp:soc:{e.public_token}", style=PRIMARY)])
+    buttons.append(
+        [
+            ibtn("لینک اختصاصی", callback_data=f"orgp:link:{e.public_token}", style=PRIMARY),
+            ibtn("قیف و آمار", callback_data=f"orgp:fun:{e.public_token}", style=PRIMARY),
+        ]
+    )
+    buttons.append(
+        [
+            ibtn("خروجی شرکت‌کننده‌ها", callback_data=f"orgp:csv:{e.public_token}", style=PRIMARY),
+            ibtn("تکرار", callback_data=f"orgp:rep:{e.public_token}", style=SUCCESS),
+        ]
+    )
+    if not archived and e.status not in {EventStatus.CANCELLED, EventStatus.FINISHED}:
+        buttons.append(
+            [
+                ibtn(
+                    "کاستوم شروع شد — انتقال به گذشته",
+                    callback_data=f"orgp:start:{e.public_token}",
+                    style=DANGER,
+                )
+            ]
         )
-        await cb.message.answer(
-            f"{format_event_identity_block(e)}\n"
-            f"زمان (شمسی): {format_local(e.starts_at, e.timezone)}\n"
-            f"وضعیت: {event_status_fa(e.status)}\n"
-            f"{where}\n"
-            f"{format_audience_stats(stats)}\n"
-            f"{rating}",
-            reply_markup=kb,
+    if e.status not in {EventStatus.CANCELLED, EventStatus.FINISHED}:
+        buttons.append(
+            [ibtn("لغو کاستوم", callback_data=f"orgp:cancel:{e.public_token}", style=DANGER)]
         )
-    await cb.message.answer("بازگشت به پنل:", reply_markup=organizer_home_kb())
-    await cb.answer()
+    buttons.append([ibtn("بازگشت به فهرست", callback_data="orgp:mine", style=PRIMARY)])
+
+    where = (
+        "📥 در فهرست «گذشته»"
+        if archived
+        else "🔥 در فهرست «کاستوم‌های پیش‌رو» — ثبت‌نام باز است"
+    )
+    room = (
+        "🆔 ROOM ID / PASS: ثبت شده"
+        if sent
+        else "🆔 ROOM ID / PASS: هنوز ثبت نشده"
+    )
+    await replace_callback_view(
+        cb,
+        f"{format_event_identity_block(e)}\n"
+        f"زمان (شمسی): {format_local(e.starts_at, e.timezone)}\n"
+        f"وضعیت: {event_status_fa(e.status)}\n"
+        f"{where}\n"
+        f"{room}\n"
+        f"{format_audience_stats(stats)}\n"
+        f"{rating}",
+        inline=InlineKeyboardMarkup(inline_keyboard=buttons),
+    )
+
+
+@router.callback_query(F.data.startswith("orgp:evwin:"))
+async def org_event_winners(cb: CallbackQuery, db: AsyncSession, db_user: User):
+    """The win claims on one custom, rather than every custom at once."""
+    if await _blocked_organize(db, db_user, cb):
+        return
+    token = cb.data.split(":", 2)[-1]
+    e = await _own_event(db, db_user, token)
+    if not e:
+        await cb.answer("یافت نشد", show_alert=True)
+        return
+    rows = await claims_for_organizer(db, e.organizer_id, event_id=e.id, limit=10)
+    if not rows:
+        await cb.answer("هنوز کسی برای این کاستوم ادعای برنده نکرده.", show_alert=True)
+        return
+    await _render_claims(cb, db, rows, back=f"orgp:ev:{e.public_token}")
 
 
 async def _own_event(db: AsyncSession, db_user: User, token: str) -> Event | None:
@@ -2088,12 +2192,17 @@ async def org_winners(cb: CallbackQuery, db: AsyncSession, db_user: User):
         )
         await cb.answer()
         return
-    flags = {"pending": "⏳ در انتظار شما", "approved": "✅ تأیید شده", "rejected": "❌ رد شده"}
     await cb.message.answer(
         "🏆 <b>برنده‌ها و تحویل جایزه</b>\n"
         "اسکرین هر بازیکن و آیدی‌اش را می‌بینید. با «تأیید برنده» آیدی دریافت جایزه برایش ارسال می‌شود، "
         "و از «پیام به برنده» می‌توانید همین‌جا با او حرف بزنید."
     )
+    await _render_claims(cb, db, rows, back="orgp:home")
+
+
+async def _render_claims(cb: CallbackQuery, db: AsyncSession, rows: list, *, back: str) -> None:
+    """One screenshot per claim, each with its own approve / reject / message."""
+    flags = {"pending": "⏳ در انتظار شما", "approved": "✅ تأیید شده", "rejected": "❌ رد شده"}
     for claim in rows:
         event = claim.event
         caption = (
@@ -2110,7 +2219,13 @@ async def org_winners(cb: CallbackQuery, db: AsyncSession, db_user: User):
             await cb.message.answer_photo(claim.screenshot_file_id, caption=caption[:1024], reply_markup=kb)
         except Exception:  # noqa: BLE001
             await cb.message.answer(caption + "\n<i>اسکرین قابل نمایش نیست.</i>", reply_markup=kb)
-    await cb.message.answer("بازگشت به پنل:", reply_markup=organizer_home_kb())
+        await _pace()
+    await cb.message.answer(
+        "بازگشت:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[ibtn("بازگشت", callback_data=back, style=PRIMARY)]]
+        ),
+    )
     await cb.answer()
 
 
