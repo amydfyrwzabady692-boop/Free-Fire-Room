@@ -129,27 +129,32 @@ def seed_tasks(db, event: Event, pages: list[dict]) -> None:
 
 
 def format_social_step(event: Event, tasks: list[EventSocialTask], done: int = 0) -> str:
-    """What the player is told to do at the last gate."""
+    """What the player is told to do at the last gate.
+
+    Only what they have to do. How the screenshot is handled afterwards - that
+    nobody has to approve it, that a fake one can be rejected - is the bot's
+    business, not theirs; saying it out loud only invites a question they did
+    not have.
+    """
     if not tasks:
         return ""
+    from app.core.time import to_fa_digits
+
     total = len(tasks)
     head = "📸 <b>مرحله آخر: فالو کردن</b>"
     if total > 1:
-        head += f"\n{done} از {total} پیج انجام شده."
+        head += f"\n{to_fa_digits(str(done))} از {to_fa_digits(str(total))} پیج انجام شده."
     lines = [head, ""]
     for i, task in enumerate(tasks, start=1):
-        mark = "✅" if i <= done else f"{i})"
+        mark = "✅" if i <= done else f"{to_fa_digits(str(i))})"
         lines.append(f"{mark} {platform_label(task.platform)} — {esc(task.url)}")
     lines.append("")
     lines.append("هر پیج را باز کنید، فالو کنید، اسکرین بگیرید و همین‌جا بفرستید.")
     if total > 1:
         lines.append("برای هر پیج یک اسکرین جدا لازم است.")
     lines.append("")
-    lines.append(
-        "همین که اسکرین را بفرستید ثبت‌نامتان قطعی است — منتظر تأیید کسی نمی‌مانید. "
-        "سر ساعت ROOM ID و PASS همین‌جا برایتان می‌آید؛ تا آن لحظه در کانال‌ها بمانید."
-    )
-    lines.append("فقط اگر اسکرین بی‌ربط باشد برگزارکننده می‌تواند ردش کند و باید دوباره بفرستید.")
+    lines.append("سر ساعت کاستوم، ROOM ID و PASS همین‌جا برایتان می‌آید.")
+    lines.append("تا آن لحظه در کانال‌ها بمانید.")
     note = (getattr(event, "social_note", None) or "").strip()
     if note:
         lines.append(f"\n📝 {esc(note)}")

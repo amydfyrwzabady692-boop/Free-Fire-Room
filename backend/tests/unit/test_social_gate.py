@@ -291,5 +291,8 @@ def test_the_step_text_lists_every_page(db):
     text = format_social_step(event, tasks, done=1)
     assert "instagram.com/a" in text
     assert "youtube.com/@b" in text
-    assert "1 از 2" in text
+    assert "۱ از ۲" in text
     assert "برای هر پیج یک اسکرین جدا لازم است" in text
+    # the player is told what to do, never how the bot handles it afterwards
+    assert "تأیید" not in text
+    assert "رد" not in text.replace("کرد", "")

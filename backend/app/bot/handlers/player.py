@@ -1336,7 +1336,12 @@ async def _social_prompt(target, db: AsyncSession, event: Event, user: User, sta
         return False
     await state.set_state(SocialProofSG.screenshot)
     await state.update_data(event_token=event.public_token, task_id=str(task.id))
-    step = f"\n\n👇 <b>الان اسکرین این پیج را بفرستید ({done + 1} از {total}):</b>\n{esc(task.url)}"
+    from app.core.time import to_fa_digits
+
+    counter = (
+        f" ({to_fa_digits(str(done + 1))} از {to_fa_digits(str(total))})" if total > 1 else ""
+    )
+    step = f"\n\n👇 <b>الان اسکرین این پیج را بفرستید{counter}:</b>\n{esc(task.url)}"
     await target(format_social_step(event, tasks, done=done) + step)
     return True
 
