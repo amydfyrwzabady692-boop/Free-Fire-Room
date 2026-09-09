@@ -64,6 +64,10 @@ class BotAdminResult:
     ok: bool
     is_admin: bool
     can_invite: bool
+    #: Being an admin is not enough to post. A bot is usually made admin in a
+    #: channel so it can CHECK MEMBERSHIP, which needs "invite users" and not
+    #: "post messages" - so this is False far more often than it looks.
+    can_post: bool = False
     error: str | None = None
     title: str | None = None
     username: str | None = None
@@ -100,15 +104,19 @@ async def inspect_bot_admin(bot: Bot, chat_id: int | str) -> BotAdminResult:
         member = await bot.get_chat_member(chat.id, me.id)
         is_admin = member.status in ADMIN_STATUSES
         can_invite = False
+        can_post = False
         if member.status == ChatMemberStatus.CREATOR:
             can_invite = True
+            can_post = True
         elif member.status == ChatMemberStatus.ADMINISTRATOR:
             can_invite = bool(getattr(member, "can_invite_users", False) or getattr(member, "can_manage_chat", False))
+            can_post = bool(getattr(member, "can_post_messages", False))
         username = getattr(chat, "username", None)
         return BotAdminResult(
             ok=is_admin,
             is_admin=is_admin,
             can_invite=can_invite,
+            can_post=can_post,
             title=chat.title,
             username=username,
             chat_id=chat.id,

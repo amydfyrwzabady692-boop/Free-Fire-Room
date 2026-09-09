@@ -431,7 +431,7 @@ async def test_picking_one_channel_posts_only_there(async_db, monkeypatch):
     event, host, channels = await _channel_event(async_db, extra_channels=2)
 
     async def _admin(bot, chat_ref):
-        return type("R", (), {"is_admin": True})()
+        return type("R", (), {"is_admin": True, "can_post": True})()
 
     monkeypatch.setattr(org_panel, "inspect_bot_admin", _admin)
     ordered = org_panel.post_targets(
@@ -453,7 +453,7 @@ async def test_all_posts_to_every_channel_once(async_db, monkeypatch):
     event, host, channels = await _channel_event(async_db, extra_channels=2)
 
     async def _admin(bot, chat_ref):
-        return type("R", (), {"is_admin": True})()
+        return type("R", (), {"is_admin": True, "can_post": True})()
 
     monkeypatch.setattr(org_panel, "inspect_bot_admin", _admin)
     rec = PostRecorder()
@@ -479,7 +479,9 @@ async def test_one_bad_channel_does_not_stop_the_others(async_db, monkeypatch):
     broken = ordered[1].telegram_chat_id
 
     async def _admin(bot, chat_ref):
-        return type("R", (), {"is_admin": chat_ref != broken})()
+        return type(
+            "R", (), {"is_admin": chat_ref != broken, "can_post": chat_ref != broken}
+        )()
 
     monkeypatch.setattr(org_panel, "inspect_bot_admin", _admin)
     rec = PostRecorder()
@@ -502,7 +504,7 @@ async def test_a_stale_channel_index_is_refused(async_db, monkeypatch):
     event, host, channel = await _channel_event(async_db)
 
     async def _admin(bot, chat_ref):
-        return type("R", (), {"is_admin": True})()
+        return type("R", (), {"is_admin": True, "can_post": True})()
 
     monkeypatch.setattr(org_panel, "inspect_bot_admin", _admin)
     rec = PostRecorder()
@@ -520,7 +522,7 @@ async def test_publishing_sends_the_same_post_to_the_channel(async_db, monkeypat
     event, host, channel = await _channel_event(async_db)
 
     async def _admin(bot, chat_ref):
-        return type("R", (), {"is_admin": True})()
+        return type("R", (), {"is_admin": True, "can_post": True})()
 
     monkeypatch.setattr(org_panel, "inspect_bot_admin", _admin)
     rec = PostRecorder()
@@ -542,7 +544,7 @@ async def test_publishing_refuses_when_the_bot_lost_admin(async_db, monkeypatch)
     event, host, channel = await _channel_event(async_db)
 
     async def _not_admin(bot, chat_ref):
-        return type("R", (), {"is_admin": False})()
+        return type("R", (), {"is_admin": False, "can_post": False})()
 
     monkeypatch.setattr(org_panel, "inspect_bot_admin", _not_admin)
     rec = PostRecorder()
@@ -559,10 +561,90 @@ async def test_a_send_failure_is_reported_not_swallowed(async_db, monkeypatch):
     event, host, channel = await _channel_event(async_db)
 
     async def _admin(bot, chat_ref):
-        return type("R", (), {"is_admin": True})()
+        return type("R", (), {"is_admin": True, "can_post": True})()
 
     monkeypatch.setattr(org_panel, "inspect_bot_admin", _admin)
     rec = PostRecorder(fail=channel.telegram_chat_id)
     await org_panel.org_post_publish(PostCb(f"orgp:pub:{event.public_token}:0", rec), async_db, host)
 
     assert any("ارسال انجام نشد" in text for text, _ in rec.views)
+
+
+@pytest.mark.asyncio
+async def test_admin_without_the_post_right_is_named_and_explained(async_db, monkeypatch):
+    """The live failure: the bot is admin, but only to check membership.
+
+    A bot is made admin in a channel so it can read who joined, which needs
+    "invite users" and not "post messages". The send then comes back as a
+    TelegramBadRequest, which the generic handler turned into "try again in a
+    few seconds" - advice that could never work.
+    """
+    from app.bot.handlers import organizer as org_panel
+
+    event, host, channel = await _channel_event(async_db)
+
+    async def _admin_no_post(bot, chat_ref):
+        return type("R", (), {"is_admin": True, "can_post": False})()
+
+    monkeypatch.setattr(org_panel, "inspect_bot_admin", _admin_no_post)
+    rec = PostRecorder()
+    await org_panel.org_post_publish(
+        PostCb(f"orgp:pub:{event.public_token}:0", rec), async_db, host
+    )
+
+    assert not [m for m in rec.sent if m[0] == channel.telegram_chat_id]
+    summary = rec.views[-1][0]
+    assert "ارسال پیام" in summary
+    assert "مدیران" in summary, "the organizer is told where to click"
+    assert "چند ثانیه بعد" not in summary, "never advise a retry that cannot work"
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_send_is_read_as_a_missing_right(async_db, monkeypatch):
+    """Rights can change between the check and the send."""
+    from aiogram.exceptions import TelegramBadRequest
+
+    from app.bot.handlers import organizer as org_panel
+
+    event, host, channel = await _channel_event(async_db)
+
+    async def _admin(bot, chat_ref):
+        return type("R", (), {"is_admin": True, "can_post": True})()
+
+    class Rejecting(PostRecorder):
+        async def send_message(self, chat_id, text, reply_markup=None, **kw):
+            if chat_id == channel.telegram_chat_id:
+                raise TelegramBadRequest(
+                    method=None, message="not enough rights to send text messages to the chat"
+                )
+            return await super().send_message(chat_id, text, reply_markup=reply_markup, **kw)
+
+    monkeypatch.setattr(org_panel, "inspect_bot_admin", _admin)
+    rec = Rejecting()
+    await org_panel.org_post_publish(
+        PostCb(f"orgp:pub:{event.public_token}:0", rec), async_db, host
+    )
+
+    summary = rec.views[-1][0]
+    assert "ارسال پیام" in summary
+    assert "چند ثانیه بعد" not in summary
+
+
+@pytest.mark.asyncio
+async def test_the_preview_flags_a_channel_that_cannot_receive_the_post(async_db, monkeypatch):
+    """Better to learn it before the tap than after."""
+    from app.bot.handlers import organizer as org_panel
+
+    event, host, channel = await _channel_event(async_db)
+
+    async def _admin_no_post(bot, chat_ref):
+        return type("R", (), {"is_admin": True, "can_post": False})()
+
+    monkeypatch.setattr(org_panel, "inspect_bot_admin", _admin_no_post)
+    rec = PostRecorder()
+    await org_panel.org_post_preview(PostCb(f"orgp:post:{event.public_token}", rec), async_db, host)
+
+    view = rec.views[-1][0]
+    assert "⚠️" in view
+    assert "ارسال پیام" in view
+    assert not [m for m in rec.sent if m[0] == channel.telegram_chat_id]

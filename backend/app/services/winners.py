@@ -334,18 +334,31 @@ def format_relayed_to_organizer(event: Event, player: User, body: str) -> str:
 
 
 async def claims_for_organizer(
-    db: AsyncSession, organizer_id, *, limit: int = 60
+    db: AsyncSession, organizer_id, *, event_id=None, limit: int = 60
 ) -> list[WinnerClaim]:
+    """Every win claim this organizer has, or just one custom's when asked."""
+    stmt = select(WinnerClaim).where(WinnerClaim.organizer_id == organizer_id)
+    if event_id is not None:
+        stmt = stmt.where(WinnerClaim.event_id == event_id)
     rows = (
         await db.scalars(
-            select(WinnerClaim)
-            .where(WinnerClaim.organizer_id == organizer_id)
-            .options(selectinload(WinnerClaim.event), selectinload(WinnerClaim.user))
+            stmt.options(selectinload(WinnerClaim.event), selectinload(WinnerClaim.user))
             .order_by(WinnerClaim.created_at.desc())
             .limit(limit)
         )
     ).all()
     return list(rows)
+
+
+async def claim_count_for_event(db: AsyncSession, event_id) -> int:
+    from sqlalchemy import func
+
+    return int(
+        await db.scalar(
+            select(func.count()).select_from(WinnerClaim).where(WinnerClaim.event_id == event_id)
+        )
+        or 0
+    )
 
 
 async def pending_claim_count(db: AsyncSession, organizer_id) -> int:

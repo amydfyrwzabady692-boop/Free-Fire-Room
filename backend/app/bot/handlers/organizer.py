@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import default_state
 from aiogram.types import CallbackQuery, ChatMemberUpdated, InlineKeyboardMarkup, Message
 from aiogram.enums import ChatMemberStatus
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -2787,18 +2787,43 @@ async def org_post_preview(cb: CallbackQuery, db: AsyncSession, db_user: User):
         )
         await cb.answer()
         return
-    listing = "\n".join(
-        f"{to_fa_digits(str(i + 1))}) {esc(channel_public_label(c))}"
-        for i, c in enumerate(targets)
-    )
+    # ask Telegram now rather than after the tap: the usual reason a post does
+    # not go out is that the bot was made admin to CHECK MEMBERSHIP and never
+    # got "post messages", and finding that out here costs one call per channel
+    rows = []
+    blocked = False
+    for i, c in enumerate(targets):
+        try:
+            check = await inspect_bot_admin(cb.bot, c.telegram_chat_id)
+        except Exception:  # noqa: BLE001
+            check = None
+        if check is None:
+            mark = "•"
+        elif not check.is_admin:
+            mark, blocked = "⚠️", True
+        elif not check.can_post:
+            mark, blocked = "⚠️", True
+        else:
+            mark = "✅"
+        rows.append(f"{mark} {to_fa_digits(str(i + 1))}) {esc(channel_public_label(c))}")
+    listing = "\n".join(rows)
+    tail = f"\n\n{NEEDS_POST_RIGHT}" if blocked else "\n\nهرکدام را خواستید بزنید، یا «همه» را."
     await cb.message.answer(
         "این بالا همان چیزی است که منتشر می‌شود — با دکمهٔ "
         f"«{CHANNEL_POST_LABEL}» که مستقیم بازیکن را داخل ربات می‌آورد.\n\n"
-        f"📢 <b>کجا منتشر شود؟</b>\n{listing}\n\n"
-        "هرکدام را خواستید بزنید، یا «همه» را.",
+        f"📢 <b>کجا منتشر شود؟</b>\n{listing}{tail}",
         reply_markup=post_targets_kb(e.public_token, targets),
     )
     await cb.answer()
+
+
+#: The one thing an organizer has to change, spelled out. A bot is made admin
+#: in a channel so it can check membership, and that only needs "invite users" -
+#: so this is the normal state of affairs, not a rare misconfiguration.
+NEEDS_POST_RIGHT = (
+    "ربات ادمین هست ولی دسترسی <b>«ارسال پیام» (Post Messages)</b> ندارد.\n"
+    "تنظیمات کانال ← مدیران ← همین ربات ← «ارسال پیام» را روشن کنید، بعد دوباره بزنید."
+)
 
 
 async def _publish_to(bot, channel, text: str, link: str) -> tuple[bool, str]:
@@ -2810,12 +2835,21 @@ async def _publish_to(bot, channel, text: str, link: str) -> tuple[bool, str]:
         check = await inspect_bot_admin(bot, channel.telegram_chat_id)
     except Exception:  # noqa: BLE001
         check = None
-    if check is not None and not check.is_admin:
-        return False, f"⚠️ {label} — ربات ادمین این کانال نیست"
+    if check is not None:
+        if not check.is_admin:
+            return False, f"⚠️ {label} — ربات ادمین این کانال نیست"
+        if not check.can_post:
+            return False, f"⚠️ {label} — دسترسی «ارسال پیام» ندارد"
     try:
         msg = await _send_banner(bot, channel.telegram_chat_id, text, link)
     except TelegramForbiddenError:
-        return False, f"⚠️ {label} — تلگرام اجازهٔ ارسال نداد"
+        return False, f"⚠️ {label} — دسترسی «ارسال پیام» ندارد"
+    except TelegramBadRequest as exc:
+        # "not enough rights to send text messages to the chat" arrives here,
+        # not as Forbidden - the old generic handler told the organizer to try
+        # again in a few seconds, which would never have worked
+        log.warning("banner_publish_rejected", chat_id=channel.telegram_chat_id, error=str(exc))
+        return False, f"⚠️ {label} — دسترسی «ارسال پیام» ندارد"
     except Exception:  # noqa: BLE001
         log.exception("banner_publish_failed", chat_id=channel.telegram_chat_id)
         return False, f"⚠️ {label} — ارسال انجام نشد"
@@ -2877,6 +2911,10 @@ async def org_post_publish(cb: CallbackQuery, db: AsyncSession, db_user: User):
         else ""
     )
     body = "\n".join(lines)
+    # a failure the organizer can fix in thirty seconds deserves the recipe,
+    # not just a red mark
+    if any("ارسال پیام" in line for line in lines):
+        body += f"\n\n{NEEDS_POST_RIGHT}"
     await cb.message.answer(
         (head + "\n" + body if head else body),
         reply_markup=organizer_home_kb(),
