@@ -1275,49 +1275,13 @@ def _channels_first_message(items: list) -> str:
     return text
 
 
-async def _notify_social_reviewers(bot, db: AsyncSession, event: Event, player: User, proof) -> None:
-    """Send the screenshot to the organizer (the bot owner is the fallback).
-
-    This is a receipt, not a request: the player is already registered by the
-    time it goes out. The one button on it is there for the case where the
-    screenshot shows something else entirely.
-    """
-    from app.bot.keyboards.common import social_review_kb
-    from app.models.admin import Admin
-    from app.services.social import task_label
-
-    if proof is None:
-        return
-    page = proof.task.url if proof.task else (event.social_url or "—")
-    caption = (
-        "📸 <b>اسکرین فالو</b>\n"
-        f"کاستوم: {esc((event.prize_summary or event.title or '').strip()[:60])}\n"
-        f"بازیکن: {format_person(player)}\n"
-        f"پیج ({esc(task_label(proof.task))}): {esc(page)}\n\n"
-        "ثبت‌نام این بازیکن انجام شده و ROOM ID / PASS برایش می‌رود. "
-        "فقط اگر این اسکرین بی‌ربط یا جعلی است «رد» را بزنید — آن وقت تا اسکرین درست نفرستد چیزی نمی‌گیرد."
-    )[:1024]
-    kb = social_review_kb(str(proof.id), status=proof.status)
-    targets: list[int] = []
-    org = await db.get(Organizer, event.organizer_id) if event.organizer_id else None
-    if org:
-        org_user = await db.get(User, org.user_id)
-        if org_user and not org_user.is_bot_blocked:
-            targets.append(org_user.telegram_id)
-    if not targets:
-        admins = (await db.scalars(select(Admin).where(Admin.is_active.is_(True)))).all()
-        for admin in admins:
-            au = await db.get(User, admin.user_id)
-            if au and not au.is_bot_blocked:
-                targets.append(au.telegram_id)
-    for chat_id in targets:
-        try:
-            await bot.send_photo(chat_id, proof.file_id, caption=caption, reply_markup=kb)
-        except Exception:  # noqa: BLE001
-            try:
-                await bot.send_message(chat_id, caption, reply_markup=kb)
-            except Exception:  # noqa: BLE001
-                log.exception("social_proof_notify_failed", chat_id=chat_id)
+# A follow screenshot is deliberately NOT pushed to the organizer as it lands.
+# Nothing is waiting on them - the player is registered the moment they send it -
+# so a photo per player per page would be pure noise in the organizer's chat, and
+# a busy custom would bury their own panel under it. The screenshots wait in
+# "اسکرین‌های فالو" under the custom, and follow the player to the organizer
+# once, attached to a winner claim, which is the only moment anyone needs to
+# look at them.
 
 
 async def _social_prompt(target, db: AsyncSession, event: Event, user: User, state: FSMContext) -> bool:
@@ -1419,7 +1383,7 @@ async def social_screenshot(message: Message, db: AsyncSession, db_user: User, s
         # rather than writing an orphan proof that satisfies nothing.
         task, _, _ = await next_task_for(db, event=e, user=db_user)
     try:
-        proof = await submit_proof(db, event=e, user=db_user, file_id=file_id, task=task)
+        await submit_proof(db, event=e, user=db_user, file_id=file_id, task=task)
         await db.commit()
     except AppError as exc:
         await state.clear()
@@ -1430,7 +1394,6 @@ async def social_screenshot(message: Message, db: AsyncSession, db_user: User, s
         await db.rollback()
         await message.answer("ثبت اسکرین الان انجام نشد. چند ثانیه بعد دوباره تلاش کنید.")
         return
-    await _notify_social_reviewers(message.bot, db, e, db_user, proof)
     # the screenshot IS the requirement, so this is the moment the player
     # becomes eligible - register them and push the room out now rather than
     # leaving them to the next sweep

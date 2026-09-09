@@ -354,7 +354,13 @@ async def test_a_stranger_cannot_message_a_winner(async_db):
 
 
 @pytest.mark.asyncio
-async def test_player_follow_screenshot_reaches_the_organizer(async_db, monkeypatch):
+async def test_a_follow_screenshot_is_filed_not_forwarded(async_db, monkeypatch):
+    """It lands in the panel, and nobody's chat lights up.
+
+    Nothing is waiting on the organizer, so a photo per player per page would
+    only bury their own panel. The archive under the custom is where they look
+    if they want to.
+    """
     async def _no_limit(*a, **kw):
         return None
 
@@ -369,20 +375,20 @@ async def test_player_follow_screenshot_reaches_the_organizer(async_db, monkeypa
     msg.photo = [type("P", (), {"file_id": "shot-1"})()]
     await player_panel.social_screenshot(msg, async_db, player, state)
 
-    from app.services.social import get_proof
+    from app.services.social import get_proof, proof_counts_for_event
 
     proof = await get_proof(async_db, event_id=event.id, user_id=player.id)
     assert proof is not None
+    assert proof.file_id == "shot-1"
     assert proof.status == SocialProofStatus.PENDING
-    # the organizer is shown the screenshot with a reject button - there is
-    # nothing to approve, the player is already registered
-    assert rec.photos
-    _, file_id, caption, markup = rec.photos[-1]
-    assert file_id == "shot-1"
-    assert any(
-        b.callback_data == f"socno:{proof.id}" for row in markup.inline_keyboard for b in row
-    )
-    assert "تأیید" not in caption, "the organizer must not be told they gate anything"
+
+    assert not [p for p in rec.photos if p[0] == host.telegram_id]
+    assert not [m for m in rec.sent if m[0] == host.telegram_id]
+
+    # but the organizer's panel knows it is there
+    counts = await proof_counts_for_event(async_db, event.id)
+    assert counts["total"] == 1
+    assert counts["pending"] == 1
 
 
 @pytest.mark.asyncio
