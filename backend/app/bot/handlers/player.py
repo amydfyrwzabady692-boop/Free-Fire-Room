@@ -47,7 +47,7 @@ from app.core.enums import (
 from app.core.errors import AppError
 from app.core.logging import get_logger
 from app.core.rate_limit import hit_rate_limit
-from app.core.time import format_local
+from app.core.time import format_local, to_fa_digits
 from app.locales import fa as T
 from app.locales.labels import event_status_fa, reg_status_fa
 from app.models.event import Event
@@ -465,32 +465,40 @@ async def _show_event(
     allowed, _ = await can_review(db, user, e)
     summary = await review_summary_for_event(db, e.id)
     social_item = _social_item(checklist.items)
+    # only what is still missing. A player already inside six channels does not
+    # need six green ticks read back to them - that is the list they have to
+    # scroll past to find the one thing left to do
+    missing = [i for i in channel_items if i.status != RequirementStatus.DONE]
+    channels_done = not missing
     text = await _event_card(db, e, missed=missed)
     text += "\n━━━━━━━━━━━━━━\n✅ <b>شرایط شرکت</b>\n"
-    text += "باید در کانال‌های زیر عضو بمانید تا سر ساعت ROOM ID و PASS برایتان بیاید:\n"
-    channels_done = True
-    if channel_items:
-        for item in channel_items:
-            done = item.status == RequirementStatus.DONE
-            channels_done = channels_done and done
-            text += f"{'✅' if done else '❌'} {esc(item.label)}\n"
+    if missing:
+        text += "فقط عضو این کانال‌ها شوید:\n"
+        for item in missing:
+            text += f"❌ {esc(item.label)}\n"
+    elif channel_items:
+        text += f"✅ عضو همهٔ {to_fa_digits(str(len(channel_items)))} کانال اجباری هستید.\n"
     else:
         text += "کانال جوین اجباری ثبت نشده است.\n"
     if social_item is not None:
         mark = "✅" if social_item.status == RequirementStatus.DONE else "❌"
-        text += f"{mark} {esc(social_item.label)} — مرحلهٔ بعد از جوین کانال‌ها\n"
+        suffix = "" if channels_done else " — بعد از جوین کانال‌ها"
+        text += f"{mark} {esc(social_item.label)}{suffix}\n"
+    social_left = social_item is not None and social_item.status != RequirementStatus.DONE
     if missed:
         text += "\nROOM ID / PASS ارسال نشد. گزارش بدهید و اگر ثبت‌نام کرده بودید نظر/امتیاز بگذارید."
     elif cancelled:
         text += "\nاین کاستوم لغو شده است."
-    elif filling and social_item is not None and not channels_done:
-        text += "\n۱) کانال‌ها را جوین کنید و «عضو شدم» را بزنید.\n۲) بعد اسکرین فالو را می‌خواهد."
-    elif filling:
-        text += "\nبعد از جوین، دکمه سبز «عضو شدم» را بزنید. تا وقتی کاستوم شروع نشده، هر کس شرایط را کامل کند مشخصات برایش می‌رود."
-    elif not started:
-        text += "\nبعد از جوین، دکمه سبز «عضو شدم» را بزنید."
-    else:
+    elif not filling:
         text += "\nاگر ROOM ID / PASS نیامد یا جایزه نداد: «گزارش به مالک ربات»."
+    elif not channels_done:
+        text += "\nبعد از جوین، دکمه سبز «عضو شدم» را بزنید."
+        if social_left:
+            text += "\nمرحلهٔ بعدش ارسال اسکرین فالو است."
+    elif social_left:
+        text += "\n👇 فقط اسکرین فالو مانده. پیج را باز کنید، فالو کنید و اسکرین بفرستید."
+    else:
+        text += "\n👇 همهٔ شرایط انجام شده. «عضو شدم» را بزنید تا ثبت‌نامتان قطعی شود."
     open_for_join = e.status in {EventStatus.PUBLISHED, EventStatus.FULL, EventStatus.STARTED} and filling
     # While a player is still working through the conditions the card carries
     # nothing but the conditions. Reporting, the organizer's profile and the
@@ -499,7 +507,9 @@ async def _show_event(
     show_aftercare = bool(missed or cancelled or started or not open_for_join)
     kb = event_detail_kb(
         token,
-        join_urls=_join_urls(channel_items) if not channels_done else [],
+        # only the ones they still owe: a join button for a channel they are
+        # already in is a dead tap
+        join_urls=_join_urls(missing),
         can_join=open_for_join and not missed,
         social_url=e.social_url if (social_item is not None and open_for_join) else None,
         channels_done=channels_done,
@@ -569,18 +579,20 @@ async def _send_join_result(cb: CallbackQuery, event: Event, token: str, result,
             reply_markup=social_step_kb(token, tasks[0].url if tasks else event.social_url),
         )
         return
-    text = "هنوز در این کانال‌ها عضو نیستید:\n"
-    for item in result.checklist or []:
-        if item.requirement_type not in {
-            RequirementType.CHANNEL_MEMBERSHIP,
-            RequirementType.GLOBAL_CHANNEL_MEMBERSHIP,
-        }:
-            continue
-        mark = "✅" if item.status == "done" else "❌"
-        text += f"{mark} {esc(item.label)}\n"
+    # the ones they are already in are not news; only what is left
+    missing = [
+        item
+        for item in (result.checklist or [])
+        if item.requirement_type
+        in {RequirementType.CHANNEL_MEMBERSHIP, RequirementType.GLOBAL_CHANNEL_MEMBERSHIP}
+        and item.status != RequirementStatus.DONE
+    ]
+    text = "فقط عضو این کانال‌ها شوید و دوباره «عضو شدم» را بزنید:\n"
+    for item in missing:
+        text += f"❌ {esc(item.label)}\n"
     if social is not None:
         text += "\n📸 بعد از جوین، مرحلهٔ آخر ارسال اسکرین فالو است."
-    await reply_callback(cb, text, reply_markup=checklist_kb(token, join_urls=_join_urls(result.checklist)))
+    await reply_callback(cb, text, reply_markup=checklist_kb(token, join_urls=_join_urls(missing)))
 
 
 @router.callback_query(F.data.startswith("join:"))

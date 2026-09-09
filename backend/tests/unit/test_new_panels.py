@@ -838,3 +838,156 @@ async def test_winners_can_be_read_one_custom_at_a_time(async_db):
     assert [p[1] for p in rec2.photos] == ["win"]
     # and back goes to that custom, not to the panel root
     assert f"orgp:ev:{event.public_token}" in _kb_callbacks(rec2.views[-1][1])
+
+
+# --- the card shows only what is left ---------------------------------------
+
+
+async def _event_with_channels(async_db, *, social=False):
+    """A custom with three mandatory channels. Callers set membership on the bot."""
+    from app.core.security import generate_unguessable_token
+    from app.models.channel import Channel
+    from app.models.event import Event, EventRequiredChannel
+
+    host = User(telegram_id=6400, first_name="host", username="hostguy")
+    player = User(telegram_id=6401, first_name="player", username="lucky")
+    async_db.add_all([host, player])
+    await async_db.flush()
+    async_db.add_all([UserProfile(user_id=host.id), UserProfile(user_id=player.id)])
+    org = Organizer(user_id=host.id, status="approved", display_name="Host")
+    async_db.add(org)
+    await async_db.flush()
+    now = datetime.now(UTC)
+    event = Event(
+        public_token=generate_unguessable_token(12),
+        organizer_id=org.id,
+        title="Custom",
+        starts_at=now + timedelta(hours=2),
+        registration_ends_at=now + timedelta(hours=2),
+        credentials_send_at=now + timedelta(hours=2),
+        capacity=0,
+        status=EventStatus.PUBLISHED,
+        waitlist_enabled=True,
+        timezone="Asia/Tehran",
+        region="ME",
+        game_mode="squad",
+        prize_summary="۱۰۰ الماس",
+        deep_link_active=True,
+        social_url="https://instagram.com/p" if social else None,
+        social_platform=SocialPlatform.INSTAGRAM if social else None,
+    )
+    async_db.add(event)
+    await async_db.flush()
+    if social:
+        from app.services.social import seed_tasks
+
+        seed_tasks(async_db, event, [{"url": "https://instagram.com/p", "platform": SocialPlatform.INSTAGRAM}])
+    chats = []
+    for i in range(3):
+        ch = Channel(
+            telegram_chat_id=-100900 - i, title=f"کانال {i + 1}", username=f"c{i + 1}", bot_is_admin=True
+        )
+        async_db.add(ch)
+        await async_db.flush()
+        async_db.add(EventRequiredChannel(event_id=event.id, channel_id=ch.id, is_active=True))
+        chats.append(ch.telegram_chat_id)
+    await async_db.flush()
+    await async_db.commit()
+
+    class MemberBot(Recorder):
+        async def get_chat_member(self, chat_id, user_id):
+            status = "member" if chat_id in joined else "left"
+            return type("M", (), {"status": status})()
+
+    return event, player, chats, MemberBot()
+
+
+@pytest.mark.asyncio
+async def test_channels_already_joined_drop_off_the_card(async_db):
+    """Six green ticks are six lines to scroll past to find the one thing left."""
+    from app.bot.handlers import player as player_panel
+
+    event, player, chats, bot = await _event_with_channels(async_db)
+    # nothing joined: all three are listed
+    msg = FakeMessage(bot)
+    await player_panel._show_event(msg, async_db, player, event.public_token)
+    text, markup = bot.views[-1]
+    assert text.count("❌ عضویت در") == 3
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    assert sum(1 for label in labels if "عضویت در" in label) == 3
+
+
+@pytest.mark.asyncio
+async def test_only_the_unjoined_channel_is_shown(async_db):
+    from app.bot.handlers import player as player_panel
+
+    event, player, chats, bot = await _event_with_channels(async_db)
+    joined = {chats[0], chats[1]}
+
+    async def _member(chat_id, user_id):
+        return type("M", (), {"status": "member" if chat_id in joined else "left"})()
+
+    bot.get_chat_member = _member
+    msg = FakeMessage(bot)
+    await player_panel._show_event(msg, async_db, player, event.public_token)
+
+    text, markup = bot.views[-1]
+    assert text.count("❌ عضویت در") == 1, text
+    assert "کانال ۳" in text or "کانال 3" in text
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    assert sum(1 for label in labels if "عضویت در" in label) == 1
+
+
+@pytest.mark.asyncio
+async def test_all_channels_joined_points_straight_at_the_next_step(async_db):
+    from app.bot.handlers import player as player_panel
+
+    event, player, chats, bot = await _event_with_channels(async_db, social=True)
+    all_in = set(chats)
+
+    async def _member(chat_id, user_id):
+        return type("M", (), {"status": "member" if chat_id in all_in else "left"})()
+
+    bot.get_chat_member = _member
+    msg = FakeMessage(bot)
+    await player_panel._show_event(msg, async_db, player, event.public_token)
+
+    text, markup = bot.views[-1]
+    assert "عضو همهٔ" in text, text
+    assert "❌ عضویت در" not in text
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    assert not any("عضویت در" in label for label in labels), "no dead join buttons"
+    assert any("اسکرین" in label for label in labels), "the follow step is right there"
+    assert "فقط اسکرین فالو مانده" in text
+
+
+@pytest.mark.asyncio
+async def test_all_joined_and_no_follow_leaves_only_the_join_button(async_db):
+    from app.bot.handlers import player as player_panel
+
+    event, player, chats, bot = await _event_with_channels(async_db, social=False)
+    all_in = set(chats)
+
+    async def _member(chat_id, user_id):
+        return type("M", (), {"status": "member" if chat_id in all_in else "left"})()
+
+    bot.get_chat_member = _member
+    msg = FakeMessage(bot)
+    await player_panel._show_event(msg, async_db, player, event.public_token)
+
+    text, markup = bot.views[-1]
+    assert "همهٔ شرایط انجام شده" in text
+    labels = [b.text for row in markup.inline_keyboard for b in row]
+    assert any("عضو شدم" in label for label in labels)
+    assert not any("عضویت در" in label for label in labels)
+
+
+def test_the_channel_post_button_is_green():
+    from app.bot.keyboards.common import CHANNEL_POST_LABEL, channel_post_kb, unpaint
+
+    button = channel_post_kb("https://t.me/b?start=event_x").inline_keyboard[0][0]
+    # either the client renders a styled button, or ibtn paints a 🟢 on it -
+    # both are the same request answered
+    assert unpaint(button.text) == CHANNEL_POST_LABEL
+    styled = getattr(button, "style", None)
+    assert styled is not None or button.text.startswith("🟢"), button.text

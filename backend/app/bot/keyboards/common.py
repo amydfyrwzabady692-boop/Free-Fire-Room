@@ -414,14 +414,15 @@ CHANNEL_POST_LABEL = "ورود به کاستوم جایزه دار"
 
 
 def channel_post_kb(link: str) -> InlineKeyboardMarkup:
-    """The button under the banner in the organizer's own channel.
+    """The button under the post in the organizer's own channel, in green.
 
-    Built bare on purpose: ibtn() falls back to prefixing a coloured circle
-    when the running aiogram rejects its style kwarg, and this label has to
-    reach the channel exactly as written.
+    It goes through ibtn like every other button so it picks up the success
+    style. Where the running Telegram build has no styled buttons, ibtn falls
+    back to prefixing a 🟢 - the same request answered a plainer way, so the
+    button reads green either way.
     """
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text=CHANNEL_POST_LABEL, url=link)]]
+        inline_keyboard=[[ibtn(CHANNEL_POST_LABEL, url=link, style=SUCCESS)]]
     )
 
 
